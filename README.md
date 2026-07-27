@@ -1,6 +1,7 @@
 <h1 align="center">
   <img src="assets/images/CosmorphSplash.webp" alt="Cosmorph Logo Splash" width="100%" />
 </h1>
+
 ---
 
 ***A procedural cosmic background engine. Soothing, beautiful, deep-space scenes that gradually drift and evolve, so you can gaze into the vastness of space from the comfort of your own home. No telescope required.***
