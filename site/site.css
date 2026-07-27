@@ -26,7 +26,7 @@
     --bg: oklch(0 0 0);
     --ink: oklch(0.95 0.004 250);
     --muted: oklch(0.7 0.012 250);
-    /* Floor is set by the 14px footer text needing 4.5:1 on true black, not by taste */
+    /* Floor is set by the footer text needing 4.5:1 on true black, not by taste */
     --faint: oklch(0.63 0.014 250);
 
     /* OIII at 500.7nm is the emission line that makes real nebulae read teal */
@@ -43,7 +43,7 @@
     --wordmark: clamp(2.75rem, 1.4rem + 6.2vw, 5.75rem);
 
     --gutter: clamp(1.25rem, 5vw, 4rem);
-    --shell: 68rem;
+    --shell: 69rem;
 
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -93,7 +93,7 @@
     font-family: var(--font-display);
     font-weight: 400;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.15em;
     line-height: 1.1;
     text-wrap: balance;
   }
@@ -133,16 +133,21 @@
     block-size: 100%;
   }
 
-  /* Sits under the canvas so the deep field has depth before a single star draws */
-  .hero::before {
-    content: "";
+  /* Black veil over the canvas: loads and seed swaps fade this, never the
+     canvas itself, which repaints unpredictably around context creation */
+  .hero__veil {
     position: absolute;
     inset: 0;
     z-index: var(--z-sky);
-    background:
-      radial-gradient(60% 45% at 22% 18%, oklch(0.35 0.08 205 / 0.3), transparent 70%),
-      radial-gradient(55% 50% at 82% 72%, oklch(0.32 0.1 320 / 0.22), transparent 72%),
-      radial-gradient(90% 70% at 50% 55%, oklch(0.16 0.03 260 / 0.55), transparent 78%);
+    background: oklch(0 0 0);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 1s ease-in-out;
+  }
+  .hero__veil.is-dark { opacity: 1; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hero__veil { transition: none; }
   }
 
   /* Keeps the copy legible over whatever the sky is doing behind it */
@@ -192,7 +197,7 @@
   .wordmark {
     font-size: var(--wordmark);
     letter-spacing: 0.1em;
-    /* Tracking adds a trailing gap after the last letter; pull it back so the word centres optically */
+    /* Tracking adds a trailing gap after the last letter; pull it back so the word centers optically */
     margin-inline-end: -0.1em;
   }
 
@@ -220,8 +225,10 @@
     border-radius: 6px;
     background: oklch(0 0 0 / 0.4);
     color: var(--ink);
+    font-family: inherit;
     font-size: 0.95rem;
     text-decoration: none;
+    cursor: pointer;
     transition:
       border-color 0.25s var(--ease-out),
       color 0.25s var(--ease-out),
@@ -229,12 +236,6 @@
   }
 
   .btn:hover { border-color: var(--oiii); color: var(--oiii); }
-
-  .btn--primary {
-    border-color: var(--oiii);
-    color: var(--oiii);
-  }
-  .btn--primary:hover { background: oklch(0.82 0.13 178 / 0.14); }
 
   /* Sized in em so the mark tracks the label instead of pinning itself to a pixel */
   .btn__mark {

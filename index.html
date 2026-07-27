@@ -4,16 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cosmorph</title>
-<meta name="description" content="A procedurally generated cosmic background engine. Deep-space scenes that drift and change on a clock measured in hours, built for OLED.">
+<meta name="description" content="A procedural cosmic background engine. Soothing, beautiful, deep-space scenes that gradually drift and evolve.">
 <meta name="theme-color" content="#000000">
 
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://cosmorph.app/">
 <meta property="og:title" content="Cosmorph">
-<meta property="og:description" content="A procedurally generated cosmic background engine, built for OLED.">
+<meta property="og:description" content="A procedural cosmic background engine. Soothing, beautiful deep-space scenes that gradually drift and evolve.">
 <meta name="twitter:card" content="summary_large_image">
 
+<link rel="icon" href="/assets/favicon.ico" sizes="32x32">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <link rel="preload" href="/assets/fonts/Offside-Regular.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/Outfit-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/site/site.css">
@@ -24,13 +26,15 @@
 
 <header class="hero">
   <canvas class="hero__sky" id="sky" aria-hidden="true"></canvas>
+  <div class="hero__veil is-dark" id="veil" aria-hidden="true"></div>
 
   <div class="hero__body">
     <h1 class="wordmark">Cosmorph</h1>
-    <p class="hero__line">A procedurally generated cosmic background engine. Soothing, beautiful deep-space scenes that gradually drift and change.</p>
+    <p class="hero__line">A procedural cosmic background engine. Soothing, beautiful deep-space scenes that gradually drift and evolve.</p>
 
     <nav class="actions" aria-label="Primary">
-      <a class="btn btn--primary" href="/firmament/">Open Firmament</a>
+      <button class="btn" id="reroll" type="button">Reroll Cosmos</button>
+      <a class="btn" href="/firmament/">Open Firmament</a>
       <a class="btn" href="https://github.com/XYAgainAgain/Cosmorph">
         <svg class="btn__mark" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
           <path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/>
@@ -50,27 +54,36 @@
 <main id="about" class="about">
   <div class="about__grid">
     <section class="note">
-      <h2 class="note__title">Cosmic Numbers</h2>
-      <p>One integer generates an entire sky. The same seed renders the same scene everywhere, so you can hand your celestial creations to others.</p>
+      <h2 class="note__title">Space Math</h2>
+      <p>One integer generates an entire sky. The same seed renders the same scene everywhere, so you can share your celestial creations with others and revel in the majesty of space together.</p>
     </section>
 
     <section class="note">
-      <h2 class="note__title">Slow and Steady</h2>
-      <p>Nebulae billow, shells expand, and shadows sweep across dust. The cosmos run slow enough that you'll notice changes without ever catching it happen.</p>
+      <h2 class="note__title">Slow & Steady</h2>
+        <p>Nebulae billow, expand, and contract naturally, shadows sweep across volumetric space dust, and stars glitter everywhere. The <b>cos</b>mos <b>morph</b> (that's the name, see?) slowly, but quick enough that you'll live to see the outcome.</p>
     </section>
 
     <section class="note">
-      <h2 class="note__title">Primed for OLED</h2>
-      <p>Everything is smooth and vibrant, no matter how void-black your pixels are. Looks best on OLED panels, though, for sure.</p>
+      <h2 class="note__title">Lovely on OLED</h2>
+      <p>Everything is smooth and vibrant, no matter how void-black or H-alpha pink your pixels are. Looks best on OLED panels, though, for sure. The larger the screen, the more starscape you'll see.</p>
     </section>
   </div>
 </main>
 
 <footer class="foot">
-  <p class="foot__status">In development. Windows and Android planned.</p>
-  <p class="foot__by">Built by <a href="https://github.com/XYAgainAgain">Sam</a></p>
+  <p class="foot__status">In development. Windows, Linux, & Android planned. Might do macOS later.</p>
+  <p class="foot__by">Sprung fully-formed from <a href="https://tkb.band/">Sam Atwood</a>'s brow.</p>
 </footer>
 
-<script src="/site/starfield.js" type="module"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/assets/vendor/three/three.webgpu.min.js",
+    "three/webgpu": "/assets/vendor/three/three.webgpu.min.js",
+    "three/tsl": "/assets/vendor/three/three.tsl.min.js"
+  }
+}
+</script>
+<script src="/site/sky.js" type="module"></script>
 </body>
 </html>

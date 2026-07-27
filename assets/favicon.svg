@@ -1,9 +1,43 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" fill="#000"/>
-  <circle cx="16" cy="16" r="9" fill="none" stroke="#5fe6d2" stroke-width="1.6" opacity="0.85"/>
-  <circle cx="16" cy="16" r="3.1" fill="#dff7f2"/>
-  <circle cx="6.5" cy="7" r="1" fill="#dff7f2" opacity="0.9"/>
-  <circle cx="26" cy="9" r="0.8" fill="#bcd0ff" opacity="0.8"/>
-  <circle cx="24.5" cy="25" r="1.1" fill="#ffd79a" opacity="0.85"/>
-  <circle cx="7" cy="24.5" r="0.7" fill="#dff7f2" opacity="0.7"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <!-- The C is the actual Offside glyph outline, extracted from the title font -->
+    <path id="c" d="M180 607V133Q180 95 218.5 75.0Q257 55 330 55Q473 55 473 133V205Q473 228 513 228Q553 228 553 205V143Q553 66 496.5 25.5Q440 -15 330 -15Q218 -15 159.0 26.0Q100 67 100 143V597Q100 674 159.0 714.5Q218 755 330 755Q440 755 496.5 714.5Q553 674 553 597V535Q553 512 513 512Q473 512 473 535V607Q473 685 330 685Q257 685 218.5 665.0Q180 645 180 607Z"/>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <filter id="tight" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+    <!-- Needle spike: bright at the core, warming toward a transparent tip -->
+    <linearGradient id="ray" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.15" stop-color="#fff" stop-opacity="0.75"/>
+      <stop offset="0.55" stop-color="#ffd9b3" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#ff9a4d" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="core">
+      <stop offset="0" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.4" stop-color="#ffe8d4" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#ff9a4d" stop-opacity="0"/>
+    </radialGradient>
+    <path id="wedge" d="M32 31.25 L63.5 31.96 L63.5 32.04 L32 32.75 Z" fill="url(#ray)"/>
+  </defs>
+
+  <!-- Ha-orange glow under the C, wide then tight -->
+  <g transform="translate(8.49 58.64) scale(0.072 -0.072)">
+    <use href="#c" fill="#ff5a1a" stroke="#ff5a1a" stroke-width="80" filter="url(#soft)" opacity="0.85"/>
+    <use href="#c" fill="#ff7a2b" stroke="#ff7a2b" stroke-width="18" filter="url(#tight)" opacity="0.75"/>
+    <use href="#c" fill="#fff"/>
+  </g>
+
+  <!-- Center star: four needle spikes + pinpoint core, tilted to match the
+       sky's diffraction angle -->
+  <g transform="rotate(20 32 32)">
+    <use href="#wedge"/>
+    <use href="#wedge" transform="rotate(90 32 32)"/>
+    <use href="#wedge" transform="rotate(180 32 32)"/>
+    <use href="#wedge" transform="rotate(270 32 32)"/>
+    <circle cx="32" cy="32" r="5.5" fill="url(#core)"/>
+    <circle cx="32" cy="32" r="1.15" fill="#fff"/>
+  </g>
 </svg>
