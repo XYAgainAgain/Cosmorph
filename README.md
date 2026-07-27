@@ -4,11 +4,11 @@
 
 ***A procedural cosmic background engine. Soothing, beautiful, deep-space scenes that gradually drift and evolve, so you can gaze into the vastness of space from the comfort of your own home. No telescope required.***
 
-<p align="center">To see it in action, please visit the <a href="https://cosmorph.app/">Cosmorph homepage!</a></p>
+<p align="center">To see it in action, please visit the <a href="https://cosmorph.app/"><b>Cosmorph homepage!</b></a></p>
 
 ---
 
-***Cosmorph*** sprang fully-formed from the brow of Sam Atwood, who can't afford a fancy telescope or camera or anything like that, but thoroughly enjoys browsing the [Astrophotography subreddit](https://reddit.com/r/astrophotography/) and [AstroBin](https://app.astrobin.com/) and decided to bring space down to him in a different fashion. It's designed to be enjoyed by anyone, endlessly configurable, and astronomically accurate (unless you'd rather it not be, which is also supported).
+***Cosmorph*** sprang ~~fully~~ semi-formed from the brow of Sam Atwood, who can't afford a fancy telescope or camera or anything like that, but thoroughly enjoys browsing the [astrophotography subreddit](https://reddit.com/r/astrophotography/) and [AstroBin](https://app.astrobin.com/) and decided to bring space down to him in a different fashion. It's designed to be enjoyed by anyone, endlessly configurable, and astronomically accurate (unless you'd rather it not be, which is also supported).
 
 <p align="center">✨🧡🌌</p>
 
