@@ -112,8 +112,27 @@ async function veil(dark) {
   await new Promise((resolve) => setTimeout(resolve, 1060));
 }
 
+/* ?demo= swaps the scene without touching the hero config, and the module only
+   loads when asked for, so the homepage never fetches it */
+async function sceneFor(seed) {
+  const name = params.get('demo');
+  if (!name) return heroScene(seed);
+  /* A failed import must fall back to the hero here, not tumble into boot()'s
+     catch, which would blame the engine and swap in the static placeholder */
+  try {
+    const { demoScene } = await import('/site/demo-scenes.js');
+    const aspect = window.innerWidth / Math.max(window.innerHeight, 1);
+    const scene = demoScene(name, seed, aspect);
+    if (!scene) console.warn(`Cosmorph: no demo scene named "${name}", using the hero.`);
+    return scene ?? heroScene(seed);
+  } catch (err) {
+    console.warn('Cosmorph: demo scenes failed to load, using the hero.', err);
+    return heroScene(seed);
+  }
+}
+
 async function startEngine(seed, forceGL) {
-  const config = heroScene(seed);
+  const config = await sceneFor(seed);
   sky = await tryEngine(config, forceGL);
   clock = createEvolutionClock(`cosmorph:T:${seed}`);
   evolutionRate = config.evolution.rate;

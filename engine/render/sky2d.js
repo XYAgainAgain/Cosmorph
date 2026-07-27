@@ -3,12 +3,14 @@
    entity-array scene config; layer shaders never output RGB directly. */
 
 import * as THREE from 'three/webgpu';
-import { uniform, uv, vec2 } from 'three/tsl';
+import { uniform, uv, vec2, vec4 } from 'three/tsl';
 import { createRng, deriveSeed } from '../core/rng.js';
 import { generateBrightStars } from '../entities/stars.js';
 import { buildBrightStarNodes } from '../shaders/tsl/stars.js';
 import { buildEmissionNodes } from '../shaders/tsl/nebula.js';
 import { buildContinuumNodes } from '../shaders/tsl/dust.js';
+import { buildReflectionNodes, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
+import { buildFilamentNodes, FILAMENT_DEFAULTS } from '../shaders/tsl/filaments.js';
 import { buildComposeNodes } from '../shaders/tsl/compose.js';
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
@@ -34,6 +36,23 @@ const DEFAULTS = {
     spikeThreshold: 0.5, gain: 1.0,
   },
   darkDust: { freq: 3.2, threshold: 0.55, softness: 0.12, tau: 2.8, morphRate: 0.18 },
+  globules: {
+    freq: 3.2, radius: 0.34, fill: 0.6, core: 0.45, elong: 2.4, taper: 0.9,
+    cometary: true, detail: 2.4, morphRate: 0.1,
+    eroFreq: 5.0, eroFall: 0.6, erode: 0.3,
+    threshold: 0.28, softness: 0.1, tau: 3.2,
+    ionSrc: [1.05, 0.8], ionRadius: 0.9, hotLo: 0.5, hotHi: 0.85,
+    rimEps: 0.006, rimFacing: 6.0, rimAt: 0.35, rimW: 0.22, rimHalo: 0.25,
+    rimKnotFreq: 12.0, rimKnot: 0.6, rimGain: 1.2, rimOiii: 0.5, rimSii: 0.15,
+  },
+  /* Tighter than the module's own defaults: a shallow falloff over a 0.26 sky
+     unit radius washes the whole frame instead of lighting one cloud. */
+  reflection: {
+    ...REFLECTION_DEFAULTS,
+    radius: [0.14, 0.17, 0.22], falloff: [2.6, 2.3, 1.9],
+    filFreq: 14.0, filAniso: 2.5, filAmp: 0.35,
+  },
+  filaments: { ...FILAMENT_DEFAULTS },
 };
 
 function offsetFrom(seed, salt) {
@@ -50,12 +69,33 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   renderer.setClearColor(0x000000, 1);
   await renderer.init();
 
-  const byType = Object.fromEntries(config.entities.map((e) => [e.type, e]));
+  /* One entity per type in v1; Firmament's renderer is what batches by cost
+     class, so a duplicate is dropped loudly rather than half-rendered. */
+  const byType = {};
+  for (const e of config.entities) {
+    if (byType[e.type]) {
+      console.warn(`Cosmorph: sky2d takes one "${e.type}" entity; the duplicate was dropped.`);
+      continue;
+    }
+    byType[e.type] = e;
+  }
+
   const P = {
     emission: { ...DEFAULTS.emission, ...byType.emission?.params },
     ifn: { ...DEFAULTS.ifn, ...byType.ifn?.params },
     stars: { ...DEFAULTS.stars, ...byType.stars?.params },
     darkDust: { ...DEFAULTS.darkDust, ...byType.darkDust?.params },
+    globules: { ...DEFAULTS.globules, ...byType.globules?.params },
+    reflection: { ...DEFAULTS.reflection, ...byType.reflection?.params },
+    filaments: { ...DEFAULTS.filaments, ...byType.filaments?.params },
+  };
+
+  /* Absent types contribute no uniforms, nodes, or passes, so a scene without
+     them generates the shader it generated before they existed. */
+  const has = {
+    globules: !!byType.globules,
+    reflection: !!byType.reflection,
+    filaments: !!byType.filaments,
   };
 
   const paletteRows = PALETTES[config.palette] ?? PALETTES.hooNatural;
@@ -123,10 +163,122 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uDepthCont: uniform(byType.ifn?.depth ?? 0.12),
     uDepthWisp: uniform(byType.darkDust?.depth ?? 0.55),
   };
+
+  if (has.globules) {
+    const g = P.globules;
+    Object.assign(U, {
+      uGlobFreq: uniform(g.freq),
+      uGlobOff: uniform(offsetFrom(byType.globules.seed ?? config.seed, 47)),
+      uGlobRadius: uniform(Math.min(g.radius, 0.6)),
+      uGlobFill: uniform(g.fill),
+      uGlobCore: uniform(g.core),
+      /* radius × elong above 1 pushes the tail outside the 3×3 cell search and
+         truncates it; per-clump jitter reaches 1.45× radius, hence the factor */
+      uGlobElong: uniform(Math.min(g.elong, 1 / Math.max(g.radius * 1.45, 1e-3))),
+      uGlobTaper: uniform(g.taper),
+      uGlobDetail: uniform(g.detail),
+      uGlobMorph: uniform(g.morphRate),
+      uGlobEroFreq: uniform(g.eroFreq),
+      uGlobEroFall: uniform(Math.max(g.eroFall, 1e-3)),
+      uGlobErode: uniform(g.erode),
+      uGlobTh: uniform(g.threshold),
+      uGlobSoft: uniform(Math.max(g.softness, 0.001)),
+      uGlobTau: uniform(g.tau),
+      uGlobIonSrc: uniform(new THREE.Vector2(0, 0)),
+      uGlobIonR2: uniform(Math.max(g.ionRadius ** 2, 1e-4)),
+      uGlobHotLo: uniform(g.hotLo),
+      uGlobHotHi: uniform(Math.max(g.hotHi, g.hotLo + 0.001)),
+      uRimEps: uniform(Math.max(g.rimEps, 1e-4)),
+      uRimFacing: uniform(Math.max(g.rimFacing, 0.001)),
+      uRimAt: uniform(g.rimAt),
+      uRimW: uniform(Math.max(g.rimW, 0.001)),
+      uRimHalo: uniform(g.rimHalo),
+      uRimKnotFreq: uniform(g.rimKnotFreq),
+      uRimKnot: uniform(g.rimKnot),
+      uRimGain: uniform(g.rimGain),
+      uRimOiii: uniform(g.rimOiii),
+      uRimSii: uniform(g.rimSii),
+      uDepthGlob: uniform(byType.globules.depth ?? 0.6),
+    });
+  }
+
+  if (has.reflection) {
+    const r = P.reflection;
+    Object.assign(U, {
+      uReflStar: uniform(new THREE.Vector2(0, 0)),
+      uReflLum: uniform(r.lum),
+      uReflRadius: uniform(new THREE.Vector3(...r.radius)),
+      uReflFalloff: uniform(new THREE.Vector3(...r.falloff)),
+      uReflTint: uniform(new THREE.Vector3(...r.tint)),
+      uReflWarm: uniform(new THREE.Vector3(...r.warm)),
+      uReflWarmR: uniform(Math.max(r.warmR, 0.001)),
+      uReflWarmAmt: uniform(r.warmAmt),
+      uReflFreq: uniform(r.freq),
+      uReflMorph: uniform(r.morph),
+      uReflDustLo: uniform(r.dustLo),
+      uReflDustHi: uniform(Math.max(r.dustHi, r.dustLo + 0.001)),
+      uReflCarve: uniform(r.carve),
+      uReflFloor: uniform(r.floor),
+      uReflFilFreq: uniform(r.filFreq),
+      uReflFilAniso: uniform(r.filAniso),
+      uReflFilIn: uniform(Math.max(r.filIn, 0.001)),
+      uReflFilOut: uniform(Math.max(r.filOut, Math.max(r.filIn, 0.001) + 0.001)),
+      uReflFilSharp: uniform(Math.max(r.filSharp, 0)),
+      uReflFilAmp: uniform(r.filAmp),
+      uReflFilHa: uniform(r.filHa),
+      uReflTau: uniform(r.tau),
+      uReflTauSpread: uniform(Math.max(r.tauSpread, 1e-3)),
+      uReflOff: uniform(offsetFrom(byType.reflection.seed ?? config.seed, 53)),
+      uDepthRefl: uniform(byType.reflection.depth ?? 0.35),
+    });
+  }
+
+  if (has.filaments) {
+    const f = P.filaments;
+    Object.assign(U, {
+      uArcCenter: uniform(new THREE.Vector2(0, 0)),
+      uArcRot: uniform(f.rot),
+      uArcSquash: uniform(Math.max(f.squash, 0.05)),
+      uArcRadius: uniform(Math.max(f.radius, 1e-3)),
+      uArcExpand: uniform(f.expand),
+      uArcThick: uniform(Math.max(f.thick, 1e-4)),
+      uArcPhase: uniform(f.phase),
+      uArcHalf: uniform(Math.min(Math.max(f.half, 0), Math.PI)),
+      uArcSoft: uniform(Math.max(f.soft, 0.001)),
+      uFilFreq: uniform(f.freq),
+      uFilAniso: uniform(f.aniso),
+      uFilWarp: uniform(f.warp),
+      uFilKink: uniform(f.kink),
+      uFilSep: uniform(f.sep),
+      uFilSharp: uniform(Math.max(f.sharp, 0)),
+      uFilBraid: uniform(Math.min(Math.max(f.braid, 0), 1)),
+      uFilTh: uniform(f.threshold),
+      uFilSoft: uniform(Math.max(f.softness, 0.001)),
+      uFilPatch: uniform(Math.min(Math.max(f.patch, 0), 1)),
+      uFilHaze: uniform(Math.max(f.haze, 0)),
+      uFilHazeW: uniform(Math.max(f.hazeW, 1)),
+      uFilLace: uniform(f.lace),
+      uFilGain: uniform(f.gain),
+      uFilHa: uniform(f.ha),
+      uFilOiii: uniform(f.oiii),
+      uFilSii: uniform(f.sii),
+      uFilMorph: uniform(f.morphRate),
+      uFilOff: uniform(offsetFrom(byType.filaments.seed ?? config.seed, 59)),
+      uDepthFil: uniform(byType.filaments.depth ?? 0.25),
+    });
+  }
+
   /* Layer passes render an overscanned domain so compose can offset without
      sampling past an RT edge */
   const uvE = uv().sub(0.5).mul(U.uMarginScale).add(0.5);
   const skyU = uvE.mul(vec2(U.uAspect, 1.0));
+
+  /* An entity riding a shared RT still parallaxes at its own depth: pre-shift
+     its domain by the difference, which the overscan margin already covers. */
+  function skyAtDepth(depthU, rtDepthU) {
+    const par = U.uParallax.mul(vec2(1.0, -1.0)).mul(depthU.sub(rtDepthU));
+    return uvE.sub(par.div(U.uResolution)).mul(vec2(U.uAspect, 1.0));
+  }
 
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
   camera.position.z = 1;
@@ -151,10 +303,30 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const contRT = new THREE.RenderTarget(2, 2, rtOpts);
   const brightRT = new THREE.RenderTarget(2, 2, rtOpts);
 
-  const lineScene = fullscreenPass(buildEmissionNodes(skyU, U));
-  const contScene = fullscreenPass(buildContinuumNodes(skyU, U.uPxPerUnit, U));
+  /* The glow and its shock filaments are one object in two RTs, so each half
+     pre-shifts to its own RT depth in order to land together on screen. */
+  const reflLine = has.reflection
+    ? buildReflectionNodes(skyAtDepth(U.uDepthRefl, U.uDepthLine), U).line : null;
+  const reflCont = has.reflection
+    ? buildReflectionNodes(skyAtDepth(U.uDepthRefl, U.uDepthCont), U).continuum : null;
+  const filLine = has.filaments
+    ? buildFilamentNodes(skyAtDepth(U.uDepthFil, U.uDepthLine), U).line : null;
+
+  let lineNode = buildEmissionNodes(skyU, U);
+  if (reflLine) lineNode = lineNode.add(vec4(reflLine, 0.0));
+  if (filLine) lineNode = lineNode.add(vec4(filLine, 0.0));
+
+  let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, U);
+  if (reflCont) contNode = contNode.add(vec4(reflCont, 0.0));
+
+  const lineScene = fullscreenPass(lineNode);
+  const contScene = fullscreenPass(contNode);
   const composeScene = fullscreenPass(buildComposeNodes({
     lineTex: lineRT.texture, contTex: contRT.texture, brightTex: brightRT.texture, U,
+    layers: {
+      globules: has.globules ? { cometary: P.globules.cometary !== false } : null,
+      reflection: has.reflection,
+    },
   }));
 
   /* Bright tier: instanced quads, rebuilt on resize because sizes are in
@@ -212,6 +384,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     U.uMarginScale.value.set(1 + (2 * margin) / w, 1 + (2 * margin) / h);
     U.uPxPerUnit.value = h / U.uMarginScale.value.y;
     U.uIonSrc.value.set(P.emission.ionSrc[0] * aspect, P.emission.ionSrc[1]);
+    /* Sky x spans [0, aspect], so framed positions scale or they slide toward
+       the left edge as the canvas widens */
+    U.uGlobIonSrc?.value.set(P.globules.ionSrc[0] * aspect, P.globules.ionSrc[1]);
+    U.uReflStar?.value.set(P.reflection.star[0] * aspect, P.reflection.star[1]);
+    U.uArcCenter?.value.set(P.filaments.center[0] * aspect, P.filaments.center[1]);
 
     if (brightMesh) {
       brightMesh.geometry.dispose();

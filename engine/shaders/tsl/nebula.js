@@ -4,9 +4,8 @@
 import { Fn, float, vec3, vec4, dot, smoothstep } from 'three/tsl';
 import { fbm3o2, fbm3o4, fbm3o5 } from './noise.js';
 
-/* Structure at three scales, not more amplitude: an illumination gradient
-   from the ionizing source, one level of domain warp, and foreground
-   striations applied as slight extinction. */
+/* Structure at three scales, not more amplitude: illumination gradient from
+   the ionizing source, one domain warp, striations as slight extinction. */
 export function buildEmissionNodes(skyU, U) {
   return Fn(() => {
     const zEvo = U.uTev.mul(U.uMorphRate);

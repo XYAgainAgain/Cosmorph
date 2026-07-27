@@ -79,6 +79,32 @@ export const fbm3o2 = /*@__PURE__*/ makeFbm3(2);
 export const fbm3o4 = /*@__PURE__*/ makeFbm3(4);
 export const fbm3o5 = /*@__PURE__*/ makeFbm3(5);
 
+/* Octave amplitude sums, for rescaling raw fbm to [0,1]; the 2-octave mean */
+export const FBM2_NORM = 1 / 0.75;
+export const FBM4_NORM = 1 / 0.9375;
+export const FBM5_NORM = 1 / 0.96875;
+export const FBM2_MID = 0.375;
+
+/* Domain bias for cell grids centered on a point: indices go negative and
+   outrun hash3's internal +1024, wrapping the uint cast. Grids add this first. */
+export const CELL_BIAS = 65536.0;
+
+/* Ridged noise in [0,1]: 1 - |2n-1| turns mid-level iso-contours into thin
+   crests, so n must be normalized or the crest misses the fbm's mean. */
+export function makeRidged(octaves) {
+  /* Reuse the shared fbm instances or the shader emits duplicate fbm bodies */
+  const shared = { 2: fbm3o2, 4: fbm3o4, 5: fbm3o5 };
+  const fbm = shared[octaves] ?? makeFbm3(octaves);
+  let norm = 0;
+  for (let k = 1; k <= octaves; k++) norm += 0.5 ** k;
+  const inv = 1 / norm;
+  return Fn(([p, sharp]) => {
+    const n = fbm(p).mul(inv);
+    const r = float(1).sub(n.mul(2.0).sub(1.0).abs());
+    return r.max(1e-4).pow(sharp.max(0.0));
+  });
+}
+
 /* Jimenez interleaved gradient noise. Takes pixel coordinates, never uv. */
 export const ign = /*@__PURE__*/ Fn(([px]) => {
   return fract(mul(52.9829189, fract(dot(px, vec2(0.06711056, 0.00583715)))));
