@@ -1,0 +1,19 @@
+# The Usual
+node_modules/
+
+# Dev Stuff (no peeking)
+.dev/
+
+# Build Stuff (actual output via GitHub Releases)
+dist/
+build/
+platforms/*/build/
+platforms/*/dist/
+*.apk
+*.aab
+*.keystore
+
+# Secrets Ssshhhh ;)
+.env
+.env.*
+!.env.example

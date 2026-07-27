@@ -1,0 +1,319 @@
+@layer reset, tokens, base, layout, components;
+
+@layer tokens {
+  @font-face {
+    font-family: "Offside";
+    src: url("/assets/fonts/Offside-Regular.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: "Outfit";
+    /* Plain woff2, not woff2-variations: the legacy format string is rejected outright
+       by some engines, and a variable font loads fine declared this way */
+    src: url("/assets/fonts/Outfit-Variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  :root {
+    color-scheme: dark;
+
+    /* True black is the product doctrine, not a style choice: OLED pixels at #000 are off */
+    --bg: oklch(0 0 0);
+    --ink: oklch(0.95 0.004 250);
+    --muted: oklch(0.7 0.012 250);
+    /* Floor is set by the 14px footer text needing 4.5:1 on true black, not by taste */
+    --faint: oklch(0.63 0.014 250);
+
+    /* OIII at 500.7nm is the emission line that makes real nebulae read teal */
+    --oiii: oklch(0.82 0.13 178);
+    --edge: oklch(1 0 0 / 0.13);
+    --edge-strong: oklch(1 0 0 / 0.28);
+
+    --font-display: "Offside", ui-sans-serif, system-ui, sans-serif;
+    --font-body: "Outfit", ui-sans-serif, system-ui, sans-serif;
+
+    --step-0: clamp(1rem, 0.96rem + 0.2vw, 1.125rem);
+    --step-1: clamp(1.35rem, 1.24rem + 0.55vw, 1.75rem);
+    --step-2: clamp(1.5rem, 1.34rem + 0.8vw, 2rem);
+    --wordmark: clamp(2.75rem, 1.4rem + 6.2vw, 5.75rem);
+
+    --gutter: clamp(1.25rem, 5vw, 4rem);
+    --shell: 68rem;
+
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    --z-sky: 0;
+    --z-content: 1;
+    --z-skip: 10;
+  }
+}
+
+@layer reset {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body, h1, h2, p, figure { margin: 0; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  :where(a) { color: inherit; }
+
+  :where(img, svg, canvas) { display: block; max-inline-size: 100%; }
+
+  :focus-visible {
+    outline: 2px solid var(--oiii);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+}
+
+@layer base {
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: var(--step-0);
+    /* Light type on black reads thinner than it measures; 350 holds up where 300 fades */
+    font-weight: 350;
+    line-height: 1.7;
+    /* Offside ships one weight; synthesis would smear it into fake bolds */
+    font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    line-height: 1.1;
+    text-wrap: balance;
+  }
+
+  p { text-wrap: pretty; }
+
+  .skip-link {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 50%;
+    translate: -50% -110%;
+    z-index: var(--z-skip);
+    padding: 0.7em 1.4em;
+    background: var(--ink);
+    color: var(--bg);
+    text-decoration: none;
+    transition: translate 0.2s var(--ease-out);
+  }
+  .skip-link:focus-visible { translate: -50% 0; }
+}
+
+@layer layout {
+  .hero {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-block-size: 100svb;
+    padding: calc(var(--gutter) * 1.5) var(--gutter);
+    overflow: clip;
+  }
+
+  .hero__sky {
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-sky);
+    inline-size: 100%;
+    block-size: 100%;
+  }
+
+  /* Sits under the canvas so the deep field has depth before a single star draws */
+  .hero::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-sky);
+    background:
+      radial-gradient(60% 45% at 22% 18%, oklch(0.35 0.08 205 / 0.3), transparent 70%),
+      radial-gradient(55% 50% at 82% 72%, oklch(0.32 0.1 320 / 0.22), transparent 72%),
+      radial-gradient(90% 70% at 50% 55%, oklch(0.16 0.03 260 / 0.55), transparent 78%);
+  }
+
+  /* Keeps the copy legible over whatever the sky is doing behind it */
+  .hero__body::before {
+    content: "";
+    position: absolute;
+    inset: -8% -12%;
+    z-index: -1;
+    background: radial-gradient(closest-side, oklch(0 0 0 / 0.72), transparent);
+    pointer-events: none;
+  }
+
+  .hero__body {
+    position: relative;
+    z-index: var(--z-content);
+    max-inline-size: 46ch;
+    text-align: center;
+  }
+
+  .about {
+    padding: clamp(4rem, 12vw, 9rem) var(--gutter);
+    border-block-start: 1px solid var(--edge);
+  }
+
+  .about__grid {
+    max-inline-size: var(--shell);
+    margin-inline: auto;
+    display: grid;
+    gap: clamp(2.5rem, 5vw, 4rem);
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  }
+
+  .foot {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem 2rem;
+    max-inline-size: var(--shell);
+    margin-inline: auto;
+    padding: 2rem var(--gutter) 3rem;
+    color: var(--faint);
+    font-size: 0.875rem;
+  }
+}
+
+@layer components {
+  .wordmark {
+    font-size: var(--wordmark);
+    letter-spacing: 0.1em;
+    /* Tracking adds a trailing gap after the last letter; pull it back so the word centres optically */
+    margin-inline-end: -0.1em;
+  }
+
+  .hero__line {
+    margin-block-start: 1.5rem;
+    color: var(--muted);
+    font-size: var(--step-1);
+    line-height: 1.55;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-block-start: 2.5rem;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55em;
+    padding: 0.75em 1.5em;
+    border: 1px solid var(--edge-strong);
+    border-radius: 6px;
+    background: oklch(0 0 0 / 0.4);
+    color: var(--ink);
+    font-size: 0.95rem;
+    text-decoration: none;
+    transition:
+      border-color 0.25s var(--ease-out),
+      color 0.25s var(--ease-out),
+      background-color 0.25s var(--ease-out);
+  }
+
+  .btn:hover { border-color: var(--oiii); color: var(--oiii); }
+
+  .btn--primary {
+    border-color: var(--oiii);
+    color: var(--oiii);
+  }
+  .btn--primary:hover { background: oklch(0.82 0.13 178 / 0.14); }
+
+  /* Sized in em so the mark tracks the label instead of pinning itself to a pixel */
+  .btn__mark {
+    flex: none;
+    inline-size: 1.05em;
+    block-size: auto;
+  }
+
+  .hero__scroll {
+    position: absolute;
+    inset-block-end: clamp(1.25rem, 3vh, 2.5rem);
+    inset-inline: 0;
+    z-index: var(--z-content);
+    margin-inline: auto;
+    inline-size: max-content;
+    padding: 0.5rem;
+    color: var(--faint);
+    transition: color 0.25s var(--ease-out);
+  }
+  .hero__scroll:hover { color: var(--oiii); }
+
+  .hero__scroll svg {
+    inline-size: 0.75rem;
+    block-size: auto;
+  }
+
+  .note__title {
+    font-size: var(--step-2);
+    color: var(--ink);
+  }
+
+  .note p {
+    margin-block-start: 0.9rem;
+    max-inline-size: 42ch;
+    color: var(--muted);
+  }
+
+  .foot a {
+    color: var(--muted);
+    text-decoration-color: var(--edge-strong);
+    text-underline-offset: 0.25em;
+  }
+  .foot a:hover { color: var(--oiii); }
+}
+
+@layer components {
+  @media (prefers-reduced-motion: no-preference) {
+    .hero__body > * {
+      animation: rise 0.9s var(--ease-out) both;
+      animation-delay: calc(var(--i, 0) * 110ms);
+    }
+    .hero__line { --i: 1; }
+    .actions { --i: 2; }
+
+    .hero__scroll svg {
+      animation: nudge 3.2s var(--ease-out) infinite;
+    }
+
+    @supports (animation-timeline: view()) {
+      .note {
+        animation: settle 0.8s var(--ease-out) both;
+        animation-timeline: view();
+        animation-range: entry 5% cover 22%;
+      }
+    }
+  }
+
+  @keyframes rise {
+    from { opacity: 0; translate: 0 0.85rem; }
+  }
+
+  /* Movement only, never opacity: a scroll timeline that never advances
+     (headless render, hidden tab, print) must still leave the text readable */
+  @keyframes settle {
+    from { translate: 0 1.25rem; }
+  }
+
+  @keyframes nudge {
+    0%, 62%, 100% { translate: 0 0; }
+    76% { translate: 0 0.3rem; }
+  }
+}
