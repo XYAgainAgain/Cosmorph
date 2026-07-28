@@ -83,7 +83,9 @@ export function buildBrightStarNodes(U) {
     vMisc.assign(vec4(iA.z, iB.w, iC.x, iC.w));
     vSpike.assign(iC.y);
 
-    const uvStar = vec2(iA.x.div(U.uAspect), iA.y);
+    /* Instance positions are absolute sky coords; the camera subtracts here so
+       a pan needs no buffer rewrite until the tile block itself moves. */
+    const uvStar = vec2(iA.x.sub(U.uCamera.x).div(U.uAspect), iA.y.sub(U.uCamera.y));
     const clip = uvStar.mul(2.0).sub(1.0);
     const cornerClip = corner.mul(iC.z).mul(2.0).div(U.uResolution);
     const parallaxClip = U.uParallax.mul(iA.w).mul(2.0).div(U.uResolution);

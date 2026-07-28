@@ -1,0 +1,722 @@
+@layer reset, tokens, themes, layout, panel, controls, responsive;
+
+@layer tokens {
+  @font-face {
+    font-family: "Offside";
+    src: url("/assets/fonts/Offside-Regular.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: "Outfit";
+    src: url("/assets/fonts/Outfit-Variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  :root {
+    color-scheme: dark;
+
+    /* True black is product doctrine, not a style choice: OLED pixels at #000 are off */
+    --bg: oklch(0 0 0);
+    --ink: oklch(0.95 0.004 250);
+    --muted: oklch(0.7 0.012 250);
+    /* Floor is set by 4.5:1 on true black, not by taste */
+    --faint: oklch(0.63 0.014 250);
+
+    --oiii: oklch(0.82 0.13 178);
+    --halpha: oklch(0.62 0.19 35);
+    --edge: oklch(1 0 0 / 0.13);
+    --edge-strong: oklch(1 0 0 / 0.28);
+
+    --glass: oklch(0 0 0 / 0.64);
+    --glass-deep: oklch(0 0 0 / 0.86);
+
+    /* Outfit runs heavier than the site's 350 on purpose: thin strokes on true
+       black shimmer and drop out on OLED, and this chrome is small text. */
+    --weight-body: 500;
+    --weight-small: 560;
+
+    --font-display: "Offside", ui-sans-serif, system-ui, sans-serif;
+    --font-body: "Outfit", ui-sans-serif, system-ui, sans-serif;
+
+    --panel-inline: min(27.5rem, calc(100vw - 2rem));
+    /* Jelly's small checkbox box is 28px; the lock column is sized to it so the
+       header glyph and the checkbox share one centre line */
+    --lock-col: 1.75rem;
+    --gap: 0.55rem;
+    --pad: 1rem;
+
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Inherited, so this reaches Jelly's shadow-DOM listboxes too, which is the
+       only way to reskin a scrollbar whose markup we do not own. */
+    scrollbar-color: var(--edge-strong) transparent;
+    scrollbar-width: thin;
+  }
+}
+
+@layer themes {
+  /* One theme per emission line; components only ever read --accent/--accent-2.
+     Colors match .dev/design-kit/themes.css. NII is absent: sRGB twin of Hα. */
+  :root {
+    --accent: var(--oiii);
+    --accent-2: var(--halpha);
+  }
+
+  [data-theme="halpha"] {
+    --accent: oklch(0.68 0.19 30);
+    --accent-2: var(--oiii);
+  }
+
+  [data-theme="hbeta"] {
+    --accent: oklch(0.85 0.11 215);
+    --accent-2: oklch(0.7 0.09 280);
+  }
+
+  [data-theme="sii"] {
+    --accent: oklch(0.6 0.2 22);
+    --accent-2: oklch(0.8 0.12 85);
+  }
+
+  [data-theme="heii"] {
+    --accent: oklch(0.75 0.13 250);
+    --accent-2: oklch(0.85 0.1 200);
+  }
+
+  /* The only theme allowed to re-tint the neutrals: dark adaptation */
+  [data-theme="night"] {
+    --accent: oklch(0.66 0.21 28);
+    --accent-2: oklch(0.55 0.17 28);
+    --ink: oklch(0.72 0.14 28);
+    --muted: oklch(0.6 0.11 28);
+    --faint: oklch(0.52 0.09 28);
+    --edge: oklch(0.5 0.15 28 / 0.25);
+    --edge-strong: oklch(0.55 0.16 28 / 0.45);
+  }
+}
+
+@layer reset {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  /* scrollbar-color inherits and scrollbar-width does not, so the width has to
+     reach every scroller by hand. The colour still rides down from :root. */
+  * { scrollbar-width: thin; }
+
+  body, h1, h2, p, ul, figure { margin: 0; }
+
+  ul { padding: 0; list-style: none; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  :where(img, svg, canvas) { display: block; max-inline-size: 100%; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+@layer layout {
+  .studio {
+    min-block-size: 100svb;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-weight: var(--weight-body);
+    font-size: 1rem;
+    line-height: 1.6;
+    /* Offside ships one weight; synthesis would smear it into fake bolds */
+    font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  .sky {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+  }
+
+  .sky__canvas {
+    position: absolute;
+    inset: 0;
+    inline-size: 100%;
+    block-size: 100%;
+  }
+
+  /* Every fade rides this div; canvases repaint unpredictably around context
+     creation, so they never animate themselves */
+  .veil {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    background: oklch(0 0 0);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.9s ease-in-out;
+  }
+  .veil.is-dark { opacity: 1; }
+}
+
+@layer panel {
+  .panel {
+    position: fixed;
+    z-index: 2;
+    inset-block: 1rem;
+    inset-inline-end: 1rem;
+    inline-size: var(--panel-inline);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    border: 1px solid var(--edge);
+    border-radius: 10px;
+    background: var(--glass);
+    /* brightness() in the backdrop rather than more alpha in the fill: the sky
+       stays visible through the glass while every text role still clears 4.5:1,
+       measured against a blown-out white core sitting directly behind it */
+    backdrop-filter: blur(16px) brightness(0.26) saturate(1.15);
+    overflow: clip;
+    transition: translate 0.45s var(--ease-out), opacity 0.3s var(--ease-out);
+  }
+
+  .panel.is-collapsed {
+    translate: calc(100% + 1.5rem) 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Night Vision dims the neutrals on purpose for dark adaptation, which costs
+     it the 4.5:1 floor against a bright sky. The glass takes the hit instead:
+     someone dark-adapting does not want the sky burning through the chrome. */
+  [data-theme="night"] .panel,
+  [data-theme="night"] .themebar {
+    background: oklch(0 0 0 / 0.86);
+    backdrop-filter: blur(16px) brightness(0.16) saturate(1.1);
+  }
+
+  .panel-tab {
+    position: fixed;
+    z-index: 2;
+    inset-block-start: 1rem;
+    inset-inline-end: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.45em;
+    padding: 0.55em 0.9em;
+    border: 1px solid var(--edge-strong);
+    border-radius: 999px;
+    background: var(--glass-deep);
+    backdrop-filter: blur(14px) brightness(0.26) saturate(1.1);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: border-color 0.25s var(--ease-out), color 0.25s var(--ease-out);
+  }
+  /* Author `display` beats the UA sheet's [hidden] rule whatever the specificity */
+  .panel-tab[hidden] { display: none; }
+  .panel-tab:hover { border-color: var(--accent); }
+  .panel-tab svg { inline-size: 0.85em; block-size: auto; }
+
+  .panel__head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.75rem var(--pad);
+    border-block-end: 1px solid var(--edge);
+  }
+
+  /* Offside has one weight and no bold behind it, so display text buys
+     legibility with size and lightness rather than stroke width */
+  .panel__title {
+    flex: 1;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 1.2rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    line-height: 1.1;
+    color: var(--ink);
+  }
+
+  .panel__body {
+    /* clip, not auto: Jelly paints its squish onto a canvas that overhangs the
+       host box, which would otherwise mean a permanent horizontal scrollbar */
+    overflow: clip auto;
+    overscroll-behavior: contain;
+    scrollbar-color: var(--edge-strong) transparent;
+    scrollbar-width: thin;
+  }
+
+  .panel__foot {
+    display: grid;
+    gap: 0.6rem;
+    padding: 0.75rem var(--pad) 0.85rem;
+    border-block-start: 1px solid var(--edge);
+    background: oklch(0 0 0 / 0.35);
+  }
+
+  .block {
+    padding: 0.7rem var(--pad) 0.9rem;
+    border-block-end: 1px solid var(--edge);
+  }
+  .block:last-child { border-block-end: 0; }
+
+  /* A foldable section keeps its h2 as the heading; the summary is the toggle */
+  .block__fold { cursor: pointer; }
+  .block__fold::marker { color: var(--edge-strong); }
+  .block__fold .block__title { display: inline; margin-block-end: 0; }
+  details.block[open] .block__fold { margin-block-end: 0.6rem; }
+
+  .block__title {
+    margin-block-end: 0.6rem;
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink);
+  }
+
+  .hint {
+    margin-block-start: 0.5rem;
+    color: var(--muted);
+    font-weight: var(--weight-small);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  .status {
+    min-block-size: 1.2em;
+    color: var(--muted);
+    font-weight: var(--weight-small);
+    font-size: 0.8rem;
+    line-height: 1.25;
+  }
+  .status[data-tone="warn"] { color: var(--accent-2); }
+}
+
+@layer controls {
+  .field {
+    display: grid;
+    grid-template-columns: 7rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.5rem;
+    margin-block-end: 0.45rem;
+  }
+
+  .field--pick { align-items: center; }
+
+  .field__label {
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+
+  .text-input {
+    inline-size: 100%;
+    min-inline-size: 0;
+    padding: 0.35em 0.55em;
+    border: 1px solid var(--edge);
+    border-radius: 5px;
+    background: oklch(0 0 0 / 0.55);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.92rem;
+    accent-color: var(--accent);
+  }
+  .text-input:hover { border-color: var(--edge-strong); }
+
+  .seed {
+    color: var(--muted);
+    font-weight: var(--weight-small);
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dirty {
+    inline-size: 0.5rem;
+    block-size: 0.5rem;
+    border-radius: 50%;
+    background: var(--accent-2);
+  }
+
+  .icon-btn {
+    display: grid;
+    place-items: center;
+    padding: 0.3em;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color 0.2s var(--ease-out), border-color 0.2s var(--ease-out);
+  }
+  .icon-btn:hover { color: var(--accent); border-color: var(--edge); }
+  .icon-btn svg { inline-size: 1.3em; block-size: auto; }
+  .icon-btn[aria-pressed="true"] { color: var(--accent); }
+  /* The dice and the bin are the two the eye hunts for, so they get the size */
+  .entity-head .icon-btn svg { inline-size: 1.7em; }
+  .group__summary .icon-btn svg { inline-size: 1.45em; }
+
+  .btn {
+    padding: 0.45em 0.7em;
+    border: 1px solid var(--edge-strong);
+    border-radius: 5px;
+    background: oklch(0 0 0 / 0.4);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.84rem;
+    cursor: pointer;
+    transition: border-color 0.25s var(--ease-out), color 0.25s var(--ease-out);
+  }
+  @keyframes dice-roll {
+    from { rotate: 0deg; }
+    to { rotate: 360deg; }
+  }
+  .icon-btn.is-rolling svg { animation: dice-roll 0.5s var(--ease-out); }
+
+  .btn:hover { border-color: var(--accent); color: var(--ink); }
+  .btn[disabled] { opacity: 0.4; cursor: not-allowed; }
+
+  /* Grip, eye, name, seed, lock. Header and rows are separate grids running one
+     shared template: the lock track is a fixed width and the name track eats
+     every remainder, so the last track lands flush right in both whatever the
+     seed is worth and whatever the scrollbar takes. Subgrid sized this
+     differently in Firefox and Chromium. */
+  .entities {
+    display: grid;
+    row-gap: 1px;
+  }
+
+  .entity,
+  .entities__head {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto var(--lock-col);
+    align-items: center;
+    gap: 0.4rem;
+    padding-inline-start: 0.4rem;
+    border-inline-start: 2px solid transparent;
+    border-radius: 4px;
+  }
+  .entity.is-current {
+    border-inline-start-color: var(--accent);
+    background: oklch(1 0 0 / 0.04);
+  }
+  .entity.is-dragging { opacity: 0.35; }
+  .entity.is-over { box-shadow: inset 0 2px 0 var(--accent); }
+
+  .entities__head {
+    padding-block-end: 0.2rem;
+    color: var(--muted);
+  }
+  .lockmark {
+    grid-column: 5;
+    justify-self: center;
+    display: grid;
+    place-items: center;
+  }
+  .lockmark svg { inline-size: 1.15rem; block-size: auto; }
+
+  .grip {
+    display: grid;
+    place-items: center;
+    padding: 0.3em 0.05em;
+    border: 0;
+    background: transparent;
+    color: var(--faint);
+    cursor: grab;
+    transition: color 0.2s var(--ease-out);
+  }
+  .grip:hover { color: var(--accent); }
+  .grip:active { cursor: grabbing; }
+  .grip[disabled] { color: var(--edge-strong); cursor: default; }
+  .grip svg { inline-size: 0.95rem; block-size: auto; }
+
+  .entity__pick {
+    padding: 0.35em 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.94rem;
+    text-align: start;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* The accent marks the row through its border and wash, never through the
+     label: SII and Night Vision are deliberately dark and would fail 4.5:1 as
+     small text over a bright sky. */
+  .entity.is-current .entity__pick { color: var(--ink); }
+  .entity__pick:hover { color: var(--ink); }
+  .entity.is-hidden .entity__pick { color: var(--muted); text-decoration: line-through; }
+
+  /* An unchecked lock is quiet, not a pale slab sitting in every row, but it
+     still has to be findable against the panel glass */
+  .entity jelly-checkbox {
+    --jelly-fill: oklch(0.24 0.008 250);
+    /* Jelly reserves a gap for the label even when the label is only an aria
+       string, which parks the box off-centre in its track */
+    --jelly-checkbox-gap: 0px;
+    justify-self: center;
+  }
+
+  .adders {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-block-start: 0.6rem;
+  }
+
+  .entity-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-block-end: 0.55rem;
+    padding-block-end: 0.55rem;
+    border-block-end: 1px solid var(--edge);
+  }
+  .entity-head__name {
+    flex: 1;
+    font-size: 0.95rem;
+    color: var(--ink);
+  }
+
+  .group {
+    border-block-start: 1px solid var(--edge);
+  }
+  .group:first-of-type { border-block-start: 0; }
+
+  .group__summary {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding-block: 0.5rem;
+    color: var(--muted);
+    font-weight: var(--weight-small);
+    font-size: 0.84rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+  }
+  .group__summary::marker { color: var(--edge-strong); }
+  .group__summary:hover { color: var(--ink); }
+  .group__name { flex: 1; }
+
+  .params {
+    display: grid;
+    gap: 0.4rem;
+    padding-block: 0.15rem 0.7rem;
+  }
+
+  .param {
+    display: grid;
+    grid-template-columns: 8rem minmax(0, 1fr) 3.5rem;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.87rem;
+  }
+  .param__label {
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .param__value {
+    color: var(--ink);
+    font-weight: var(--weight-small);
+    text-align: end;
+    font-variant-numeric: tabular-nums;
+  }
+  .param--bool { grid-template-columns: 8rem minmax(0, 1fr); }
+
+  .param jelly-slider,
+  .scrub {
+    inline-size: 100%;
+    min-inline-size: 0;
+  }
+
+  .transport {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0.45rem;
+  }
+
+  .tread {
+    color: var(--muted);
+    font-weight: var(--weight-small);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .actions { display: flex; gap: 0.5rem; }
+  .actions--files .btn { flex: 1; }
+  .actions--shot { align-items: center; margin-block-start: 0.5rem; }
+  .actions--shot .btn { flex: none; }
+  .shot-size { inline-size: 9.5rem; block-size: 2.3rem; }
+
+  /* The file row folds away by default, so the unsaved marker rides the summary
+     as well; a dirty dot hidden inside a closed section says nothing */
+  .panel__foot .filing { border-block-start: 1px solid var(--edge); }
+  .filing .group__summary { padding-block: 0.5rem; }
+  .filing[open] .actions--files { margin-block-end: 0.15rem; }
+
+  /* Camera pan is one 2D quantity, so it gets one 2D control */
+  .cam {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.85rem;
+  }
+
+  .pad {
+    position: relative;
+    inline-size: 6rem;
+    aspect-ratio: 1;
+    border: 1px solid var(--edge-strong);
+    border-radius: 8px;
+    background:
+      linear-gradient(var(--edge), var(--edge)) 50% 50% / 100% 1px no-repeat,
+      linear-gradient(var(--edge), var(--edge)) 50% 50% / 1px 100% no-repeat,
+      oklch(0 0 0 / 0.45);
+    cursor: grab;
+    touch-action: none;
+  }
+  .pad:hover { border-color: var(--accent); }
+  .pad:active { cursor: grabbing; }
+
+  .pad__puck {
+    position: absolute;
+    inset-block-start: var(--py, 50%);
+    inset-inline-start: var(--px, 50%);
+    inline-size: 0.8rem;
+    block-size: 0.8rem;
+    translate: -50% -50%;
+    border-radius: 50%;
+    color: var(--accent);
+    background: currentColor;
+    box-shadow: 0 0 0.6rem currentColor;
+  }
+
+  .cam__side { display: grid; gap: 0.5rem; justify-items: start; }
+  .cam__read {
+    color: var(--ink);
+    font-weight: var(--weight-small);
+    font-size: 0.88rem;
+    font-variant-numeric: tabular-nums;
+  }
+  /* The `block` attribute is what centres the label: stretching only the host
+     leaves Jelly's inner button at its min-width, hard against the start edge */
+  .reroll { display: block; }
+
+  /* One token drives every Jelly control, so the emission-line themes ride
+     along for free. Surfaces pull toward true black per the OLED doctrine. */
+  jelly-theme {
+    --jelly-color-background-accent: var(--accent);
+    --jelly-color-background-muted: oklch(0.14 0.008 250);
+    --jelly-color-background-surface: oklch(0.18 0.008 250);
+    --jelly-color-background-neutral: oklch(0.26 0.008 250);
+    --jelly-color-foreground-default: var(--ink);
+    --jelly-color-foreground-muted: var(--muted);
+  }
+
+  /* Only the font size is overridden in rem: Jelly parseFloat()s the radius and
+     row-height tokens as pixels, so those two have to stay px numbers. */
+  jelly-select {
+    --jelly-select-font-size: 0.9rem;
+    --jelly-select-padding-inline: 0.7rem;
+    --jelly-select-gap: 0.4rem;
+    --jelly-fill: oklch(0.16 0.008 250);
+    inline-size: 100%;
+    min-inline-size: 0;
+    block-size: 2.5rem;
+  }
+}
+
+@layer controls {
+  /* Detached from the panel on purpose: the theme is chrome for the studio, not
+     a property of the sky, and it stays reachable while the panel is collapsed. */
+  .themebar {
+    position: fixed;
+    z-index: 3;
+    inset-block-start: 1rem;
+    /* Leading edge, not centre: the panel docks trailing, and a centred bar
+       collides with it on narrower desktops */
+    inset-inline-start: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.4rem 0.3rem 0.7rem;
+    border: 1px solid var(--edge);
+    border-radius: 999px;
+    background: var(--glass);
+    backdrop-filter: blur(16px) brightness(0.26) saturate(1.15);
+  }
+
+  /* A dot in the live accent, so the mark previews the theme it switches */
+  .themebar__mark {
+    flex: none;
+    inline-size: 0.7rem;
+    block-size: 0.7rem;
+    border-radius: 50%;
+    color: var(--accent);
+    background: currentColor;
+    box-shadow: 0 0 0.55rem currentColor;
+  }
+
+  .themebar__pick {
+    inline-size: 9.25rem;
+    block-size: 2.2rem;
+    --jelly-fill: oklch(0.15 0.008 250);
+  }
+
+  .speed { inline-size: 5.9rem; block-size: 2.2rem; }
+}
+
+/* Later than the panel and controls layers on purpose: these overrides have to
+   win over the docked-panel geometry, not merely match its specificity. */
+@layer responsive {
+  @media (width <= 46rem) {
+    .panel {
+      inset-block: auto 0.5rem;
+      inset-inline: 0.5rem;
+      block-size: min(62svb, 34rem);
+      inline-size: auto;
+    }
+    .panel.is-collapsed { translate: 0 calc(100% + 1.5rem); }
+    .panel-tab { inset-block-start: auto; inset-block-end: 1rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .veil,
+    .panel,
+    .panel-tab,
+    .btn,
+    .grip,
+    .icon-btn { transition: none; }
+
+    .icon-btn.is-rolling svg { animation: none; }
+  }
+}

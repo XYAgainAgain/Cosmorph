@@ -35,7 +35,10 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
 
     /* Procedural layers evaluate here rather than in an RT, so parallax applies
        directly at whatever depth each one sits at */
-    const skyAt = (depth) => screen.sub(par.mul(depth).div(U.uResolution)).mul(vec2(U.uAspect, 1.0));
+    const skyAt = (depth) => screen
+      .sub(par.mul(depth).div(U.uResolution))
+      .mul(vec2(U.uAspect, 1.0))
+      .add(U.uCamera);
     const glob = layers.globules
       ? globuleTauAndRim(skyAt(U.uDepthGlob), U, layers.globules.cometary)
       : null;

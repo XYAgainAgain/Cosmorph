@@ -15,7 +15,7 @@ import { buildComposeNodes } from '../shaders/tsl/compose.js';
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
    Community default is natural HOO; SHO reads dated to many eyes now. */
-const PALETTES = {
+export const PALETTES = {
   hooNatural: [1, 0, 0, 0.15, 0.85, 0, 0, 1, 0],
   hooBold: [1, 0, 0, 0.35, 0.65, 0, 0, 1, 0],
   sho: [0, 0, 1, 1, 0, 0, 0, 1, 0],
@@ -54,6 +54,32 @@ const DEFAULTS = {
   },
   filaments: { ...FILAMENT_DEFAULTS },
 };
+
+/* Must match the overscan default in entities/stars.js: the bright tier tiles
+   at exactly the generation span, so a mismatch would show a seam under pan. */
+const BRIGHT_OVERSCAN = 0.06;
+
+/* WebGPU aligns every readback row to 256 bytes, so any width whose stride
+   misses that alignment comes back padded and has to be repacked. WebGL2
+   returns tight rows and falls through. */
+function repackRows(raw, width, height) {
+  const tight = width * 4;
+  if (raw.byteLength === tight * height) {
+    return new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.byteLength);
+  }
+  /* The trailing row carries no padding, so the buffer is one stride short of
+     stride × height and the length alone cannot tell you the stride. */
+  const stride = Math.ceil(tight / 256) * 256;
+  if (raw.byteLength < (height - 1) * stride + tight) {
+    throw new Error(`readback returned ${raw.byteLength} bytes for ${width}×${height}.`);
+  }
+  const src = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  const out = new Uint8ClampedArray(tight * height);
+  for (let y = 0; y < height; y++) {
+    out.set(src.subarray(y * stride, y * stride + tight), y * tight);
+  }
+  return out;
+}
 
 function offsetFrom(seed, salt) {
   const rng = createRng(deriveSeed(seed, salt));
@@ -98,6 +124,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     filaments: !!byType.filaments,
   };
 
+  /* Camera pan in sky units, folded into every field coordinate. Exactly zero
+     is the untouched state and must stay arithmetically inert. */
+  let camX = config.camera?.x ?? 0;
+  let camY = config.camera?.y ?? 0;
+
   const paletteRows = PALETTES[config.palette] ?? PALETTES.hooNatural;
   const scnrDefault = config.palette === 'sho' ? 0.7 : (config.scnr ?? 0);
   const stretchK = config.stretchK ?? 14;
@@ -108,6 +139,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uMarginScale: uniform(new THREE.Vector2(1, 1)),
     uPxPerUnit: uniform(1),
     uParallax: uniform(new THREE.Vector2(0, 0)),
+    uCamera: uniform(new THREE.Vector2(camX, camY)),
     uTev: uniform(0),
 
     uNebFreq: uniform(P.emission.freq),
@@ -271,13 +303,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   /* Layer passes render an overscanned domain so compose can offset without
      sampling past an RT edge */
   const uvE = uv().sub(0.5).mul(U.uMarginScale).add(0.5);
-  const skyU = uvE.mul(vec2(U.uAspect, 1.0));
+  const skyU = uvE.mul(vec2(U.uAspect, 1.0)).add(U.uCamera);
 
   /* An entity riding a shared RT still parallaxes at its own depth: pre-shift
      its domain by the difference, which the overscan margin already covers. */
   function skyAtDepth(depthU, rtDepthU) {
     const par = U.uParallax.mul(vec2(1.0, -1.0)).mul(depthU.sub(rtDepthU));
-    return uvE.sub(par.div(U.uResolution)).mul(vec2(U.uAspect, 1.0));
+    return uvE.sub(par.div(U.uResolution)).mul(vec2(U.uAspect, 1.0)).add(U.uCamera);
   }
 
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
@@ -341,31 +373,105 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   brightMat.depthTest = false;
   brightMat.depthWrite = false;
   let brightMesh = null;
+  let dpr = 1;
 
-  function buildBrightGeometry(aspect, dpr) {
-    const seed = byType.stars?.seed ?? config.seed;
-    const data = generateBrightStars(seed, { count: P.stars.count, aspect });
-    const iC = data.iC.slice();
-    for (let i = 0; i < data.count; i++) {
-      iC[i * 4 + 0] *= dpr;
-      iC[i * 4 + 1] *= dpr;
-      iC[i * 4 + 2] *= dpr;
+  const starSeed = byType.stars?.seed ?? config.seed;
+
+  /* Tile (0,0) reuses the base seed, so a centred camera renders exactly the
+     field this engine produced before panning existed. */
+  function tileSeedFor(i, j) {
+    if (i === 0 && j === 0) return starSeed;
+    return deriveSeed(starSeed, 71 + (i + 512) * 1031 + (j + 512));
+  }
+
+  /* Centring the 3×3 block on the frame rather than the camera origin keeps
+     half a tile of slack past every edge, which is more than the widest quad. */
+  function brightTiles(aspect) {
+    if (camX === 0 && camY === 0) return [[0, 0]];
+    const ci = Math.round(camX / (aspect + BRIGHT_OVERSCAN * 2));
+    const cj = Math.round(camY / (1 + BRIGHT_OVERSCAN * 2));
+    const out = [];
+    for (let i = ci - 1; i <= ci + 1; i++) {
+      for (let j = cj - 1; j <= cj + 1; j++) out.push([i, j]);
     }
+    return out;
+  }
+
+  function tileKey(x, y, aspect) {
+    if (x === 0 && y === 0) return 'origin';
+    const ci = Math.round(x / (aspect + BRIGHT_OVERSCAN * 2));
+    const cj = Math.round(y / (1 + BRIGHT_OVERSCAN * 2));
+    return `${ci},${cj}`;
+  }
+
+  function buildBrightGeometry(aspect, pixelRatio) {
+    const tiles = brightTiles(aspect);
+    const spanX = aspect + BRIGHT_OVERSCAN * 2;
+    const spanY = 1 + BRIGHT_OVERSCAN * 2;
+    const per = Math.max(0, Math.round(P.stars.count));
+    const total = per * tiles.length;
+    const iA = new Float32Array(total * 4);
+    const iB = new Float32Array(total * 4);
+    const iC = new Float32Array(total * 4);
+
+    let n = 0;
+    for (const [i, j] of tiles) {
+      const data = generateBrightStars(tileSeedFor(i, j), { count: per, aspect });
+      for (let k = 0; k < per; k++) {
+        const s = k * 4;
+        const d = (n + k) * 4;
+        iA[d] = data.iA[s] + i * spanX;
+        iA[d + 1] = data.iA[s + 1] + j * spanY;
+        iA[d + 2] = data.iA[s + 2];
+        iA[d + 3] = data.iA[s + 3];
+        iB[d] = data.iB[s];
+        iB[d + 1] = data.iB[s + 1];
+        iB[d + 2] = data.iB[s + 2];
+        iB[d + 3] = data.iB[s + 3];
+        iC[d] = data.iC[s] * pixelRatio;
+        iC[d + 1] = data.iC[s + 1] * pixelRatio;
+        iC[d + 2] = data.iC[s + 2] * pixelRatio;
+        iC[d + 3] = data.iC[s + 3];
+      }
+      n += per;
+    }
+
     const base = new THREE.PlaneGeometry(2, 2);
     const geo = new THREE.InstancedBufferGeometry();
     geo.index = base.index;
     geo.setAttribute('position', base.getAttribute('position'));
     geo.setAttribute('uv', base.getAttribute('uv'));
-    geo.setAttribute('iA', new THREE.InstancedBufferAttribute(data.iA, 4));
-    geo.setAttribute('iB', new THREE.InstancedBufferAttribute(data.iB, 4));
+    geo.setAttribute('iA', new THREE.InstancedBufferAttribute(iA, 4));
+    geo.setAttribute('iB', new THREE.InstancedBufferAttribute(iB, 4));
     geo.setAttribute('iC', new THREE.InstancedBufferAttribute(iC, 4));
-    geo.instanceCount = data.count;
+    geo.instanceCount = total;
     return geo;
   }
 
-  let dpr = 1;
+  function rebuildBright() {
+    if (brightMesh) {
+      brightMesh.geometry.dispose();
+      brightScene.remove(brightMesh);
+    }
+    brightMesh = new THREE.Mesh(buildBrightGeometry(U.uAspect.value, dpr), brightMat);
+    brightMesh.frustumCulled = false;
+    brightScene.add(brightMesh);
+  }
+
+  /* Only a tile crossing costs a geometry rebuild; a drag inside one tile is
+     a uniform poke. Leaving or returning to dead centre counts as a crossing. */
+  function setCamera(x, y) {
+    const moved = tileKey(x, y, U.uAspect.value) !== tileKey(camX, camY, U.uAspect.value);
+    camX = x;
+    camY = y;
+    U.uCamera.value.set(x, y);
+    if (moved) rebuildBright();
+  }
+
+  let lastSize = { w: 2, h: 2, r: 1 };
 
   function resize(cssW, cssH, pixelRatio) {
+    lastSize = { w: cssW, h: cssH, r: pixelRatio };
     dpr = Math.min(pixelRatio || 1, 2);
     renderer.setPixelRatio(dpr);
     renderer.setSize(cssW, cssH, false);
@@ -390,16 +496,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     U.uReflStar?.value.set(P.reflection.star[0] * aspect, P.reflection.star[1]);
     U.uArcCenter?.value.set(P.filaments.center[0] * aspect, P.filaments.center[1]);
 
-    if (brightMesh) {
-      brightMesh.geometry.dispose();
-      brightScene.remove(brightMesh);
-    }
-    brightMesh = new THREE.Mesh(buildBrightGeometry(aspect, dpr), brightMat);
-    brightMesh.frustumCulled = false;
-    brightScene.add(brightMesh);
+    rebuildBright();
   }
 
-  function render(tevHours, parallaxCssX, parallaxCssY) {
+  function renderTo(target, tevHours, parallaxCssX, parallaxCssY) {
     U.uTev.value = tevHours;
     /* Wrapped CPU-side so the shader's sin argument stays small forever */
     U.uTwinklePhase.value = (tevHours * P.stars.twinkleRate) % 1;
@@ -411,8 +511,37 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     renderer.render(contScene, camera);
     renderer.setRenderTarget(brightRT);
     renderer.render(brightScene, camera);
-    renderer.setRenderTarget(null);
+    renderer.setRenderTarget(target);
     renderer.render(composeScene, camera);
+    if (target) renderer.setRenderTarget(null);
+  }
+
+  function render(tevHours, parallaxCssX, parallaxCssY) {
+    renderTo(null, tevHours, parallaxCssX, parallaxCssY);
+  }
+
+  /* Export path: one frame at an exact pixel count with parallax neutralised,
+     read back off-screen so the live canvas never shows the export framing.
+     `onResize` re-seats whatever the host poked, which resize() resets. */
+  async function capture({ width, height, tev = 0, onResize = null }) {
+    const prev = lastSize;
+    const rt = new THREE.RenderTarget(width, height, {
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+    });
+    try {
+      resize(width, height, 1);
+      onResize?.();
+      renderTo(rt, tev, 0, 0);
+      const pixels = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, width, height);
+      return repackRows(pixels, width, height);
+    } finally {
+      rt.dispose();
+      resize(prev.w, prev.h, prev.r);
+      onResize?.();
+    }
   }
 
   function dispose() {
@@ -423,5 +552,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   }
 
   const backend = renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
-  return { render, resize, dispose, backend };
+  /* `uniforms` is the editor hook: Firmament pokes values live instead of
+     rebuilding the graph for every slider drag. resize() re-seats the framed
+     positions from the build-time params, so a live editor re-applies after it. */
+  return { render, resize, dispose, backend, capture, setCamera, uniforms: U };
 }
