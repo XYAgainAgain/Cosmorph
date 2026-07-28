@@ -38,12 +38,16 @@ Here's what kinds of celestial phenomena you can expect to find floating around 
 - Distant [galaxies](https://en.wikipedia.org/wiki/Galaxy), from faint fuzzy smudges to grand sweeping [spirals](https://en.wikipedia.org/wiki/Spiral_galaxy)
 - Towering [pillars](https://en.wikipedia.org/wiki/Pillars_of_Creation) and [dark nebulae](https://en.wikipedia.org/wiki/Dark_nebula) with glowing rims (oh hi, [Horsehead](https://en.wikipedia.org/wiki/Horsehead_Nebula)!)
 - [Planetary nebulae](https://en.wikipedia.org/wiki/Planetary_nebula), the gorgeous ghosts of dying stars
-- [Light echoes](https://en.wikipedia.org/wiki/Light_echo) sweeping through the dust around erupting stars
+- [Light echoes](https://en.wikipedia.org/wiki/Light_echo) sweeping through the dust around erupting suns
+- [Wolf-Rayet bubbles](https://en.wikipedia.org/wiki/Wolf%E2%80%93Rayet_nebula), crisp two-color shells blown up by the angriest stars alive
+- Twizzler-thin [stellar jets](https://en.wikipedia.org/wiki/Herbig%E2%80%93Haro_object) and the big boomy bow shocks of [runaway stars](https://en.wikipedia.org/wiki/Runaway_star)
+- Twin [searchlight beams](https://en.wikipedia.org/wiki/Protoplanetary_nebula) escaping from dust-cocooned dying stars
+- [Hubble's Variable Nebula](https://en.wikipedia.org/wiki/NGC_2261), the actual cosmic lava lamp, doing its slow-mo shadow show
 - Ultra-faint [integrated flux nebulae](https://en.wikipedia.org/wiki/Integrated_flux_nebula) hovering high above the galactic plane
 
 ## Under the Cosmic Hood
 
-- **The site is the app!** No build step, no bundler, no backend. This repo is served exactly as-is, kinda like the universe writ large. The only dependencies are a vendored [Three.js](https://threejs.org/) & enjoying space.
+- **The site is the app!** No build step, no bundler, no backend. This repo is served exactly as-is, kinda like the universe writ large. The only dependencies are vendored [Three.js](https://threejs.org/) + [Jelly UI](https://jelly-ui.com/) & enjoying space.
 - **WebGPU with a WebGL2 fallback!** Shaders are written in Three's TSL (my beloved) and built entirely on integer hashes, so any seed produces the same sky on any device, though you might see different parts of it, and it will probably change over time (like the real universe tends to).
 - **Real narrowband color!** Nebulae aren't painted in RGB; that would be too easy. They're computed as Hα/OIII/SII emission channels and palette-mapped afterward, the same way astrophotographers process actual telescope data. I'm not messing around here (I am).
 - **Practically glacial evolution!** Cosmorph's morphin' time runs on your system clock and persists between observations, so your sky drifts a little further along every time you take a look at it.
