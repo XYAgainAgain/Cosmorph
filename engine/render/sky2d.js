@@ -11,6 +11,12 @@ import { buildEmissionNodes } from '../shaders/tsl/nebula.js';
 import { buildContinuumNodes } from '../shaders/tsl/dust.js';
 import { buildReflectionNodes, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
 import { buildFilamentNodes, FILAMENT_DEFAULTS } from '../shaders/tsl/filaments.js';
+import { buildEchoNodes, ECHO_DEFAULTS } from '../shaders/tsl/echo.js';
+import { buildShadowFanNodes, SHADOWFAN_DEFAULTS } from '../shaders/tsl/shadowfan.js';
+import { buildSearchlightNodes, SEARCHLIGHT_DEFAULTS } from '../shaders/tsl/searchlight.js';
+import { buildPlanetaryNodes, PLANETARY_DEFAULTS } from '../shaders/tsl/planetary.js';
+import { buildJetNodes, JET_DEFAULTS } from '../shaders/tsl/jets.js';
+import { buildWrBubbleNodes, WRBUBBLE_DEFAULTS } from '../shaders/tsl/wrbubble.js';
 import { buildComposeNodes } from '../shaders/tsl/compose.js';
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
@@ -53,6 +59,12 @@ const DEFAULTS = {
     filFreq: 14.0, filAniso: 2.5, filAmp: 0.35,
   },
   filaments: { ...FILAMENT_DEFAULTS },
+  echo: { ...ECHO_DEFAULTS },
+  shadowFan: { ...SHADOWFAN_DEFAULTS },
+  searchlight: { ...SEARCHLIGHT_DEFAULTS },
+  planetary: { ...PLANETARY_DEFAULTS },
+  jets: { ...JET_DEFAULTS },
+  wrbubble: { ...WRBUBBLE_DEFAULTS },
 };
 
 /* Must match the overscan default in entities/stars.js: the bright tier tiles
@@ -81,6 +93,8 @@ function repackRows(raw, width, height) {
   return out;
 }
 
+const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
+
 function offsetFrom(seed, salt) {
   const rng = createRng(deriveSeed(seed, salt));
   return new THREE.Vector3(
@@ -95,10 +109,19 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   renderer.setClearColor(0x000000, 1);
   await renderer.init();
 
-  /* One entity per type in v1; Firmament's renderer is what batches by cost
-     class, so a duplicate is dropped loudly rather than half-rendered. */
+  /* Base layers write fixed shader slots, so they stay one-per-type. Feature
+     entities may repeat: each instance gets its own uniform bag, and its nodes
+     sum into the shared RTs like any other member of its cost class. */
   const byType = {};
+  const featureEnts = {
+    globules: [], reflection: [], filaments: [],
+    echo: [], shadowFan: [], searchlight: [], planetary: [], jets: [], wrbubble: [],
+  };
   for (const e of config.entities) {
+    if (featureEnts[e.type]) {
+      featureEnts[e.type].push(e);
+      continue;
+    }
     if (byType[e.type]) {
       console.warn(`Cosmorph: sky2d takes one "${e.type}" entity; the duplicate was dropped.`);
       continue;
@@ -111,18 +134,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     ifn: { ...DEFAULTS.ifn, ...byType.ifn?.params },
     stars: { ...DEFAULTS.stars, ...byType.stars?.params },
     darkDust: { ...DEFAULTS.darkDust, ...byType.darkDust?.params },
-    globules: { ...DEFAULTS.globules, ...byType.globules?.params },
-    reflection: { ...DEFAULTS.reflection, ...byType.reflection?.params },
-    filaments: { ...DEFAULTS.filaments, ...byType.filaments?.params },
   };
 
-  /* Absent types contribute no uniforms, nodes, or passes, so a scene without
-     them generates the shader it generated before they existed. */
-  const has = {
-    globules: !!byType.globules,
-    reflection: !!byType.reflection,
-    filaments: !!byType.filaments,
-  };
+  /* An unseeded duplicate still needs its own field, so instance 0 keeps the
+     scene seed (bit-parity with the singleton era) and later ones derive. */
+  function instanceSeed(e, salt, k) {
+    return e.seed ?? (k === 0 ? config.seed : deriveSeed(config.seed, salt * 1000 + k));
+  }
 
   /* Camera pan in sky units, folded into every field coordinate. Exactly zero
      is the untouched state and must stay arithmetically inert. */
@@ -196,11 +214,23 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uDepthWisp: uniform(byType.darkDust?.depth ?? 0.55),
   };
 
-  if (has.globules) {
-    const g = P.globules;
-    Object.assign(U, {
+  /* Per-instance uniform factories. Instance 0 assigns onto U itself, so a
+     one-per-type scene builds the exact graph and editor uniform names it
+     always did; later instances shadow through an Object.create(U) bag. */
+  const reseats = [];
+
+  function makeBag(k, uniforms, reseat) {
+    const bag = k === 0 ? U : Object.create(U);
+    Object.assign(bag, uniforms);
+    if (reseat) reseats.push((aspect) => reseat(bag, aspect));
+    return bag;
+  }
+
+  function globulesBag(e, k) {
+    const g = { ...DEFAULTS.globules, ...e.params };
+    const bag = makeBag(k, {
       uGlobFreq: uniform(g.freq),
-      uGlobOff: uniform(offsetFrom(byType.globules.seed ?? config.seed, 47)),
+      uGlobOff: uniform(offsetFrom(instanceSeed(e, 47, k), 47)),
       uGlobRadius: uniform(Math.min(g.radius, 0.6)),
       uGlobFill: uniform(g.fill),
       uGlobCore: uniform(g.core),
@@ -230,13 +260,16 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uRimGain: uniform(g.rimGain),
       uRimOiii: uniform(g.rimOiii),
       uRimSii: uniform(g.rimSii),
-      uDepthGlob: uniform(byType.globules.depth ?? 0.6),
-    });
+      uDepthGlob: uniform(e.depth ?? 0.6),
+    }, (b, aspect) => b.uGlobIonSrc.value.set(g.ionSrc[0] * aspect, g.ionSrc[1]));
+    /* Build-time flag rides the bag so every layers.* entry is one shape */
+    bag.cometary = g.cometary !== false;
+    return bag;
   }
 
-  if (has.reflection) {
-    const r = P.reflection;
-    Object.assign(U, {
+  function reflectionBag(e, k) {
+    const r = { ...DEFAULTS.reflection, ...e.params };
+    return makeBag(k, {
       uReflStar: uniform(new THREE.Vector2(0, 0)),
       uReflLum: uniform(r.lum),
       uReflRadius: uniform(new THREE.Vector3(...r.radius)),
@@ -260,14 +293,14 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uReflFilHa: uniform(r.filHa),
       uReflTau: uniform(r.tau),
       uReflTauSpread: uniform(Math.max(r.tauSpread, 1e-3)),
-      uReflOff: uniform(offsetFrom(byType.reflection.seed ?? config.seed, 53)),
-      uDepthRefl: uniform(byType.reflection.depth ?? 0.35),
-    });
+      uReflOff: uniform(offsetFrom(instanceSeed(e, 53, k), 53)),
+      uDepthRefl: uniform(e.depth ?? 0.35),
+    }, (b, aspect) => b.uReflStar.value.set(r.star[0] * aspect, r.star[1]));
   }
 
-  if (has.filaments) {
-    const f = P.filaments;
-    Object.assign(U, {
+  function filamentsBag(e, k) {
+    const f = { ...DEFAULTS.filaments, ...e.params };
+    return makeBag(k, {
       uArcCenter: uniform(new THREE.Vector2(0, 0)),
       uArcRot: uniform(f.rot),
       uArcSquash: uniform(Math.max(f.squash, 0.05)),
@@ -295,10 +328,337 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uFilOiii: uniform(f.oiii),
       uFilSii: uniform(f.sii),
       uFilMorph: uniform(f.morphRate),
-      uFilOff: uniform(offsetFrom(byType.filaments.seed ?? config.seed, 59)),
-      uDepthFil: uniform(byType.filaments.depth ?? 0.25),
-    });
+      uFilOff: uniform(offsetFrom(instanceSeed(e, 59, k), 59)),
+      uDepthFil: uniform(e.depth ?? 0.25),
+    }, (b, aspect) => b.uArcCenter.value.set(f.center[0] * aspect, f.center[1]));
   }
+
+  /* Build gates ride the bag under a per-type key (echoOpts, fanOpts, ...):
+     instance 0's bag IS the shared U, so one common name would collide across types. */
+
+  /* The globule rim skips ALL summed tau, correct only while globules (0.6)
+     stay the nearest tau layer; a nearer tau entity silently breaks that. */
+  function warnTauDepth(type, depth) {
+    if (depth >= 0.6) {
+      console.warn(`Cosmorph: "${type}" tau at depth ${depth} sits in front of globules; the rim exemption breaks.`);
+    }
+  }
+
+  function echoBag(e, k) {
+    const c = { ...DEFAULTS.echo, ...e.params };
+    const bag = makeBag(k, {
+      uEchoSrc: uniform(new THREE.Vector2(0, 0)),
+      uEchoRate: uniform(c.rate),
+      uEchoSpan: uniform(c.span),
+      /* z runs as rho²/2ct, so below ~0.02 the sliced noise aliases; the
+         module's 1e-3 floor only keeps it finite, not sampleable. */
+      uEchoStart: uniform(Math.max(c.start, 0.02)),
+      uEchoPhase: uniform(c.phase),
+      uEchoFadeIn: uniform(c.fadeIn),
+      uEchoFadeOut: uniform(c.fadeOut),
+      uEchoShellR: uniform(Math.max(c.shellR, 0)),
+      uEchoShellW: uniform(c.shellW),
+      /* Relative to the source, so aspect-scaling it would shear the ring
+         asymmetry as the canvas widens */
+      uEchoDustXY: uniform(new THREE.Vector2(...c.dustXY)),
+      uEchoDustZ: uniform(c.dustZ),
+      /* This cutoff is what bounds the sampled z domain; a large one un-bounds it */
+      uEchoOuter: uniform(Math.min(c.outer, 1.5)),
+      uEchoHalo: uniform(clamp01(c.halo)),
+      uEchoFreq: uniform(c.freq),
+      uEchoZSquash: uniform(c.zSquash),
+      uEchoCarve: uniform(c.carve),
+      uEchoTh: uniform(c.th),
+      uEchoSoft: uniform(c.soft),
+      uEchoRefR: uniform(c.refR),
+      uEchoFall: uniform(c.fall),
+      uEchoAttenMax: uniform(c.attenMax),
+      uEchoSlab: uniform(clamp01(c.slab)),
+      uEchoSlabMax: uniform(c.slabMax),
+      uEchoLum: uniform(Math.max(c.lum, 0)),
+      uEchoCool: uniform(new THREE.Vector3(...c.cool)),
+      uEchoWarm: uniform(new THREE.Vector3(...c.warm)),
+      uEchoRose: uniform(new THREE.Vector3(...c.rose)),
+      uEchoRoseAmt: uniform(clamp01(c.roseAmt)),
+      uEchoHueLo: uniform(c.hueLo),
+      uEchoHueHi: uniform(c.hueHi),
+      uEchoHa: uniform(Math.max(c.ha, 0)),
+      uEchoTau: uniform(c.tau),
+      uEchoTauTh: uniform(c.tauTh),
+      uEchoTauZ: uniform(c.tauZ),
+      uEchoOff: uniform(offsetFrom(instanceSeed(e, 83, k), 83)),
+      uDepthEcho: uniform(e.depth ?? 0.4),
+    }, (b, aspect) => b.uEchoSrc.value.set(c.src[0] * aspect, c.src[1]));
+    bag.echoOpts = { ha: c.haOn === true };
+    warnTauDepth('echo', e.depth ?? 0.4);
+    return bag;
+  }
+
+  function shadowFanBag(e, k) {
+    const f = { ...DEFAULTS.shadowFan, ...e.params };
+    const bag = makeBag(k, {
+      uFanApex: uniform(new THREE.Vector2(0, 0)),
+      uFanAngle: uniform(f.angle),
+      uFanHalf: uniform(Math.max(f.half, 0.02)),
+      uFanEdge: uniform(f.edge),
+      uFanLen: uniform(f.len),
+      uFanFade: uniform(f.fade),
+      uFanLitR: uniform(f.litR),
+      uFanFalloff: uniform(f.falloff),
+      uFanLum: uniform(Math.max(f.lum, 0)),
+      uFanTint: uniform(new THREE.Vector3(...f.tint)),
+      uFanWarm: uniform(new THREE.Vector3(...f.warm)),
+      uFanWarmR: uniform(f.warmR),
+      uFanWarmAmt: uniform(f.warmAmt),
+      uFanLimb: uniform(f.limb),
+      uFanFreq: uniform(f.freq),
+      uFanAniso: uniform(f.aniso),
+      uFanTh: uniform(f.threshold),
+      uFanSoft: uniform(f.softness),
+      uFanFloor: uniform(f.floor),
+      uFanMottle: uniform(Math.max(f.mottle, 0)),
+      uFanMotFreq: uniform(f.motFreq),
+      uFanMorph: uniform(f.morphRate),
+      uFanShadow: uniform(f.shadow),
+      /* One blocker past ~0.6 rad swallows the whole cone */
+      uFanShadowW: uniform(Math.min(f.shadowW, 0.6)),
+      uFanShadowIn: uniform(f.shadowIn),
+      uFanPen: uniform(f.pen),
+      uFanPenGrow: uniform(f.penGrow),
+      uFanSpread: uniform(f.spread),
+      uFanRot: uniform(f.rotRate),
+      uFanTau: uniform(f.tau),
+      uFanOff: uniform(offsetFrom(instanceSeed(e, 89, k), 89)),
+      uDepthFan: uniform(e.depth ?? 0.42),
+    }, (b, aspect) => b.uFanApex.value.set(f.apex[0] * aspect, f.apex[1]));
+    bag.fanOpts = { shadowCount: f.shadowCount, mottle: f.mottleOn !== false };
+    warnTauDepth('shadowFan', e.depth ?? 0.42);
+    return bag;
+  }
+
+  function searchlightBag(e, k) {
+    const s = { ...DEFAULTS.searchlight, ...e.params };
+    const bag = makeBag(k, {
+      uBeamCenter: uniform(new THREE.Vector2(0, 0)),
+      uBeamAxis: uniform(s.axis),
+      /* The seamless fold multiplies the rate by 4096, so an unbounded one
+         pushes the cos argument out of highp comfort */
+      uBeamSpin: uniform(Math.min(Math.max(s.spin, 0), 0.05)),
+      uBeamHalf: uniform(Math.min(Math.max(s.half, 0.02), 1.45)),
+      /* This uniform IS the sharpness; a large one erases the searchlight read */
+      uBeamSoft: uniform(Math.min(Math.max(s.soft, 0.001), 0.15)),
+      uBeamThroat: uniform(s.throat),
+      uBeamLen: uniform(s.len),
+      uBeamTaper: uniform(Math.max(s.taper, 0)),
+      uBeamCore: uniform(s.core),
+      uBeamFall: uniform(s.fall),
+      uBeamAsym: uniform(s.asym),
+      uBeamWall: uniform(s.wall),
+      uBeamWallK: uniform(s.wallK),
+      uBeamRayFreq: uniform(s.rayFreq),
+      uBeamRayAniso: uniform(s.rayAniso),
+      uBeamTh: uniform(s.threshold),
+      uBeamRaySoft: uniform(s.raySoft),
+      uBeamStruct: uniform(Math.max(s.struct, 0)),
+      uBeamGlow: uniform(Math.max(s.glow, 0)),
+      uBeamLum: uniform(Math.max(s.lum, 0)),
+      uBeamTint: uniform(new THREE.Vector3(...s.tint)),
+      uBeamWarm: uniform(new THREE.Vector3(...s.warm)),
+      uBeamWarmR: uniform(s.warmR),
+      uBeamWarmAmt: uniform(s.warmAmt),
+      uBeamArcFreq: uniform(s.arcFreq),
+      uBeamArcSharp: uniform(s.arcSharp),
+      uBeamArcAmp: uniform(Math.max(s.arcAmp, 0)),
+      uBeamArcR: uniform(s.arcR),
+      uBeamArcIn: uniform(s.arcIn),
+      uBeamArcDrift: uniform(Math.min(Math.max(s.arcDrift, 0), 0.05)),
+      uBeamArcAzimFreq: uniform(s.arcAzimFreq),
+      uBeamRungFreq: uniform(s.rungFreq),
+      uBeamRungSharp: uniform(s.rungSharp),
+      uBeamRungAmt: uniform(s.rungAmt),
+      uBeamTorusR: uniform(s.torusR),
+      uBeamTorusT: uniform(s.torusT),
+      uBeamTorusFlare: uniform(s.torusFlare),
+      uBeamAnsae: uniform(s.ansae),
+      uBeamTorusFreq: uniform(s.torusFreq),
+      uBeamTorusTh: uniform(s.torusTh),
+      uBeamTorusSoft: uniform(s.torusSoft),
+      uBeamTorusFloor: uniform(s.torusFloor),
+      uBeamTau: uniform(s.tau),
+      uBeamMorph: uniform(s.morphRate),
+      uBeamOff: uniform(offsetFrom(instanceSeed(e, 97, k), 97)),
+      uDepthBeam: uniform(e.depth ?? 0.4),
+    }, (b, aspect) => b.uBeamCenter.value.set(s.center[0] * aspect, s.center[1]));
+    bag.beamOpts = { arcs: s.arcs !== false, rungs: s.rungs === true };
+    warnTauDepth('searchlight', e.depth ?? 0.4);
+    return bag;
+  }
+
+  function planetaryBag(e, k) {
+    const p = { ...DEFAULTS.planetary, ...e.params };
+    const bag = makeBag(k, {
+      uPnCenter: uniform(new THREE.Vector2(0, 0)),
+      uPnRot: uniform(p.rot),
+      uPnAspect: uniform(p.aspect),
+      uPnWaist: uniform(Math.min(Math.max(p.waist, 0), 0.95)),
+      uPnPinch: uniform(p.pinch),
+      uPnRadius: uniform(p.radius),
+      uPnExpand: uniform(p.expand),
+      uPnThick: uniform(p.thick),
+      /* A negative separation silently swaps the OIII/Hα stratification */
+      uPnSep: uniform(Math.max(p.sep, 0)),
+      uPnTorus: uniform(p.torus),
+      uPnWobble: uniform(p.wobble),
+      uPnMotFreq: uniform(p.motFreq),
+      uPnMottle: uniform(p.mottle),
+      uPnRing: uniform(p.ring),
+      uPnRingFreq: uniform(p.ringFreq),
+      uPnRingPhase: uniform(p.ringPhase),
+      uPnRingFade: uniform(p.ringFade),
+      uPnStriaFreq: uniform(p.striaFreq),
+      uPnStriaAniso: uniform(p.striaAniso),
+      uPnStriaSharp: uniform(p.striaSharp),
+      uPnStriaEro: uniform(clamp01(p.striaEro)),
+      /* remapCombine caps coverage at 1; a zero floor blanks the shell instead */
+      uPnCov: uniform(Math.max(p.cov, 0.05)),
+      uPnBreakup: uniform(p.breakup),
+      uPnHaloR: uniform(p.haloR),
+      uPnHalo: uniform(Math.max(p.halo, 0)),
+      uPnHaloOiii: uniform(Math.max(p.haloOiii, 0)),
+      uPnFlier: uniform(Math.max(p.flier, 0)),
+      uPnFlierR: uniform(p.flierR),
+      uPnFlierSize: uniform(p.flierSize),
+      uPnFlierHa: uniform(Math.max(p.flierHa, 0)),
+      uPnStarTint: uniform(new THREE.Vector3(...p.starTint)),
+      uPnStarLum: uniform(Math.max(p.starLum, 0)),
+      uPnStarSize: uniform(p.starSize),
+      uPnStarHalo: uniform(Math.max(p.starHalo, 0)),
+      /* Negative gains would subtract light from the shared additive RTs */
+      uPnGain: uniform(Math.max(p.gain, 0)),
+      uPnHa: uniform(Math.max(p.ha, 0)),
+      uPnOiii: uniform(Math.max(p.oiii, 0)),
+      uPnSii: uniform(Math.max(p.sii, 0)),
+      uPnMorph: uniform(p.morphRate),
+      uPnOff: uniform(offsetFrom(instanceSeed(e, 101, k), 101)),
+      uDepthPn: uniform(e.depth ?? 0.45),
+    }, (b, aspect) => b.uPnCenter.value.set(p.center[0] * aspect, p.center[1]));
+    bag.pnOpts = { fliers: p.fliers !== false };
+    return bag;
+  }
+
+  function jetsBag(e, k) {
+    const j = { ...DEFAULTS.jets, ...e.params };
+    const bag = makeBag(k, {
+      uJetSrc: uniform(new THREE.Vector2(0, 0)),
+      uJetAngle: uniform(j.angle),
+      uJetLen: uniform(j.len),
+      uJetAsym: uniform(j.asym),
+      uJetWidth: uniform(j.width),
+      uJetFlare: uniform(j.flare),
+      uJetTaper: uniform(j.taper),
+      uJetGap: uniform(j.gap),
+      uJetPrecess: uniform(j.precess),
+      uJetPrecFreq: uniform(j.precFreq),
+      uJetPrecRate: uniform(j.precRate),
+      uJetKnotFreq: uniform(j.knotFreq),
+      uJetKnotSharp: uniform(j.knotSharp),
+      uJetKnotJit: uniform(j.knotJit),
+      uJetKnotFloor: uniform(j.knotFloor),
+      uJetKnotFade: uniform(j.knotFade),
+      uJetDrift: uniform(j.drift),
+      uJetTexFreq: uniform(j.texFreq),
+      uJetTexAniso: uniform(j.texAniso),
+      uJetTh: uniform(j.threshold),
+      uJetSoft: uniform(j.softness),
+      uJetBeamGain: uniform(Math.max(j.beamGain, 0)),
+      uJetBeamSii: uniform(Math.max(j.beamSii, 0)),
+      uJetShockFreq: uniform(j.shockFreq),
+      uJetBowStand: uniform(j.bowStand),
+      uJetBowCurv: uniform(j.bowCurv),
+      uJetBowThick: uniform(j.bowThick),
+      uJetBowSep: uniform(j.bowSep),
+      uJetBowSpan: uniform(j.bowSpan),
+      uJetBowFace: uniform(j.bowFace),
+      uJetBowTh: uniform(j.bowTh),
+      uJetBowGain: uniform(Math.max(j.bowGain, 0)),
+      uJetLeadOiii: uniform(Math.max(j.leadOiii, 0)),
+      uJetTrailHa: uniform(Math.max(j.trailHa, 0)),
+      uJetWakeGain: uniform(Math.max(j.wakeGain, 0)),
+      uJetWakeLen: uniform(j.wakeLen),
+      uJetWakeW: uniform(j.wakeW),
+      uJetWakeFlare: uniform(j.wakeFlare),
+      uJetHa: uniform(Math.max(j.ha, 0)),
+      uJetOiii: uniform(Math.max(j.oiii, 0)),
+      uJetSii: uniform(Math.max(j.sii, 0)),
+      uJetMorph: uniform(j.morphRate),
+      uJetOff: uniform(offsetFrom(instanceSeed(e, 103, k), 103)),
+      uDepthJet: uniform(e.depth ?? 0.42),
+    }, (b, aspect) => b.uJetSrc.value.set(j.src[0] * aspect, j.src[1]));
+    bag.jetOpts = { ...j.look };
+    return bag;
+  }
+
+  function wrbubbleBag(e, k) {
+    const w = { ...DEFAULTS.wrbubble, ...e.params };
+    const bag = makeBag(k, {
+      uWrbCenter: uniform(new THREE.Vector2(0, 0)),
+      uWrbRadius: uniform(w.radius),
+      uWrbExpand: uniform(Math.max(w.expand, 0)),
+      uWrbAxis: uniform(w.axis),
+      uWrbBow: uniform(Math.min(Math.max(w.bow, 0), 1.5)),
+      uWrbWing: uniform(Math.min(Math.max(w.wing, 0), 0.8)),
+      uWrbRatio: uniform(w.ratio),
+      uWrbThick: uniform(w.thick),
+      uWrbThickO: uniform(w.thickO),
+      uWrbComp: uniform(w.comp),
+      uWrbCompSoft: uniform(w.compSoft),
+      uWrbGapPhase: uniform(w.gapPhase),
+      uWrbCompO: uniform(clamp01(w.compO)),
+      /* Past ~60 the fibres alias against the foreshortened limb */
+      uWrbFibFreq: uniform(Math.min(Math.max(w.fibFreq, 0), 60)),
+      uWrbFibAniso: uniform(w.fibAniso),
+      uWrbFibSharp: uniform(w.fibSharp),
+      uWrbWarp: uniform(w.warp),
+      uWrbWarp2: uniform(w.warp2),
+      uWrbTh: uniform(w.threshold),
+      uWrbSoft: uniform(w.softness),
+      uWrbPatch: uniform(clamp01(w.patch)),
+      uWrbBleed: uniform(Math.max(w.bleed, 0)),
+      uWrbGain: uniform(Math.max(w.gain, 0)),
+      uWrbHa: uniform(Math.max(w.ha, 0)),
+      uWrbOiii: uniform(Math.max(w.oiii, 0)),
+      uWrbSii: uniform(Math.max(w.sii, 0)),
+      uWrbMorph: uniform(w.morphRate),
+      uWrbHornPhi: uniform(w.hornPhi),
+      uWrbHornTilt: uniform(w.hornTilt),
+      uWrbHornLen: uniform(Math.max(w.hornLen, 0)),
+      uWrbHornW: uniform(Math.max(w.hornW, 1e-3)),
+      uWrbHornFeather: uniform(w.hornFeather),
+      uWrbHornAmt: uniform(w.hornAmt),
+      /* An offset in units of R, so the aspect scale must not reach it */
+      uWrbStarAt: uniform(new THREE.Vector2(...w.starAt)),
+      uWrbStarLum: uniform(Math.max(w.starLum, 0)),
+      uWrbStarCore: uniform(Math.max(w.starCore, 1e-4)),
+      uWrbStarBeta: uniform(w.starBeta),
+      uWrbStarHalo: uniform(Math.max(w.starHalo, 0)),
+      uWrbStarHaloR: uniform(Math.max(w.starHaloR, 1e-3)),
+      uWrbStarTint: uniform(new THREE.Vector3(...w.starTint)),
+      uWrbOff: uniform(offsetFrom(instanceSeed(e, 107, k), 107)),
+      uDepthWrb: uniform(e.depth ?? 0.42),
+    }, (b, aspect) => b.uWrbCenter.value.set(w.center[0] * aspect, w.center[1]));
+    bag.wrbOpts = { horns: w.horns === true };
+    return bag;
+  }
+
+  const globInst = featureEnts.globules.map((e, k) => globulesBag(e, k));
+  const reflInst = featureEnts.reflection.map((e, k) => reflectionBag(e, k));
+  const filInst = featureEnts.filaments.map((e, k) => filamentsBag(e, k));
+  const echoInst = featureEnts.echo.map((e, k) => echoBag(e, k));
+  const fanInst = featureEnts.shadowFan.map((e, k) => shadowFanBag(e, k));
+  const beamInst = featureEnts.searchlight.map((e, k) => searchlightBag(e, k));
+  const pnInst = featureEnts.planetary.map((e, k) => planetaryBag(e, k));
+  const jetInst = featureEnts.jets.map((e, k) => jetsBag(e, k));
+  const wrbInst = featureEnts.wrbubble.map((e, k) => wrbubbleBag(e, k));
 
   /* Layer passes render an overscanned domain so compose can offset without
      sampling past an RT edge */
@@ -337,27 +697,59 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
 
   /* The glow and its shock filaments are one object in two RTs, so each half
      pre-shifts to its own RT depth in order to land together on screen. */
-  const reflLine = has.reflection
-    ? buildReflectionNodes(skyAtDepth(U.uDepthRefl, U.uDepthLine), U).line : null;
-  const reflCont = has.reflection
-    ? buildReflectionNodes(skyAtDepth(U.uDepthRefl, U.uDepthCont), U).continuum : null;
-  const filLine = has.filaments
-    ? buildFilamentNodes(skyAtDepth(U.uDepthFil, U.uDepthLine), U).line : null;
-
   let lineNode = buildEmissionNodes(skyU, U);
-  if (reflLine) lineNode = lineNode.add(vec4(reflLine, 0.0));
-  if (filLine) lineNode = lineNode.add(vec4(filLine, 0.0));
+  for (const bag of reflInst) {
+    lineNode = lineNode.add(vec4(buildReflectionNodes(skyAtDepth(bag.uDepthRefl, U.uDepthLine), bag).line, 0.0));
+  }
+  for (const bag of filInst) {
+    lineNode = lineNode.add(vec4(buildFilamentNodes(skyAtDepth(bag.uDepthFil, U.uDepthLine), bag).line, 0.0));
+  }
+  for (const bag of pnInst) {
+    lineNode = lineNode.add(vec4(buildPlanetaryNodes(skyAtDepth(bag.uDepthPn, U.uDepthLine), bag, bag.pnOpts).line, 0.0));
+  }
+  for (const bag of jetInst) {
+    lineNode = lineNode.add(vec4(buildJetNodes(skyAtDepth(bag.uDepthJet, U.uDepthLine), bag, bag.jetOpts).line, 0.0));
+  }
+  for (const bag of wrbInst) {
+    lineNode = lineNode.add(vec4(buildWrBubbleNodes(skyAtDepth(bag.uDepthWrb, U.uDepthLine), bag, bag.wrbOpts).line, 0.0));
+  }
+  /* Scattered starlight has no line signature, so echo only reaches the line RT
+     when the host opts into the Hα whisper; the module builds no `line` otherwise. */
+  for (const bag of echoInst) {
+    if (!bag.echoOpts.ha) continue;
+    lineNode = lineNode.add(vec4(buildEchoNodes(skyAtDepth(bag.uDepthEcho, U.uDepthLine), bag, bag.echoOpts).line, 0.0));
+  }
 
   let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, U);
-  if (reflCont) contNode = contNode.add(vec4(reflCont, 0.0));
+  for (const bag of reflInst) {
+    contNode = contNode.add(vec4(buildReflectionNodes(skyAtDepth(bag.uDepthRefl, U.uDepthCont), bag).continuum, 0.0));
+  }
+  for (const bag of echoInst) {
+    contNode = contNode.add(vec4(buildEchoNodes(skyAtDepth(bag.uDepthEcho, U.uDepthCont), bag, bag.echoOpts).continuum, 0.0));
+  }
+  for (const bag of fanInst) {
+    contNode = contNode.add(vec4(buildShadowFanNodes(skyAtDepth(bag.uDepthFan, U.uDepthCont), bag, bag.fanOpts).continuum, 0.0));
+  }
+  for (const bag of beamInst) {
+    contNode = contNode.add(vec4(buildSearchlightNodes(skyAtDepth(bag.uDepthBeam, U.uDepthCont), bag, bag.beamOpts).continuum, 0.0));
+  }
+  for (const bag of pnInst) {
+    contNode = contNode.add(vec4(buildPlanetaryNodes(skyAtDepth(bag.uDepthPn, U.uDepthCont), bag, bag.pnOpts).continuum, 0.0));
+  }
+  for (const bag of wrbInst) {
+    contNode = contNode.add(vec4(buildWrBubbleNodes(skyAtDepth(bag.uDepthWrb, U.uDepthCont), bag, bag.wrbOpts).continuum, 0.0));
+  }
 
   const lineScene = fullscreenPass(lineNode);
   const contScene = fullscreenPass(contNode);
   const composeScene = fullscreenPass(buildComposeNodes({
     lineTex: lineRT.texture, contTex: contRT.texture, brightTex: brightRT.texture, U,
     layers: {
-      globules: has.globules ? { cometary: P.globules.cometary !== false } : null,
-      reflection: has.reflection,
+      globules: globInst,
+      reflection: reflInst,
+      echo: echoInst,
+      shadowFan: fanInst,
+      searchlight: beamInst,
     },
   }));
 
@@ -492,9 +884,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     U.uIonSrc.value.set(P.emission.ionSrc[0] * aspect, P.emission.ionSrc[1]);
     /* Sky x spans [0, aspect], so framed positions scale or they slide toward
        the left edge as the canvas widens */
-    U.uGlobIonSrc?.value.set(P.globules.ionSrc[0] * aspect, P.globules.ionSrc[1]);
-    U.uReflStar?.value.set(P.reflection.star[0] * aspect, P.reflection.star[1]);
-    U.uArcCenter?.value.set(P.filaments.center[0] * aspect, P.filaments.center[1]);
+    for (const reseat of reseats) reseat(aspect);
 
     rebuildBright();
   }
@@ -555,5 +945,20 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   /* `uniforms` is the editor hook: Firmament pokes values live instead of
      rebuilding the graph for every slider drag. resize() re-seats the framed
      positions from the build-time params, so a live editor re-applies after it. */
-  return { render, resize, dispose, backend, capture, setCamera, uniforms: U };
+  /* `instances` exposes every duplicate's own bag; `uniforms` stays the
+     instance-0 view Firmament already binds to. */
+  return {
+    render, resize, dispose, backend, capture, setCamera, uniforms: U,
+    instances: {
+      globules: globInst.slice(),
+      reflection: reflInst.slice(),
+      filaments: filInst.slice(),
+      echo: echoInst.slice(),
+      shadowFan: fanInst.slice(),
+      searchlight: beamInst.slice(),
+      planetary: pnInst.slice(),
+      jets: jetInst.slice(),
+      wrbubble: wrbInst.slice(),
+    },
+  };
 }

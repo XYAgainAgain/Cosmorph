@@ -2,12 +2,11 @@
    (scattered light carries no line signature); the shock filaments are Hα. */
 
 import { Fn, float, vec3, dot, mix, pow, smoothstep } from 'three/tsl';
-import { fbm3o2, makeRidged } from './noise.js';
+import { fbm3o2, ridged4 } from './noise.js';
 
 /* Offset into an independent slice of the noise domain for the filaments */
 const FIL_DOMAIN = vec3(7.3, 2.1, 4.7);
 
-const ridged4 = /*@__PURE__*/ makeRidged(4);
 
 /* The dust the glow lives in. Deliberately low frequency: a radially
    symmetric halo reads as a lens artifact, not as an illuminated cloud. */
@@ -40,27 +39,28 @@ function dustCover(sky, shapeG, U) {
 
 export function buildReflectionNodes(skyU, U) {
   const continuum = Fn(() => {
-    const d = skyU.sub(U.uReflStar).toVar('rd');
-    const d2 = dot(d, d).toVar('rd2');
-    const rr = d2.max(1e-12).sqrt().toVar('rr');
+    const d = skyU.sub(U.uReflStar).toVar();
+    const d2 = dot(d, d).toVar();
+    const rr = d2.max(1e-12).sqrt().toVar();
 
-    const shape = scatterShape(d2, U).toVar('reflShape');
-    const cover = dustCover(skyU, shape.g, U).toVar('reflCover');
+    const shape = scatterShape(d2, U).toVar();
+    const cover = dustCover(skyU, shape.g, U).toVar();
 
     const warm = float(1).sub(smoothstep(0.0, U.uReflWarmR.max(1e-3), rr));
-    const tint = mix(U.uReflTint, U.uReflWarm, warm.mul(U.uReflWarmAmt));
+    /* Past 1 the mix extrapolates blue negative into the shared continuum RT */
+    const tint = mix(U.uReflTint, U.uReflWarm, warm.mul(U.uReflWarmAmt.clamp(0.0, 1.0)));
     return shape.mul(U.uReflLum).mul(tint).mul(cover);
   })();
 
   /* Filaments are shocked gas, not scattered light, so they belong on the line
      path even though they ride the reflection cloud's own illumination. */
   const line = Fn(() => {
-    const d = skyU.sub(U.uReflStar).toVar('fd');
-    const d2 = dot(d, d).toVar('fd2');
-    const rr = d2.max(1e-12).sqrt().toVar('fr');
+    const d = skyU.sub(U.uReflStar).toVar();
+    const d2 = dot(d, d).toVar();
+    const rr = d2.max(1e-12).sqrt().toVar();
 
-    const shape = scatterShape(d2, U).toVar('filShape');
-    const cover = dustCover(skyU, shape.g, U).toVar('filCover');
+    const shape = scatterShape(d2, U).toVar();
+    const cover = dustCover(skyU, shape.g, U).toVar();
 
     /* Radial combing: unit direction on two axes, radius on the third. Seam-free
        because the circle is continuous, and the anisotropy is the whole trick. */
@@ -68,7 +68,7 @@ export function buildReflectionNodes(skyU, U) {
     const pf = vec3(dir.mul(U.uReflFilFreq), rr.mul(U.uReflFilFreq).mul(U.uReflFilAniso))
       .add(U.uReflOff).add(FIL_DOMAIN)
       .add(vec3(0.0, 0.0, U.uTev.mul(U.uReflMorph)));
-    const ridge = ridged4(pf, U.uReflFilSharp).toVar('filRidge');
+    const ridge = ridged4(pf, U.uReflFilSharp).toVar();
 
     /* Direction is meaningless at the star itself; the inner mask edge hides it */
     const filIn = U.uReflFilIn.max(1e-3);

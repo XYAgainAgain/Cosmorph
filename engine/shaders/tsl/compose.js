@@ -9,6 +9,9 @@ import { ign, asinh3 } from './noise.js';
 import { wispTau } from './dust.js';
 import { globuleTauAndRim } from './globules.js';
 import { reflectionTau } from './reflection.js';
+import { echoTau } from './echo.js';
+import { shadowFanTau } from './shadowfan.js';
+import { searchlightTau } from './searchlight.js';
 
 /* Interstellar reddening: blue is extinguished ~1.9× harder than red. That
    reflection self-extinguishes under its own summed tau is deliberate. */
@@ -39,15 +42,25 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
       .sub(par.mul(depth).div(U.uResolution))
       .mul(vec2(U.uAspect, 1.0))
       .add(U.uCamera);
-    const glob = layers.globules
-      ? globuleTauAndRim(skyAt(U.uDepthGlob), U, layers.globules.cometary)
-      : null;
+    const globs = (layers.globules ?? []).map((bag) =>
+      globuleTauAndRim(skyAt(bag.uDepthGlob), bag, bag.cometary));
 
     /* One exp over the summed optical depth: extinguishing layer by layer would
        double-count the reddening in every overlap */
     let tau = wispTau(skyAt(U.uDepthWisp), U);
-    if (glob) tau = tau.add(glob.tau);
-    if (layers.reflection) tau = tau.add(reflectionTau(skyAt(U.uDepthRefl), U));
+    for (const g of globs) tau = tau.add(g.tau);
+    for (const bag of layers.reflection ?? []) {
+      tau = tau.add(reflectionTau(skyAt(bag.uDepthRefl), bag));
+    }
+    for (const bag of layers.echo ?? []) {
+      tau = tau.add(echoTau(skyAt(bag.uDepthEcho), bag));
+    }
+    for (const bag of layers.shadowFan ?? []) {
+      tau = tau.add(shadowFanTau(skyAt(bag.uDepthFan), bag));
+    }
+    for (const bag of layers.searchlight ?? []) {
+      tau = tau.add(searchlightTau(skyAt(bag.uDepthBeam), bag));
+    }
     const T3 = exp(tau.negate().mul(SIGMA));
 
     /* Line emission takes the palette matrix and SCNR wherever it enters, so
@@ -62,7 +75,7 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
     /* The rim skips ALL summed tau, not just its own globule's — correct only
        while globules are the nearest tau layer, which the depth defaults keep true */
     let lit = toRGB(line).add(cont).mul(T3);
-    if (glob) lit = lit.add(toRGB(glob.rim));
+    for (const g of globs) lit = lit.add(toRGB(g.rim));
 
     const scene = lit.add(bright).mul(U.uExposure);
 

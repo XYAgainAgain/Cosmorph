@@ -55,13 +55,14 @@ export function effectiveParams(entity) {
 }
 
 /* Bools live as 0/1 in the UI but sky2d tests `cometary !== false`, so a
-   numeric 0 would read as true. Convert on the way out, not in the state. */
+   numeric 0 would read as true. Convert on the way out, not in the state; the
+   clone is deep so a nested flag bag (the jet's `look`) is never written back. */
 function engineParams(entity) {
   const spec = TYPE_BY_ID[entity.type];
   const src = effectiveParams(entity);
-  const out = { ...src };
+  const out = structuredClone(src);
   for (const param of spec.params) {
-    if (param.kind === 'bool') out[param.key] = !!src[param.key];
+    if (param.kind === 'bool') setPath(out, param.key, !!getPath(src, param.key));
   }
   return out;
 }
@@ -135,6 +136,7 @@ function sanitizeParams(type, raw) {
   const out = defaultParams(type);
   if (!raw || typeof raw !== 'object') return out;
   for (const param of TYPE_BY_ID[type].params) {
+    if (param.derived) continue;
     const value = getPath(raw, param.key);
     if (value === undefined || value === null) continue;
     if (param.kind === 'bool') {
@@ -182,10 +184,10 @@ export function deserialize(raw) {
         if (type) warnings.push(`Unknown entity type "${type}" was skipped.`);
         continue;
       }
-      /* sky2d is a type-keyed singleton in v1; a second instance would be
-         dropped by the engine anyway, so drop it here where it can be reported */
+      /* Firmament's entity list is type-keyed; the engine now multiplies
+         globules/reflection/filaments, so the studio is the constraint here. */
       if (seen.has(type)) {
-        warnings.push(`Duplicate "${type}" entity was dropped (one per type in v1).`);
+        warnings.push(`Duplicate "${type}" entity was dropped (the studio edits one per type).`);
         continue;
       }
       seen.add(type);
@@ -228,10 +230,8 @@ export function sortEntities(entities) {
    One step: below this the dial has no range left to move in. */
 export const DEPTH_GAP = 0.01;
 
-/* Renumbers `order` 0..n-1 down the visible list and redistributes the depth
-   values the scene already holds, so a drag permutes the spread the user tuned
-   instead of inventing new numbers for it. Order wins over depth: a file whose
-   depths disagree with its order is re-sorted, not honoured. */
+/* Redistributes depth to match the visible order, so a drag permutes the
+   user's tuned spread instead of inventing new numbers; order always wins over depth. */
 export function normalizeOrder(entities) {
   const sorted = sortEntities(entities);
   const movable = sorted.filter((e) => !TYPE_BY_ID[e.type].pinned);
@@ -244,6 +244,11 @@ export function normalizeOrder(entities) {
     e.depth = clamp(Math.max(depths[i], floor + DEPTH_GAP), 0, max);
     floor = e.depth;
   });
+  /* A depth-capped type mid-list can collapse onto its successors after the
+     ascending pass; the backward pass reopens the gaps so order never lies. */
+  for (let i = movable.length - 2; i >= 0; i--) {
+    movable[i].depth = Math.max(Math.min(movable[i].depth, movable[i + 1].depth - DEPTH_GAP), 0);
+  }
   return sorted;
 }
 

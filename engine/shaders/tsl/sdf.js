@@ -113,6 +113,16 @@ export const sdfEnvelope = /*@__PURE__*/ Fn(([d, feather]) => {
   return smoothstep(f.mul(-0.5), f.mul(0.5), d.negate());
 });
 
+/* Analytic half-chord through a spherical shell at projected radius rp,
+   normalized by its true peak: limb brightening for free, no painted edge. */
+export const shellChord = /*@__PURE__*/ Fn(([rp, rOut, rIn]) => {
+  const q = rp.mul(rp).toVar();
+  const o2 = rOut.mul(rOut).toVar();
+  const i2 = rIn.mul(rIn).toVar();
+  const chord = o2.sub(q).max(0.0).sqrt().sub(i2.sub(q).max(0.0).sqrt());
+  return chord.div(o2.sub(i2).max(1e-8).sqrt());
+});
+
 /* Guarded five-arg remap. Assumes hi > lo (every doctrine chain does): the
    denominator is floored, not sign-corrected. */
 export const remapRange = /*@__PURE__*/ Fn(([v, lo, hi, ln, hn]) => {

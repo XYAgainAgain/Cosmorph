@@ -105,6 +105,11 @@ export function makeRidged(octaves) {
   });
 }
 
+/* Shared instances: one ridge wrapper body in the generated shader, however
+   many modules ride it. makeRidged stays exported for odd octave counts. */
+export const ridged2 = /*@__PURE__*/ makeRidged(2);
+export const ridged4 = /*@__PURE__*/ makeRidged(4);
+
 /* Jimenez interleaved gradient noise. Takes pixel coordinates, never uv. */
 export const ign = /*@__PURE__*/ Fn(([px]) => {
   return fract(mul(52.9829189, fract(dot(px, vec2(0.06711056, 0.00583715)))));

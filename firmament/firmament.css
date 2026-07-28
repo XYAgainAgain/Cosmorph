@@ -531,7 +531,9 @@
 
   .param {
     display: grid;
-    grid-template-columns: 8rem minmax(0, 1fr) 3.5rem;
+    /* Value column grows for six-decimal readouts (0.000034) without ragging
+       the common three-decimal case */
+    grid-template-columns: 8rem minmax(0, 1fr) minmax(3.5rem, max-content);
     align-items: center;
     gap: 0.5rem;
     font-size: 0.87rem;
@@ -548,7 +550,8 @@
     text-align: end;
     font-variant-numeric: tabular-nums;
   }
-  .param--bool { grid-template-columns: 8rem minmax(0, 1fr); }
+  .param--bool,
+  .param--pick { grid-template-columns: 8rem minmax(0, 1fr); }
 
   .param jelly-slider,
   .scrub {

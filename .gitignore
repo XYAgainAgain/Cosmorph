@@ -7,8 +7,11 @@ node_modules/
 # Build Stuff (actual output via GitHub Releases)
 dist/
 build/
+target/
 platforms/*/build/
 platforms/*/dist/
+platforms/*/src-tauri/target/
+platforms/*/src-tauri/gen/
 *.apk
 *.aab
 *.keystore

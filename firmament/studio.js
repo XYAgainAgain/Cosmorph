@@ -117,8 +117,16 @@ function applyAll(sky) {
   for (const param of SCENE_PARAMS) applyParam(U, param, scene.grading[param.key], {});
   for (const entity of scene.entities) {
     const spec = TYPE_BY_ID[entity.type];
+    /* A build still in flight when the scene gained an entity has no uniforms
+       for it; the rebuild it queued behind will seat them. A permanent skip
+       here means a typo'd depthParam.u, hence the warn. */
+    if (spec.depthParam && !U[spec.depthParam.u]) {
+      console.warn(`Firmament: no ${spec.depthParam.u} in this build; "${entity.type}" edits deferred to the rebuild.`);
+      continue;
+    }
     const ctx = uniformCtx(entity);
     for (const param of spec.params) {
+      if (param.derived) continue;
       const value = getPath(ctx.params, param.key);
       if (value !== undefined) applyParam(U, param, value, ctx);
     }
@@ -215,6 +223,16 @@ function sliderRow(param, value, keyAttr) {
         label="${param.label}" ${value ? 'checked' : ''}></jelly-checkbox>
     </div>`;
   }
+  if (param.kind === 'enum') {
+    const options = param.options
+      .map((o) => `<jelly-option value="${o.id}">${o.label}</jelly-option>`)
+      .join('');
+    return `<div class="param param--pick" data-param="${param.key}">
+      <span class="param__label">${param.label}</span>
+      <jelly-select size="small" data-role="param" data-key="${param.key}"
+        label="${param.label}" value="${value}">${options}</jelly-select>
+    </div>`;
+  }
   return `<div class="param" data-param="${param.key}">
     <span class="param__label" title="${param.label}">${param.label}</span>
     <jelly-slider size="small" data-role="param" data-key="${param.key}" id="${id}"
@@ -308,9 +326,13 @@ function renderEntityDetail() {
   }
   if (spec.depthParam && ui.tier >= 3) {
     const bound = depthBounds(entity);
-    byGroup.get('Depth')?.push({
-      ...DEPTH_PARAM, min: bound.min, max: bound.max, def: spec.depth ?? 0, group: 'Depth', tier: 3,
-    });
+    /* Pinned between neighbours with zero travel, the dial would render a
+       min === max range (NaN thumb); the row hides until a drag makes room. */
+    if (bound.max - bound.min > 1e-9) {
+      byGroup.get('Depth')?.push({
+        ...DEPTH_PARAM, min: bound.min, max: bound.max, def: spec.depth ?? 0, group: 'Depth', tier: 3,
+      });
+    }
   }
 
   const eff = effectiveParams(entity);
@@ -320,7 +342,10 @@ function renderEntityDetail() {
     const hasBasic = list.some((p) => p.tier === 1);
     const open = isGroupOpen(entity.type, group, hasBasic);
     const rows = list.map((param) => {
-      const value = param.synthetic ? entity.depth : getPath(eff, param.key);
+      let value;
+      if (param.synthetic) value = entity.depth;
+      else if (param.kind === 'enum') value = param.read(eff);
+      else value = getPath(eff, param.key);
       return sliderRow(param, value, entity.type);
     }).join('');
     /* Depth holds one synthetic row and nothing the dice could roll */
@@ -385,24 +410,39 @@ function depthBounds(entity) {
   return { min, max: Math.max(Math.min(ceiling, max), min) };
 }
 
+/* Returns false when nothing moved, so a component that echoes its own value
+   back on upgrade cannot loop through the rebuild-and-repaint path. */
 function commitParam(entity, param, value, live = false) {
   if (param.synthetic) {
     const bound = depthBounds(entity);
     entity.depth = Math.min(Math.max(value, bound.min), bound.max);
     const slot = host.uniforms?.[TYPE_BY_ID[entity.type].depthParam.u];
     if (slot) slot.value = entity.depth;
-    return;
+    return true;
   }
+  if (param.kind === 'enum') {
+    /* Write-then-compare, not read-compare: read() can lie once the dependent
+       flags drift, and a redundant pick must still re-normalize them. */
+    const deps = TYPE_BY_ID[entity.type].params.filter((q) => q.key.startsWith(`${param.key}.`));
+    const before = deps.map((q) => getPath(entity.params, q.key));
+    param.write(entity.params, value);
+    if (deps.every((q, i) => getPath(entity.params, q.key) === before[i])) return false;
+    scheduleRebuild();
+    return true;
+  }
+  if (param.structural && getPath(entity.params, param.key) === value) return false;
   setPath(entity.params, param.key, value);
   /* Structural edits rebuild on release only; every drag tick would otherwise
      queue a fresh engine rebuild and stutter the panel */
   if (param.structural) { if (!live) scheduleRebuild(); }
   else if (host.uniforms && !entity.hidden) applyParam(host.uniforms, param, value, uniformCtx(entity));
   else if (host.uniforms) applyAll({ uniforms: host.uniforms });
+  return true;
 }
 
 function readControl(node, param) {
   if (param.kind === 'bool') return node.hasAttribute('checked') ? 1 : 0;
+  if (param.kind === 'enum') return node.value || node.getAttribute('value') || param.options[0].id;
   const n = Number(node.value);
   return Number.isFinite(n) ? n : param.def;
 }
@@ -438,9 +478,15 @@ function onParamEvent(event) {
   const param = key === DEPTH_PARAM.key ? DEPTH_PARAM : findParam(TYPE_BY_ID[entity.type], key);
   if (!param) return;
   const value = readControl(node, param);
-  commitParam(entity, param, value, event.type === 'input');
+  if (!commitParam(entity, param, value, event.type === 'input')) return;
+  /* A control that writes its neighbours' state has to repaint them; the
+     repaint destroys the focused node, so focus is re-seated by key. */
+  if (param.refresh) {
+    renderEntityDetail();
+    dom.detail.querySelector(`[data-role="param"][data-key="${key}"]`)?.focus();
+  }
   /* Read the committed value back: the dial's is clamped against its neighbours */
-  updateReadout(node, param, param.synthetic ? entity.depth : value);
+  else updateReadout(node, param, param.synthetic ? entity.depth : value);
   host.requestRender();
   markDirty();
 }
@@ -461,11 +507,20 @@ function rollValue(param) {
 function rerollGroup(entity, group) {
   const spec = TYPE_BY_ID[entity.type];
   let structural = false;
+  /* A derived enum owns its dependent flags: the dice pick one of its presets
+     instead of rolling the flags raw, or most rolls land on states no preset
+     expresses (including an all-off invisible entity). */
+  const owner = spec.params.find((p) => p.group === group && p.derived && p.options);
   for (const param of spec.params) {
-    if (param.group !== group) continue;
+    if (param.group !== group || param.derived) continue;
+    if (owner && param.key.startsWith(`${owner.key}.`)) continue;
     const value = rollValue(param);
     setPath(entity.params, param.key, value);
     if (param.structural) structural = true;
+  }
+  if (owner) {
+    owner.write(entity.params, owner.options[Math.floor(Math.random() * owner.options.length)].id);
+    structural = true;
   }
   if (host.uniforms) applyAll({ uniforms: host.uniforms });
   if (structural) scheduleRebuild();
