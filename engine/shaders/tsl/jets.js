@@ -87,7 +87,7 @@ export function buildJetNodes(skyU, U, opts = {}) {
       sii: float(0).toVar(),
     };
 
-    /* Ambient clumpiness the shocks plough into, anchored in the jet's own
+    /* Ambient clumpiness the shocks plow into, anchored in the jet's own
        frame so one evaluation serves both caps and the wake. */
     let mottle = null;
     if (bow || wake) {

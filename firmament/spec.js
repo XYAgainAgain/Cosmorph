@@ -101,6 +101,13 @@ export const JET_LOOKS = [
   { id: 'runaway', label: 'Runaway Bow Shock', look: { beam: 0, bow: 1, counter: 0, wake: 1 } },
 ];
 
+/* The shipped v2 bakes. The id is the sidecar path the loader fetches, which
+   makes the pick build-time: a new asset means a new texture and a new graph. */
+export const SHAPE_ASSETS = [
+  { id: 'assets/shapes/horsehead.json', label: 'Horsehead (Barnard 33)' },
+  { id: 'assets/shapes/test-blob.json', label: 'Test Blob' },
+];
+
 /* `rank` is the default depth order (top of the list = farthest). It matches
    each type's default depth ascending, so a fresh scene loads the curated
    parallax spread; after that the user's drag order owns it. */
@@ -146,6 +153,17 @@ export const ENTITY_TYPES = [
       p('warp', 'Domain warp', 0, 3, 0.01, 1.3, 'Structure', 1, { u: 'uWarp' }),
       p('mottle', 'Mottling', 0, 3, 0.01, 1.3, 'Structure', 2, { u: 'uMottle' }),
       p('stria', 'Striations', 0, 1, 0.01, 0.35, 'Structure', 2, { u: 'uStria' }),
+      /* The y frequency is derived host-side, so both dials have to write it or
+         the combing keeps the aspect it was built with. */
+      p('striaFreq', 'Striation freq', 0.5, 40, 0.5, 9.0, 'Structure', 3, {
+        set: (U, v, ctx) => {
+          U.uStriaFreq.value = v;
+          U.uStriaFreqY.value = v / Math.max(ctx.params.striaAniso, 1);
+        },
+      }),
+      p('striaAniso', 'Striation aniso', 1, 80, 0.5, 30.0, 'Structure', 3, {
+        set: (U, v, ctx) => { U.uStriaFreqY.value = ctx.params.striaFreq / Math.max(v, 1); },
+      }),
       p('contrast', 'Contrast', 0.2, 3, 0.01, 1.2, 'Structure', 2, { u: 'uNebContrast' }),
       p('covLo', 'Coverage low', 0, 1, 0.01, 0.3, 'Coverage', 2, pairLo('uCovLo', 'uCovHi', 'covHi')),
       p('covHi', 'Coverage high', 0, 1, 0.01, 0.48, 'Coverage', 2, pairHi('uCovHi', 'covLo')),
@@ -182,7 +200,7 @@ export const ENTITY_TYPES = [
     type: 'darkDust',
     label: 'Dark wisps',
     salt: 4,
-    rank: 11,
+    rank: 12,
     depth: 0.55,
     depthParam: { u: 'uDepthWisp', max: 1 },
     mute: { tau: 0 },
@@ -200,7 +218,7 @@ export const ENTITY_TYPES = [
     type: 'globules',
     label: 'Bok globules',
     salt: 5,
-    rank: 12,
+    rank: 13,
     depth: 0.6,
     depthParam: { u: 'uDepthGlob', max: 0.95 },
     addable: true,
@@ -232,7 +250,7 @@ export const ENTITY_TYPES = [
         set: (U, v) => { U.uGlobIonR2.value = Math.max(v * v, 1e-4); },
       }),
       p('ionSrc.0', 'Source X', -0.5, 2.5, 0.01, 1.05, 'Ionizing Source', 2, aspectX('uGlobIonSrc')),
-      p('ionSrc.1', 'Source Y', -0.5, 1.5, 0.01, 0.8, 'Ionizing Source', 2, plainY('uGlobIonSrc')),
+      p('ionSrc.1', 'Source Y', -0.5, 1.5, 0.01, 0.2, 'Ionizing Source', 2, plainY('uGlobIonSrc')),
       p('hotLo', 'Hot zone low', 0, 1, 0.01, 0.5, 'Ionizing Source', 3, pairLo('uGlobHotLo', 'uGlobHotHi', 'hotHi')),
       p('hotHi', 'Hot zone high', 0, 1, 0.01, 0.85, 'Ionizing Source', 3, pairHi('uGlobHotHi', 'hotLo')),
       p('rimGain', 'Rim gain', 0, 4, 0.01, 1.2, 'Rim Lighting', 1, { u: 'uRimGain' }),
@@ -613,7 +631,7 @@ export const ENTITY_TYPES = [
     depthParam: { u: 'uDepthWrb', max: 0.95 },
     addable: true,
     mute: { gain: 0, starLum: 0 },
-    groups: ['Shell', 'Bow Shock', 'Completeness', 'Fibres', 'Species', 'Horns', 'Central Star', 'Evolution', 'Depth'],
+    groups: ['Shell', 'Bow Shock', 'Completeness', 'Fibers', 'Species', 'Horns', 'Central Star', 'Evolution', 'Depth'],
     params: [
       p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.46, 'Shell', 1, aspectX('uWrbCenter')),
       p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.52, 'Shell', 1, plainY('uWrbCenter')),
@@ -630,16 +648,16 @@ export const ENTITY_TYPES = [
       p('gapPhase', 'Gap bearing', -3.1416, 3.1416, 0.01, 2.4, 'Completeness', 2, { u: 'uWrbGapPhase', unit: 'rad' }),
       p('compSoft', 'Gap softness', 0.001, 2, 0.001, 0.5, 'Completeness', 3, { u: 'uWrbCompSoft' }),
       p('compO', 'OIII gap survival', 0, 1, 0.01, 0.4, 'Completeness', 3, { u: 'uWrbCompO' }),
-      p('threshold', 'Threshold', 0, 1, 0.01, 0.7, 'Fibres', 2, { u: 'uWrbTh' }),
-      p('warp', 'Domain warp', 0, 3, 0.01, 0.85, 'Fibres', 2, { u: 'uWrbWarp' }),
-      /* Past ~60 the fibres alias against the foreshortened limb */
-      p('fibFreq', 'Fibre frequency', 0, 60, 0.5, 28.0, 'Fibres', 3, { u: 'uWrbFibFreq' }),
-      p('fibAniso', 'Fibre anisotropy', 0, 2, 0.01, 0.55, 'Fibres', 3, { u: 'uWrbFibAniso' }),
-      p('fibSharp', 'Ridge sharpness', 0, 8, 0.05, 2.0, 'Fibres', 3, { u: 'uWrbFibSharp' }),
-      p('warp2', 'Shear warp', 0, 3, 0.01, 0.45, 'Fibres', 3, { u: 'uWrbWarp2' }),
-      p('softness', 'Edge softness', 0.001, 1, 0.001, 0.26, 'Fibres', 3, { u: 'uWrbSoft' }),
-      p('patch', 'Patchiness', 0, 1, 0.01, 0.55, 'Fibres', 3, { u: 'uWrbPatch' }),
-      p('bleed', 'Species bleed', 0, 1, 0.01, 0.18, 'Fibres', 3, { u: 'uWrbBleed' }),
+      p('threshold', 'Threshold', 0, 1, 0.01, 0.7, 'Fibers', 2, { u: 'uWrbTh' }),
+      p('warp', 'Domain warp', 0, 3, 0.01, 0.85, 'Fibers', 2, { u: 'uWrbWarp' }),
+      /* Past ~60 the fibers alias against the foreshortened limb */
+      p('fibFreq', 'Fiber frequency', 0, 60, 0.5, 28.0, 'Fibers', 3, { u: 'uWrbFibFreq' }),
+      p('fibAniso', 'Fiber anisotropy', 0, 2, 0.01, 0.55, 'Fibers', 3, { u: 'uWrbFibAniso' }),
+      p('fibSharp', 'Ridge sharpness', 0, 8, 0.05, 2.0, 'Fibers', 3, { u: 'uWrbFibSharp' }),
+      p('warp2', 'Shear warp', 0, 3, 0.01, 0.45, 'Fibers', 3, { u: 'uWrbWarp2' }),
+      p('softness', 'Edge softness', 0.001, 1, 0.001, 0.26, 'Fibers', 3, { u: 'uWrbSoft' }),
+      p('patch', 'Patchiness', 0, 1, 0.01, 0.55, 'Fibers', 3, { u: 'uWrbPatch' }),
+      p('bleed', 'Species bleed', 0, 1, 0.01, 0.18, 'Fibers', 3, { u: 'uWrbBleed' }),
       p('gain', 'Gain', 0, 2, 0.01, 0.3, 'Species', 1, { u: 'uWrbGain' }),
       p('ha', 'Hα strength', 0, 2, 0.01, 0.85, 'Species', 2, { u: 'uWrbHa' }),
       p('oiii', 'OIII strength', 0, 2, 0.01, 1.0, 'Species', 2, { u: 'uWrbOiii' }),
@@ -721,6 +739,80 @@ export const ENTITY_TYPES = [
       p('oiii', 'OIII strength', 0, 2, 0.01, 1.0, 'Species', 2, { u: 'uPnOiii' }),
       p('sii', 'SII strength', 0, 2, 0.01, 0.14, 'Species', 3, { u: 'uPnSii' }),
       p('morphRate', 'Morph rate', 0, 1, 0.01, 0.04, 'Evolution', 2, { u: 'uPnMorph' }),
+    ],
+  },
+
+  {
+    type: 'shape',
+    label: 'Shape asset',
+    salt: 109,
+    rank: 11,
+    depth: 0.5,
+    /* Its tau has to stay behind the globules', which is what compose exempts */
+    depthParam: { u: 'uDepthShp', max: 0.58 },
+    addable: true,
+    mute: { tau: 0, gain: 0 },
+    groups: ['Frame', 'Density', 'Erosion', 'Rim Lighting', 'Ionizing Source', 'Glow', 'Evolution', 'Depth'],
+    params: [
+      {
+        key: 'asset',
+        label: 'Asset',
+        group: 'Frame',
+        tier: 1,
+        kind: 'enum',
+        structural: true,
+        options: SHAPE_ASSETS,
+        def: SHAPE_ASSETS[0].id,
+      },
+      p('center.0', 'Center X', -0.5, 2.5, 0.005, 0.5, 'Frame', 1, aspectX('uShpCenter')),
+      p('center.1', 'Center Y', -0.5, 1.5, 0.005, 0.5, 'Frame', 1, plainY('uShpCenter')),
+      /* The frame's extent in sky units. A whole-frame bake has to overhang the
+         viewport, so the default is the Horsehead's working framing, not the
+         module's test-blob figure; below ~1.9 the frame's own edge shows. */
+      p('scale', 'Frame scale', 0.05, 6, 0.005, 2.2, 'Frame', 1, { u: 'uShpScale' }),
+      p('rot', 'Rotation', -3.1416, 3.1416, 0.01, 0.0, 'Frame', 1, { u: 'uShpRot', unit: 'rad' }),
+      p('feather', 'SDF feather', 0.001, 0.3, 0.001, 0.04, 'Frame', 3, { u: 'uShpFeather' }),
+      /* In frame UV, not sky units, so it survives a rescale */
+      p('edgeFade', 'Frame edge fade', 0.001, 0.3, 0.001, 0.07, 'Frame', 3, { u: 'uShpEdge' }),
+      /* Matches the Horsehead's own suggestedTau (3.73502) on the slider grid, so
+         the default asset loads at the density its bake asks for. */
+      p('tau', 'Optical depth', 0, 8, 0.005, 3.735, 'Density', 1, { u: 'uShpTau' }),
+      p('density', 'Column density', 0, 3, 0.01, 1.0, 'Density', 1, { u: 'uShpDens' }),
+      p('veil', 'Eroded floor', 0, 1, 0.01, 0.55, 'Density', 2, { u: 'uShpVeil' }),
+      p('core', 'Core opacity', 0, 1, 0.01, 0.25, 'Density', 2, { u: 'uShpCore' }),
+      p('threshold', 'Threshold', 0, 1, 0.01, 0.3, 'Density', 2, { u: 'uShpTh' }),
+      p('softness', 'Edge softness', 0.001, 0.6, 0.001, 0.1, 'Density', 2, { u: 'uShpSoft' }),
+      p('erode', 'Erosion', 0, 1, 0.01, 0.3, 'Erosion', 2, { u: 'uShpErode' }),
+      p('freq', 'Noise frequency', 0.2, 20, 0.05, 8.0, 'Erosion', 2, { u: 'uShpFreq' }),
+      p('eroFreq', 'Erosion cells', 1, 40, 0.1, 18.0, 'Erosion', 3, { u: 'uShpEroFreq' }),
+      p('eroFall', 'Erosion falloff', 0.05, 2, 0.01, 0.6, 'Erosion', 3, { u: 'uShpEroFall' }),
+      p('rimGain', 'Rim gain', 0, 8, 0.01, 2.4, 'Rim Lighting', 2, { u: 'uShpRimGain' }),
+      p('rimW', 'Rim width', 0.001, 0.2, 0.001, 0.012, 'Rim Lighting', 2, { u: 'uShpRimW' }),
+      p('rimAt', 'Rim position', -0.1, 0.2, 0.001, 0.004, 'Rim Lighting', 2, { u: 'uShpRimAt' }),
+      p('gain', 'Emission gain', 0, 3, 0.01, 1.0, 'Rim Lighting', 3, { u: 'uShpGain' }),
+      p('rimEps', 'Slope epsilon', 0.001, 0.05, 0.001, 0.006, 'Rim Lighting', 3, { u: 'uShpRimEps' }),
+      p('rimDens', 'Column feed', 0, 1, 0.01, 0.7, 'Rim Lighting', 3, { u: 'uShpRimDens' }),
+      p('rimJit', 'Rim jitter', 0, 0.1, 0.001, 0.008, 'Rim Lighting', 3, { u: 'uShpRimJit' }),
+      p('rimKnot', 'Rim beading', 0, 1, 0.01, 0.6, 'Rim Lighting', 3, { u: 'uShpRimKnot' }),
+      p('rimKnotFreq', 'Bead frequency', 1, 60, 0.5, 12.0, 'Rim Lighting', 3, { u: 'uShpRimKnotFreq' }),
+      /* Zero drops the wide second exp from the built graph, so it rebuilds */
+      p('rimHalo', 'Rim halo', 0, 1, 0.01, 0.25, 'Rim Lighting', 3, { structural: true }),
+      p('rimFacing', 'Facing falloff', 0.05, 20, 0.05, 0.5, 'Rim Lighting', 3, { u: 'uShpRimFacing' }),
+      p('rimOiii', 'Rim OIII', 0, 2, 0.01, 0.5, 'Rim Lighting', 3, { u: 'uShpRimOiii' }),
+      p('rimSii', 'Rim SII', 0, 2, 0.01, 0.15, 'Rim Lighting', 3, { u: 'uShpRimSii' }),
+      p('ionSrc.0', 'Source X', -0.5, 2.5, 0.01, 1.05, 'Ionizing Source', 3, aspectX('uShpIonSrc')),
+      p('ionSrc.1', 'Source Y', -0.5, 1.5, 0.01, 0.2, 'Ionizing Source', 3, plainY('uShpIonSrc')),
+      p('ionRadius', 'Source radius', 0.05, 3, 0.01, 0.9, 'Ionizing Source', 3, {
+        set: (U, v) => { U.uShpIonR2.value = Math.max(v * v, 1e-4); },
+      }),
+      p('hotLo', 'Hot zone low', 0, 1, 0.01, 0.5, 'Ionizing Source', 3, pairLo('uShpHotLo', 'uShpHotHi', 'hotHi')),
+      p('hotHi', 'Hot zone high', 0, 1, 0.01, 0.85, 'Ionizing Source', 3, pairHi('uShpHotHi', 'hotLo')),
+      /* Zero drops the whole interior-emission chain, so it rebuilds */
+      p('glow', 'Interior glow', 0, 3, 0.01, 0.0, 'Glow', 3, { structural: true }),
+      p('glowFall', 'Glow falloff', 0.001, 0.5, 0.001, 0.06, 'Glow', 3, { u: 'uShpGlowFall' }),
+      p('oiii', 'Glow OIII', 0, 2, 0.01, 0.35, 'Glow', 3, { u: 'uShpOiii' }),
+      p('sii', 'Glow SII', 0, 2, 0.01, 0.1, 'Glow', 3, { u: 'uShpSii' }),
+      p('morphRate', 'Morph rate', 0, 1, 0.01, 0.06, 'Evolution', 3, { u: 'uShpMorph' }),
     ],
   },
 ];

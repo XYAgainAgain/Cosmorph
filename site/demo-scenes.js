@@ -9,6 +9,16 @@ function jitter(seed, salt) {
   return createRng(deriveSeed(seed, salt));
 }
 
+/* `scale` is the shape frame's extent in sky units. A whole-frame v2 asset has to
+   overhang the viewport with its feather margin offscreen, or the column ramps to
+   zero inside the frame and reads as a soft seam down each edge. */
+function frameScale(aspect, center, edgeFade, floor) {
+  const span = 1 - 2 * edgeFade;
+  const x = (2 * Math.max(center[0], 1 - center[0]) * aspect) / span;
+  const y = (2 * Math.max(center[1], 1 - center[1])) / span;
+  return Math.max(floor, x, y);
+}
+
 function base(seed, extra) {
   return {
     version: 1,
@@ -100,7 +110,7 @@ const SCENES = {
   },
 
   /* V838-style light echo: one flash walking outward through a static dust
-     cloud whose centre is offset, so the rings read asymmetric, not concentric */
+     cloud whose center is offset, so the rings read asymmetric, not concentric */
   echo: (seed) => {
     const r = jitter(seed, 20);
     return base(seed, [
@@ -245,6 +255,94 @@ const SCENES = {
           center: [0.36 + r.next() * 0.28, 0.36 + r.next() * 0.28],
           axis: (r.next() - 0.5) * Math.PI,
           radius: 0.24 + r.next() * 0.08,
+        },
+      },
+    ]);
+  },
+
+  /* Baked column-density asset: an authored dark shape eating an emission field,
+     its boundary roughened by noise and its rim lit from an offscreen source */
+  shape: (seed, aspect = 1.7) => {
+    const r = jitter(seed, 27);
+    const center = [0.5 + (r.next() - 0.5) * 0.14, 0.5 - (r.next() - 0.5) * 0.1];
+    return base(seed, [
+      {
+        type: 'emission',
+        seed: deriveSeed(seed, 2),
+        depth: 0.3,
+        lock: false,
+        params: { gain: 1.1, covLo: 0.28, covHi: 0.5, oiii: 0.45 },
+      },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.9 } },
+      {
+        type: 'shape',
+        seed: deriveSeed(seed, 37),
+        depth: 0.5,
+        lock: false,
+        params: {
+          asset: 'assets/shapes/test-blob.json',
+          center,
+          scale: frameScale(aspect, center, 0.07, 1.9) + r.next() * 0.3,
+          rot: (r.next() - 0.5) * 0.5,
+        },
+      },
+    ]);
+  },
+
+  /* Barnard 33 as the reference photo frames it: the IC 434 emission wall
+     behind the head, the molecular cloud banked below, NGC 2023 off the flank */
+  horsehead: (seed, aspect = 1.7) => {
+    const r = jitter(seed, 28);
+    /* The head is the middle third of the baked frame, so 2.2 is what makes it
+       fill the viewport; wider canvases take the frame-coverage figure instead. */
+    const center = [0.5, 0.545];
+    return base(seed, [
+      {
+        type: 'emission',
+        seed: deriveSeed(seed, 2),
+        depth: 0.3,
+        lock: false,
+        /* IC 434 is an Hα wall with almost no OIII, and the silhouette only
+           reads if the field behind it stays bright across most of the frame.
+           The high stria is the reference photo's vertical combing. */
+        params: {
+          gain: 1.5, covLo: 0.05, covHi: 0.34, contrast: 1.05,
+          oiii: 0.2, sii: 0.14, mottle: 1.1,
+          stria: 0.6, striaFreq: 26, striaAniso: 45,
+        },
+      },
+      /* Thin: the shape asset now bakes its own cloud bank, and a second wisp
+         layer at full strength just muddies it. */
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.35 } },
+      {
+        /* NGC 2023 keeps the corner opposite the horse from reading as bare sky */
+        type: 'reflection',
+        seed: deriveSeed(seed, 6),
+        depth: 0.35,
+        lock: false,
+        params: { star: [0.17 + r.next() * 0.08, 0.74 + r.next() * 0.08], lum: 0.9 },
+      },
+      {
+        type: 'shape',
+        seed: deriveSeed(seed, 38),
+        depth: 0.5,
+        lock: false,
+        params: {
+          asset: 'assets/shapes/horsehead.json',
+          center,
+          scale: frameScale(aspect, center, 0.06, 2.2),
+          rot: (r.next() - 0.5) * 0.1,
+          /* Sigma Ori sits above and off the right edge, which is what puts the
+             lit rim along the mane and the crown rather than the muzzle. */
+          ionSrc: [1.18, 0.26], ionRadius: 1.15,
+          rimGain: 4.2, rimW: 0.012, rimHalo: 0, rimFacing: 0.7, rimEps: 0.01,
+          rimDens: 0.8,
+          rimKnot: 0.85, rimKnotFreq: 26, rimJit: 0.03, rimOiii: 0.3, rimSii: 0.2,
+          /* The photograph's own tau is near 1 because it is stretched, so 4 is
+             what makes the skull opaque; the low veil and small core boost are
+             what keep the mane and the bank transmitting through it. */
+          tau: 4.0, density: 1.0, core: 0.18, veil: 0.5, edgeFade: 0.06,
+          threshold: 0.12, softness: 0.2, erode: 0.22, freq: 7.0,
         },
       },
     ]);

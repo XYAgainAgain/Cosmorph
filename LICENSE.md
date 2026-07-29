@@ -3,6 +3,8 @@ Cosmorph — Copyright © 2026 Sam Atwood
 Licensed under the PolyForm Noncommercial License 1.0.0, reproduced in full below.
 For commercial licensing, ask nicely: https://github.com/XYAgainAgain/Cosmorph/issues
 
+Exception: `assets/shapes/horsehead.json` and `assets/shapes/horsehead.bin` are derived from “Barnard 33” by Ken Crawford (CC BY-SA 3.0, via Wikimedia Commons) and are themselves licensed CC BY-SA 3.0.
+
 ---
 
 # PolyForm Noncommercial License 1.0.0

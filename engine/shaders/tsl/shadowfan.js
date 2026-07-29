@@ -55,7 +55,7 @@ function fanField(sky, U) {
    multiply, so two crossing shadows deepen instead of clipping at one floor. */
 function shadowTrans(dirHat, r, U, count) {
   /* The penumbra widens downstream: a knot's umbra shrinks relative to its
-     half-shadow the further the light has travelled from the apex. */
+     half-shadow the further the light has traveled from the apex. */
   const pen = U.uFanPen.max(0.0)
     .add(r.div(U.uFanLen.max(1e-3)).mul(U.uFanPenGrow.max(0.0))).toVar();
   /* Direction is meaningless at the star, and a knot cannot shade its own orbit */

@@ -55,7 +55,7 @@ export function buildFilamentNodes(skyU, U) {
     const ring = dirHat.mul(R.mul(kT)).toVar();
 
     /* One slow field along the shell drives both the haze amplitude and which
-       species leads, so colour and glow stay in step around the arc. */
+       species leads, so color and glow stay in step around the arc. */
     const sheet = fbm3o2(vec3(ring.mul(0.13), zEvo.mul(0.4)).add(U.uFilOff.mul(5.0)))
       .mul(FBM2_NORM).toVar();
 
@@ -108,7 +108,7 @@ export function buildFilamentNodes(skyU, U) {
     const wH = mix(float(1.0), float(1).sub(lace), U.uFilLace);
 
     /* Haze enters both species equally, so the faint end desaturates toward
-       neutral through the palette while only the threads carry colour. */
+       neutral through the palette while only the threads carry color. */
     const gain = U.uFilGain.mul(edgeOn);
     const ha = densH.mul(wH).mul(gain).add(haze).mul(U.uFilHa).toVar();
     const oiii = densO.mul(wO).mul(gain).add(haze).mul(U.uFilOiii);

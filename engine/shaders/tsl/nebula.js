@@ -25,8 +25,10 @@ export function buildEmissionNodes(skyU, U) {
       fbm3o2(vec3(skyU.mul(U.uNebFreq).mul(0.9), zEvo.mul(0.4)).add(U.uNebOff.mul(2.0))),
     );
 
-    /* Striations are anisotropy, not a noise type: squash one axis ~30:1 */
-    const sp = vec3(skyU.x.mul(9.0), skyU.y.mul(0.3), zEvo.mul(0.3)).add(U.uNebOff.mul(0.5));
+    /* Striations are anisotropy, not a noise type: the y frequency is the x
+       frequency divided by the anisotropy, which the host already did. */
+    const sp = vec3(skyU.x.mul(U.uStriaFreq), skyU.y.mul(U.uStriaFreqY), zEvo.mul(0.3))
+      .add(U.uNebOff.mul(0.5));
     const S = fbm3o2(sp);
 
     const E = G.mul(M.sub(0.5).mul(U.uMottle).add(1.0))

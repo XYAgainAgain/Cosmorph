@@ -207,6 +207,8 @@ export function createSkyHost({ mount, forceGL = false }) {
     requestRender,
     resize: () => { if (sizeToMount()) requestRender(); },
     get uniforms() { return sky?.uniforms ?? null; },
+    /* Per-instance bags, which is where a loaded shape asset's credit rides */
+    get instances() { return sky?.instances ?? null; },
     get backend() { return sky?.backend ?? null; },
     get ready() { return sky !== null; },
     get frozen() { return reduceMotion.matches; },

@@ -33,7 +33,7 @@ function echoLife(u, U) {
   return smoothstep(0.0, fi, u).mul(float(1).sub(smoothstep(out0, 1.0, u))).toVar();
 }
 
-/* The cloud in the source's own frame. Offsetting its centre off the sky plane
+/* The cloud in the source's own frame. Offsetting its center off the sky plane
    and off the star is what makes the rings read asymmetric instead of concentric. */
 function echoCloud(g, U) {
   const dc = g.d.sub(U.uEchoDustXY).toVar();
@@ -50,7 +50,7 @@ function echoCloud(g, U) {
   return shell.add(halo).min(1.0).toVar();
 }
 
-/* Static per seed with no time in the domain, which makes it the catalogue's
+/* Static per seed with no time in the domain, which makes it the catalog's
    P8 bake candidate; until that lands it spends 6 live octaves per fragment. */
 function echoDensity(g, env, U) {
   const p = vec3(g.d.mul(U.uEchoFreq), g.zEcho.mul(U.uEchoFreq).mul(U.uEchoZSquash))
@@ -79,7 +79,7 @@ function echoIllum(g, U) {
    column integral wants a march; a fixed slice at least never animates. */
 export function echoTau(skyW, U) {
   /* Noise rides the source frame like the lit field; only the envelope is
-     cloud-centred. tauZ scales like any other z so the slice stays in units
+     cloud-centered. tauZ scales like any other z so the slice stays in units
      the lit field can agree with. Octave counts still differ, deliberately. */
   const d = skyW.sub(U.uEchoSrc).toVar();
   const dc = d.sub(U.uEchoDustXY).toVar();

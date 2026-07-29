@@ -3,7 +3,7 @@
 
 import { deriveSeed } from '/engine/core/rng.js';
 import {
-  ENTITY_TYPES, TYPE_BY_ID, BASE_TYPES, SCENE_PARAMS, CAMERA_RANGE,
+  TYPE_BY_ID, BASE_TYPES, SCENE_PARAMS, CAMERA_RANGE,
   defaultParams, getPath, setPath,
 } from './spec.js';
 
@@ -141,6 +141,12 @@ function sanitizeParams(type, raw) {
     if (value === undefined || value === null) continue;
     if (param.kind === 'bool') {
       setPath(out, param.key, value === true || value === 1 ? 1 : 0);
+      continue;
+    }
+    /* An enum's value is an id, not a number: an unlisted one (a renamed asset,
+       a hand-edited file) falls back to the default rather than reaching fetch. */
+    if (param.kind === 'enum') {
+      if (param.options.some((o) => o.id === value)) setPath(out, param.key, value);
       continue;
     }
     const n = Number(value);

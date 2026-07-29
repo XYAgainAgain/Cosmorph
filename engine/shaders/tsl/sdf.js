@@ -24,18 +24,18 @@ export const sdCircle = /*@__PURE__*/ Fn(([p, c, r]) => length(p.sub(c)).sub(r))
 /* Gradient-normalized approximation, not exact: error grows with eccentricity
    but vanishes at the boundary, which is the only place an envelope reads. */
 export const sdEllipse = /*@__PURE__*/ Fn(([p, c, r]) => {
-  const rr = max(abs(r), vec2(EPS)).toVar('elR');
-  const q = p.sub(c).toVar('elQ');
-  const k1 = length(q.div(rr)).toVar('elK1');
-  const k2 = max(length(q.div(rr.mul(rr))), float(EPS)).toVar('elK2');
+  const rr = max(abs(r), vec2(EPS)).toVar();
+  const q = p.sub(c).toVar();
+  const k1 = length(q.div(rr)).toVar();
+  const k2 = max(length(q.div(rr.mul(rr))), float(EPS)).toVar();
   return k1.mul(k1.sub(1.0)).div(k2);
 });
 
 /* Capsule: distance to segment a→b, inflated by r */
 export const sdSegment = /*@__PURE__*/ Fn(([p, a, b, r]) => {
-  const pa = p.sub(a).toVar('capPa');
-  const ba = b.sub(a).toVar('capBa');
-  const h = clamp(dot(pa, ba).div(max(dot(ba, ba), float(EPS))), 0.0, 1.0).toVar('capH');
+  const pa = p.sub(a).toVar();
+  const ba = b.sub(a).toVar();
+  const h = clamp(dot(pa, ba).div(max(dot(ba, ba), float(EPS))), 0.0, 1.0).toVar();
   return length(pa.sub(ba.mul(h))).sub(r);
 });
 
@@ -82,14 +82,14 @@ export const sdArc = /*@__PURE__*/ Fn(([p, c, ra, rb, angle, aperture]) => {
 
 /* iq's polynomial smooth min. k is the blend width in distance units. */
 export const smin = /*@__PURE__*/ Fn(([a, b, k]) => {
-  const kk = max(k, float(EPS)).toVar('sminK');
-  const h = clamp(b.sub(a).mul(0.5).div(kk).add(0.5), 0.0, 1.0).toVar('sminH');
+  const kk = max(k, float(EPS)).toVar();
+  const h = clamp(b.sub(a).mul(0.5).div(kk).add(0.5), 0.0, 1.0).toVar();
   return mix(b, a, h).sub(kk.mul(h).mul(float(1).sub(h)));
 });
 
 export const smax = /*@__PURE__*/ Fn(([a, b, k]) => {
-  const kk = max(k, float(EPS)).toVar('smaxK');
-  const h = clamp(b.sub(a).mul(-0.5).div(kk).add(0.5), 0.0, 1.0).toVar('smaxH');
+  const kk = max(k, float(EPS)).toVar();
+  const h = clamp(b.sub(a).mul(-0.5).div(kk).add(0.5), 0.0, 1.0).toVar();
   return mix(b, a, h).add(kk.mul(h).mul(float(1).sub(h)));
 });
 
@@ -109,7 +109,8 @@ export function sdfDisplace(d, p3, amp, fbm = fbm3o4) {
 /* 1 deep inside, 0 outside. The feather straddles the surface so the authored
    boundary stays where it was authored. */
 export const sdfEnvelope = /*@__PURE__*/ Fn(([d, feather]) => {
-  const f = max(feather, float(EPS)).toVar('envF');
+  /* Unnamed: two entities calling this in one pass collide on a named var */
+  const f = max(feather, float(EPS)).toVar();
   return smoothstep(f.mul(-0.5), f.mul(0.5), d.negate());
 });
 

@@ -3,7 +3,7 @@
    tau extinguishes emission and continuum, but never the globule rim. */
 
 import {
-  Fn, vec2, vec3, vec4, texture, uv, exp, mix, min, max,
+  Fn, float, vec2, vec3, vec4, texture, uv, exp, mix, min, max,
 } from 'three/tsl';
 import { ign, asinh3 } from './noise.js';
 import { wispTau } from './dust.js';
@@ -12,6 +12,7 @@ import { reflectionTau } from './reflection.js';
 import { echoTau } from './echo.js';
 import { shadowFanTau } from './shadowfan.js';
 import { searchlightTau } from './searchlight.js';
+import { shapeTauAndRim } from './shape.js';
 
 /* Interstellar reddening: blue is extinguished ~1.9× harder than red. That
    reflection self-extinguishes under its own summed tau is deliberate. */
@@ -21,8 +22,8 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
   return Fn(() => {
     const screen = uv();
 
-    /* Compose uv y runs opposite the star quads' clip y, so the parallax
-       vector flips y here or the layers mirror the stars vertically */
+    /* A layer RT comes back v-flipped, so an offset applied to the sample uv
+       lands upside down unless the parallax vector flips y first. */
     const par = U.uParallax.mul(vec2(1.0, -1.0));
 
     /* Overscanned layer RTs: mapping through the margin keeps parallax off RT
@@ -36,14 +37,20 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
     const cont = texture(contTex, sampleAt(U.uDepthCont)).rgb;
     const bright = texture(brightTex, screen).rgb;
 
+    /* Sky y increases downward, the way the layer RTs and the baked shape frames
+       author it; the same v-flip is why this base takes parallax unturned. */
+    const skyDown = vec2(screen.x, float(1.0).sub(screen.y));
+
     /* Procedural layers evaluate here rather than in an RT, so parallax applies
        directly at whatever depth each one sits at */
-    const skyAt = (depth) => screen
-      .sub(par.mul(depth).div(U.uResolution))
+    const skyAt = (depth) => skyDown
+      .sub(U.uParallax.mul(depth).div(U.uResolution))
       .mul(vec2(U.uAspect, 1.0))
       .add(U.uCamera);
     const globs = (layers.globules ?? []).map((bag) =>
       globuleTauAndRim(skyAt(bag.uDepthGlob), bag, bag.cometary));
+    const shapes = (layers.shape ?? []).map((bag) =>
+      shapeTauAndRim(skyAt(bag.uDepthShp), bag, bag.shpMap, bag.shpOpts));
 
     /* One exp over the summed optical depth: extinguishing layer by layer would
        double-count the reddening in every overlap */
@@ -61,6 +68,7 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
     for (const bag of layers.searchlight ?? []) {
       tau = tau.add(searchlightTau(skyAt(bag.uDepthBeam), bag));
     }
+    for (const s of shapes) tau = tau.add(s.tau);
     const T3 = exp(tau.negate().mul(SIGMA));
 
     /* Line emission takes the palette matrix and SCNR wherever it enters, so
@@ -76,6 +84,7 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
        while globules are the nearest tau layer, which the depth defaults keep true */
     let lit = toRGB(line).add(cont).mul(T3);
     for (const g of globs) lit = lit.add(toRGB(g.rim));
+    for (const s of shapes) lit = lit.add(toRGB(s.rim));
 
     const scene = lit.add(bright).mul(U.uExposure);
 

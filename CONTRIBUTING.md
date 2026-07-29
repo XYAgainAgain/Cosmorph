@@ -1,6 +1,6 @@
 # Contributing to Cosmorph for Cool Cats
 
-Howdy, thanks for being here, and welcome to the nebula factory! Whether you're here to report a bug, donate an idea, or sling some shader math, you are most welcome amongst these twinkly stars. Cosmorph is a one-person passion project, so every decent contribution genuinely matters (and is genuinely appreciated)!
+Howdy, thanks for being here, and welcome to the nebula factory! Whether you're here to report a bug, donate an idea, or sling some shader math, you are most welcome among these twinkly stars. Cosmorph is a one-person passion project, so every decent contribution genuinely matters (and is genuinely appreciated)!
 
 ## The Easy Ways to Help
 

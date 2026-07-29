@@ -47,6 +47,8 @@ const dom = {
   camCenter: el('cam-center'),
   detail: el('entity-detail'),
   heading: el('entity-heading'),
+  credits: el('credits-block'),
+  creditsList: el('credits-list'),
   scrub: el('scrub'),
   tread: el('t-readout'),
   speed: el('speed'),
@@ -71,6 +73,7 @@ const ui = {
   filingOpen: false,
   shotSize: 'window',
   camOpen: true,
+  creditsOpen: false,
   dirty: false,
   busy: false,
 };
@@ -134,7 +137,12 @@ function applyAll(sky) {
   }
 }
 
-host.onApplyUniforms = applyAll;
+/* Also the credits hook: it runs after every build, which is the only moment a
+   shape asset (and its attribution) can have changed. */
+host.onApplyUniforms = (sky) => {
+  applyAll(sky);
+  renderCredits();
+};
 
 function scheduleRebuild() {
   clearTimeout(rebuildTimer);
@@ -180,6 +188,7 @@ function saveUi() {
     localStorage.setItem(STORE_UI, JSON.stringify({
       tier: ui.tier, theme: ui.theme, collapsed: ui.collapsed, selected: ui.selected,
       filingOpen: ui.filingOpen, shotSize: ui.shotSize, camOpen: ui.camOpen,
+      creditsOpen: ui.creditsOpen,
     }));
   } catch { /* storage blocked: session-only */ }
 }
@@ -195,6 +204,7 @@ function loadUi() {
     ui.collapsed = raw.collapsed === true;
     ui.filingOpen = raw.filingOpen === true;
     ui.camOpen = raw.camOpen !== false;
+    ui.creditsOpen = raw.creditsOpen === true;
   } catch { /* ignore a corrupt blob and keep defaults */ }
 }
 
@@ -326,7 +336,7 @@ function renderEntityDetail() {
   }
   if (spec.depthParam && ui.tier >= 3) {
     const bound = depthBounds(entity);
-    /* Pinned between neighbours with zero travel, the dial would render a
+    /* Pinned between neighbors with zero travel, the dial would render a
        min === max range (NaN thumb); the row hides until a drag makes room. */
     if (bound.max - bound.min > 1e-9) {
       byGroup.get('Depth')?.push({
@@ -344,7 +354,7 @@ function renderEntityDetail() {
     const rows = list.map((param) => {
       let value;
       if (param.synthetic) value = entity.depth;
-      else if (param.kind === 'enum') value = param.read(eff);
+      else if (param.read) value = param.read(eff);
       else value = getPath(eff, param.key);
       return sliderRow(param, value, entity.type);
     }).join('');
@@ -361,6 +371,34 @@ function renderEntityDetail() {
   }).join('');
 
   keepScroll(() => { dom.detail.innerHTML = head + groups; });
+}
+
+const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+const esc = (value) => String(value).replace(/[&<>"]/g, (ch) => ESCAPES[ch]);
+
+/* Attribution is a license condition, so the sidecar's verbatim string prints
+   exactly as supplied. Assets that ship none get their credit fields joined. */
+function renderCredits() {
+  const seen = new Set();
+  const cards = [];
+  for (const bag of host.instances?.shape ?? []) {
+    const asset = bag.shpAsset;
+    if (!asset || seen.has(asset)) continue;
+    seen.add(asset);
+    const credit = asset.credit ?? {};
+    const line = asset.creditVerbatim
+      || [credit.subject, credit.author, credit.license].filter(Boolean).join(' · ')
+      || asset.name;
+    const url = typeof credit.url === 'string' ? credit.url.trim() : '';
+    cards.push(`<li class="credit">
+      <p class="credit__line">${esc(line)}</p>
+      ${asset.derivation ? `<p class="credit__note">${esc(asset.derivation)}</p>` : ''}
+      ${credit.maskLicense ? `<p class="credit__note">Mask: ${esc(credit.maskLicense)}</p>` : ''}
+      ${url ? `<a class="credit__link" href="${esc(url)}" target="_blank" rel="noopener">Source image</a>` : ''}
+    </li>`);
+  }
+  dom.credits.hidden = cards.length === 0;
+  dom.creditsList.innerHTML = cards.join('');
 }
 
 function renderHeaderState() {
@@ -398,7 +436,7 @@ function findParam(spec, key) {
 }
 
 /* The list owns rank, the dial owns magnitude: a depth is penned in between its
-   neighbours' so an edit can never contradict the order on screen. */
+   neighbors' so an edit can never contradict the order on screen. */
 function depthBounds(entity) {
   const max = TYPE_BY_ID[entity.type].depthParam?.max ?? 1;
   const ranked = sortEntities(scene.entities).filter((e) => !TYPE_BY_ID[e.type].pinned);
@@ -420,7 +458,9 @@ function commitParam(entity, param, value, live = false) {
     if (slot) slot.value = entity.depth;
     return true;
   }
-  if (param.kind === 'enum') {
+  /* Only a derived enum owns other keys; a plain one is an ordinary structural
+     value and takes the path below. */
+  if (param.kind === 'enum' && param.derived) {
     /* Write-then-compare, not read-compare: read() can lie once the dependent
        flags drift, and a redundant pick must still re-normalize them. */
     const deps = TYPE_BY_ID[entity.type].params.filter((q) => q.key.startsWith(`${param.key}.`));
@@ -430,12 +470,18 @@ function commitParam(entity, param, value, live = false) {
     scheduleRebuild();
     return true;
   }
-  if (param.structural && getPath(entity.params, param.key) === value) return false;
-  setPath(entity.params, param.key, value);
   /* Structural edits rebuild on release only; every drag tick would otherwise
-     queue a fresh engine rebuild and stutter the panel */
-  if (param.structural) { if (!live) scheduleRebuild(); }
-  else if (host.uniforms && !entity.hidden) applyParam(host.uniforms, param, value, uniformCtx(entity));
+     queue a fresh engine rebuild and stutter the panel. The release repeats the
+     last dragged value, so the rebuild has to be scheduled before that no-op
+     guard, or a structural slider stores its ticks and never rebuilds. */
+  if (param.structural) {
+    if (!live) scheduleRebuild();
+    if (getPath(entity.params, param.key) === value) return false;
+    setPath(entity.params, param.key, value);
+    return true;
+  }
+  setPath(entity.params, param.key, value);
+  if (host.uniforms && !entity.hidden) applyParam(host.uniforms, param, value, uniformCtx(entity));
   else if (host.uniforms) applyAll({ uniforms: host.uniforms });
   return true;
 }
@@ -479,13 +525,13 @@ function onParamEvent(event) {
   if (!param) return;
   const value = readControl(node, param);
   if (!commitParam(entity, param, value, event.type === 'input')) return;
-  /* A control that writes its neighbours' state has to repaint them; the
+  /* A control that writes its neighbors' state has to repaint them; the
      repaint destroys the focused node, so focus is re-seated by key. */
   if (param.refresh) {
     renderEntityDetail();
     dom.detail.querySelector(`[data-role="param"][data-key="${key}"]`)?.focus();
   }
-  /* Read the committed value back: the dial's is clamped against its neighbours */
+  /* Read the committed value back: the dial's is clamped against its neighbors */
   else updateReadout(node, param, param.synthetic ? entity.depth : value);
   host.requestRender();
   markDirty();
@@ -497,6 +543,7 @@ function onParamEvent(event) {
    draw over 25 dials reliably produces mud, and this still reaches the edges. */
 function rollValue(param) {
   if (param.kind === 'bool') return Math.random() < 0.5 ? 0 : 1;
+  if (param.kind === 'enum') return param.options[Math.floor(Math.random() * param.options.length)].id;
   const span = (param.max - param.min) * 0.6;
   const jitter = (Math.random() + Math.random() - 1) * span * 0.5;
   const raw = param.def + jitter;
@@ -1070,7 +1117,7 @@ function wire() {
     }
   });
 
-  /* Fires after drop, and on a cancelled drag where drop never does */
+  /* Fires after drop, and on a canceled drag where drop never does */
   dom.list.addEventListener('dragend', () => {
     dragType = null;
     clearDragMarks();
@@ -1128,6 +1175,11 @@ function wire() {
   dom.camBlock.open = ui.camOpen;
   dom.camBlock.addEventListener('toggle', () => {
     ui.camOpen = dom.camBlock.open;
+    saveUi();
+  });
+  dom.credits.open = ui.creditsOpen;
+  dom.credits.addEventListener('toggle', () => {
+    ui.creditsOpen = dom.credits.open;
     saveUi();
   });
   dom.shotSize.addEventListener('change', () => {

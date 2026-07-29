@@ -1,5 +1,5 @@
-/* Wolf-Rayet wind bubble: a crisp nested two-colour shell (OIII inside Hα),
-   brain-fibre texture from a two-level domain warp, a bow-shock squash, and
+/* Wolf-Rayet wind bubble: a crisp nested two-color shell (OIII inside Hα),
+   brain-fiber texture from a two-level domain warp, a bow-shock squash, and
    optional Thor's-Helmet horns. Line channels only, never RGB. */
 
 import {
@@ -73,7 +73,7 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
     const q1 = s.add(warpV).toVar();
 
     /* Fine level is one eval sheared along a fixed direction rather than a full
-       gradient: it kinks fibres along their length, which is all it must do. */
+       gradient: it kinks fibers along their length, which is all it must do. */
     const nC = fbm3o2(q1.mul(2.1).add(WARP_C)).sub(FBM2_MID).toVar();
     const fib = ridged2(q1.add(KINK_DIR.mul(nC.mul(U.uWrbWarp2))), U.uWrbFibSharp)
       .toVar();
@@ -84,7 +84,7 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
        which is what Sh2-308 looks like next to a crescent. */
     const envO = profO.mul(mix(float(1.0), ext, U.uWrbCompO)).toVar();
 
-    /* Envelope lowers the threshold the fibre must clear (remap doctrine, sdf.js) */
+    /* Envelope lowers the threshold the fiber must clear (remap doctrine, sdf.js) */
     const thH = mix(float(1.0), U.uWrbTh, envH);
     const thO = mix(float(1.0), U.uWrbTh, envO);
     const densH = smoothstep(thH, thH.add(soft), fib).toVar();
@@ -124,7 +124,7 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
   const continuum = Fn(() => {
     const d = skyU.sub(U.uWrbCenter).sub(U.uWrbStarAt.mul(U.uWrbRadius)).toVar();
     const r2 = dot(d, d).toVar();
-    /* Moffat, not Gaussian (catalogue Part 3.1); base >= 1 keeps the pow defined */
+    /* Moffat, not Gaussian (catalog Part 3.1); base >= 1 keeps the pow defined */
     const core = pow(r2.div(U.uWrbStarCore.mul(U.uWrbStarCore).max(1e-8)).add(1.0),
       U.uWrbStarBeta.max(0.5).negate()).toVar();
     const halo = float(1).div(r2.div(U.uWrbStarHaloR.mul(U.uWrbStarHaloR).max(1e-6)).add(1.0));

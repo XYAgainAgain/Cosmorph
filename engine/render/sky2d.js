@@ -17,6 +17,8 @@ import { buildSearchlightNodes, SEARCHLIGHT_DEFAULTS } from '../shaders/tsl/sear
 import { buildPlanetaryNodes, PLANETARY_DEFAULTS } from '../shaders/tsl/planetary.js';
 import { buildJetNodes, JET_DEFAULTS } from '../shaders/tsl/jets.js';
 import { buildWrBubbleNodes, WRBUBBLE_DEFAULTS } from '../shaders/tsl/wrbubble.js';
+import { SHAPE_DEFAULTS } from '../shaders/tsl/shape.js';
+import { loadShapeAsset } from '../entities/shape.js';
 import { buildComposeNodes } from '../shaders/tsl/compose.js';
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
@@ -30,7 +32,8 @@ export const PALETTES = {
 
 const DEFAULTS = {
   emission: {
-    freq: 1.35, warp: 1.3, mottle: 1.3, stria: 0.35,
+    freq: 1.35, warp: 1.3, mottle: 1.3,
+    stria: 0.35, striaFreq: 9.0, striaAniso: 30.0,
     ionSrc: [1.05, 0.8], ionRadius: 0.75, hotLo: 0.55, hotHi: 0.9,
     oiii: 0.55, sii: 0.12, morphRate: 0.35,
     covLo: 0.3, covHi: 0.48, contrast: 1.2, gain: 1.2,
@@ -47,7 +50,7 @@ const DEFAULTS = {
     cometary: true, detail: 2.4, morphRate: 0.1,
     eroFreq: 5.0, eroFall: 0.6, erode: 0.3,
     threshold: 0.28, softness: 0.1, tau: 3.2,
-    ionSrc: [1.05, 0.8], ionRadius: 0.9, hotLo: 0.5, hotHi: 0.85,
+    ionSrc: [1.05, 0.2], ionRadius: 0.9, hotLo: 0.5, hotHi: 0.85,
     rimEps: 0.006, rimFacing: 6.0, rimAt: 0.35, rimW: 0.22, rimHalo: 0.25,
     rimKnotFreq: 12.0, rimKnot: 0.6, rimGain: 1.2, rimOiii: 0.5, rimSii: 0.15,
   },
@@ -65,6 +68,7 @@ const DEFAULTS = {
   planetary: { ...PLANETARY_DEFAULTS },
   jets: { ...JET_DEFAULTS },
   wrbubble: { ...WRBUBBLE_DEFAULTS },
+  shape: { ...SHAPE_DEFAULTS },
 };
 
 /* Must match the overscan default in entities/stars.js: the bright tier tiles
@@ -116,6 +120,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const featureEnts = {
     globules: [], reflection: [], filaments: [],
     echo: [], shadowFan: [], searchlight: [], planetary: [], jets: [], wrbubble: [],
+    shape: [],
   };
   for (const e of config.entities) {
     if (featureEnts[e.type]) {
@@ -127,6 +132,25 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       continue;
     }
     byType[e.type] = e;
+  }
+
+  /* Baked shape fields have to be on the GPU before the graph is built, so the
+     fetch is awaited here; an asset that fails drops only its own entities. */
+  const shapeUrl = (e) => e.params?.asset ?? DEFAULTS.shape.asset;
+  const shapeAssets = new Map();
+  /* Instance index captured before the drop: it feeds instanceSeed, so closing
+     the gap left by a failed asset would re-roll every survivor's noise. */
+  let shapeIdx = featureEnts.shape.map((e, k) => k);
+  if (featureEnts.shape.length > 0) {
+    const urls = [...new Set(featureEnts.shape.map(shapeUrl))];
+    const loaded = await Promise.all(urls.map((u) => loadShapeAsset(u).catch((err) => {
+      console.warn(`Cosmorph: shape asset "${u}" failed to load; its entities were dropped.`, err);
+      return null;
+    })));
+    urls.forEach((u, i) => { if (loaded[i]) shapeAssets.set(u, loaded[i]); });
+    const keep = featureEnts.shape.map((e) => shapeAssets.has(shapeUrl(e)));
+    shapeIdx = shapeIdx.filter((_, i) => keep[i]);
+    featureEnts.shape = featureEnts.shape.filter((_, i) => keep[i]);
   }
 
   const P = {
@@ -147,6 +171,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   let camX = config.camera?.x ?? 0;
   let camY = config.camera?.y ?? 0;
 
+  /* Divided host-side: 9/30 lands on the same float32 as the old literal 0.3,
+     where dividing in the shader costs an extra ulp and moves render hashes. */
+  const striaFx = Math.max(P.emission.striaFreq, 1e-3);
+  const striaFy = striaFx / Math.max(P.emission.striaAniso, 1);
+
   const paletteRows = PALETTES[config.palette] ?? PALETTES.hooNatural;
   const scnrDefault = config.palette === 'sho' ? 0.7 : (config.scnr ?? 0);
   const stretchK = config.stretchK ?? 14;
@@ -164,6 +193,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uWarp: uniform(P.emission.warp),
     uMottle: uniform(P.emission.mottle),
     uStria: uniform(P.emission.stria),
+    uStriaFreq: uniform(striaFx),
+    uStriaFreqY: uniform(striaFy),
     uIonSrc: uniform(new THREE.Vector2(0, 0)),
     uIonR2: uniform(Math.max(P.emission.ionRadius ** 2, 1e-4)),
     uHotLo: uniform(P.emission.hotLo),
@@ -614,7 +645,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uWrbCompSoft: uniform(w.compSoft),
       uWrbGapPhase: uniform(w.gapPhase),
       uWrbCompO: uniform(clamp01(w.compO)),
-      /* Past ~60 the fibres alias against the foreshortened limb */
+      /* Past ~60 the fibers alias against the foreshortened limb */
       uWrbFibFreq: uniform(Math.min(Math.max(w.fibFreq, 0), 60)),
       uWrbFibAniso: uniform(w.fibAniso),
       uWrbFibSharp: uniform(w.fibSharp),
@@ -650,6 +681,77 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     return bag;
   }
 
+  function shapeBag(e, k) {
+    const asset = shapeAssets.get(shapeUrl(e));
+    /* Polarity is the asset's own call, so it seeds the gains before the
+       entity's params get the final word. */
+    const pol = asset.polarity === 'bright' ? { tau: 0.4, glow: 0.9, rimGain: 0.5 } : {};
+    /* The baker's render suggestion seeds the default (its honest measured scale
+       reads ghost-thin); polarity and the entity's params still get the last word. */
+    const ds = asset.suggestedTau > 0 ? { tau: asset.suggestedTau }
+      : asset.densityScale > 0 ? { tau: asset.densityScale } : {};
+    const s = { ...DEFAULTS.shape, ...ds, ...pol, ...e.params };
+    const bag = makeBag(k, {
+      uShpCenter: uniform(new THREE.Vector2(0, 0)),
+      uShpScale: uniform(Math.max(s.scale, 1e-3)),
+      uShpRot: uniform(s.rot),
+      /* The shader multiplies this back out; it is the only key to the texture */
+      uShpSpread: uniform(asset.spread),
+      uShpEdge: uniform(Math.max(s.edgeFade, 1e-3)),
+      uShpDens: uniform(Math.max(s.density, 0)),
+      uShpCore: uniform(clamp01(s.core)),
+      uShpVeil: uniform(clamp01(s.veil)),
+      uShpFeather: uniform(Math.max(s.feather, 1e-3)),
+      uShpFreq: uniform(s.freq),
+      uShpMorph: uniform(s.morphRate),
+      uShpEroFreq: uniform(s.eroFreq),
+      uShpEroFall: uniform(Math.max(s.eroFall, 1e-3)),
+      uShpErode: uniform(s.erode),
+      uShpTh: uniform(s.threshold),
+      uShpSoft: uniform(Math.max(s.softness, 1e-3)),
+      uShpTau: uniform(Math.max(s.tau, 0)),
+      uShpIonSrc: uniform(new THREE.Vector2(0, 0)),
+      uShpIonR2: uniform(Math.max(s.ionRadius ** 2, 1e-4)),
+      uShpHotLo: uniform(s.hotLo),
+      uShpHotHi: uniform(Math.max(s.hotHi, s.hotLo + 0.001)),
+      uShpRimFacing: uniform(Math.max(s.rimFacing, 1e-3)),
+      /* Wants to be a texel or two of the baked field wide; a shorter step reads
+         the bilinear interpolant's own facets instead of the surface. */
+      uShpRimEps: uniform(Math.max(s.rimEps, 1e-3)),
+      uShpRimDens: uniform(clamp01(s.rimDens)),
+      uShpRimAt: uniform(s.rimAt),
+      uShpRimW: uniform(Math.max(s.rimW, 1e-4)),
+      uShpRimJit: uniform(Math.max(s.rimJit, 0)),
+      uShpRimHalo: uniform(s.rimHalo),
+      uShpRimKnotFreq: uniform(s.rimKnotFreq),
+      /* Past 1 the bead floor goes negative and the rim subtracts light from
+         every other entity in the compose sum */
+      uShpRimKnot: uniform(clamp01(s.rimKnot)),
+      uShpRimGain: uniform(Math.max(s.rimGain, 0)),
+      uShpRimOiii: uniform(Math.max(s.rimOiii, 0)),
+      uShpRimSii: uniform(Math.max(s.rimSii, 0)),
+      uShpGlow: uniform(Math.max(s.glow, 0)),
+      uShpGlowFall: uniform(Math.max(s.glowFall, 1e-4)),
+      uShpOiii: uniform(Math.max(s.oiii, 0)),
+      uShpSii: uniform(Math.max(s.sii, 0)),
+      uShpGain: uniform(Math.max(s.gain, 0)),
+      uShpOff: uniform(offsetFrom(instanceSeed(e, 109, k), 109)),
+      uDepthShp: uniform(e.depth ?? 0.5),
+    }, (b, aspect) => {
+      b.uShpCenter.value.set(s.center[0] * aspect, s.center[1]);
+      b.uShpIonSrc.value.set(s.ionSrc[0] * aspect, s.ionSrc[1]);
+    });
+    /* A texture is not a uniform value, so it rides the bag like the other
+       build-time entries and reaches compose through layers.shape. The asset
+       carries its credit string along for the credits panel to come. */
+    bag.shpMap = asset.texture;
+    bag.shpAsset = asset;
+    /* Both are whole exp chains, and both are off in most scenes */
+    bag.shpOpts = { glow: s.glow > 0, rimHalo: s.rimHalo > 0 };
+    warnTauDepth('shape', e.depth ?? 0.5);
+    return bag;
+  }
+
   const globInst = featureEnts.globules.map((e, k) => globulesBag(e, k));
   const reflInst = featureEnts.reflection.map((e, k) => reflectionBag(e, k));
   const filInst = featureEnts.filaments.map((e, k) => filamentsBag(e, k));
@@ -659,6 +761,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const pnInst = featureEnts.planetary.map((e, k) => planetaryBag(e, k));
   const jetInst = featureEnts.jets.map((e, k) => jetsBag(e, k));
   const wrbInst = featureEnts.wrbubble.map((e, k) => wrbubbleBag(e, k));
+  const shapeInst = featureEnts.shape.map((e, i) => shapeBag(e, shapeIdx[i]));
 
   /* Layer passes render an overscanned domain so compose can offset without
      sampling past an RT edge */
@@ -750,6 +853,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       echo: echoInst,
       shadowFan: fanInst,
       searchlight: beamInst,
+      shape: shapeInst,
     },
   }));
 
@@ -769,7 +873,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
 
   const starSeed = byType.stars?.seed ?? config.seed;
 
-  /* Tile (0,0) reuses the base seed, so a centred camera renders exactly the
+  /* Tile (0,0) reuses the base seed, so a centered camera renders exactly the
      field this engine produced before panning existed. */
   function tileSeedFor(i, j) {
     if (i === 0 && j === 0) return starSeed;
@@ -851,7 +955,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   }
 
   /* Only a tile crossing costs a geometry rebuild; a drag inside one tile is
-     a uniform poke. Leaving or returning to dead centre counts as a crossing. */
+     a uniform poke. Leaving or returning to dead center counts as a crossing. */
   function setCamera(x, y) {
     const moved = tileKey(x, y, U.uAspect.value) !== tileKey(camX, camY, U.uAspect.value);
     camX = x;
@@ -938,6 +1042,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     lineRT.dispose();
     contRT.dispose();
     brightRT.dispose();
+    /* Per unique asset, not per instance: two entities sharing one shape share
+       one texture, and disposing it twice is a use-after-free on reroll. */
+    for (const asset of shapeAssets.values()) asset.texture.dispose();
     renderer.dispose();
   }
 
@@ -959,6 +1066,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       planetary: pnInst.slice(),
       jets: jetInst.slice(),
       wrbubble: wrbInst.slice(),
+      shape: shapeInst.slice(),
     },
   };
 }

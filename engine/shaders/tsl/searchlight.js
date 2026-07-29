@@ -115,7 +115,7 @@ export function buildSearchlightNodes(skyU, U, opts = {}) {
     }
 
     /* Bone-white cooling out of a pale-yellow core, held low in saturation:
-       this object is carried by its structure, not by its colour. */
+       this object is carried by its structure, not by its color. */
     const warm = float(1).sub(smoothstep(0.0, U.uBeamWarmR.max(1e-3), rad));
     return mix(U.uBeamTint, U.uBeamWarm, warm.mul(U.uBeamWarmAmt.clamp(0.0, 1.0)))
       .mul(lit).mul(U.uBeamLum);
