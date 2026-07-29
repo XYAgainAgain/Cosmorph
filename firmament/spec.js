@@ -67,6 +67,66 @@ export const SCENE_PARAMS = [
     key: 'dither', label: 'Output dither', min: 0, max: 0.02, step: 0.0005, def: 1.5 / 255,
     group: 'Grading', tier: 3, u: 'uDither',
   },
+  /* Lensing warps where the scene RTs are read, so it grades the whole sky
+     rather than belonging to any one entity. `structural` entries are build
+     gates: off, the compose shader is byte-identical to an unlensed build. */
+  {
+    key: 'lens', label: 'Lensing', kind: 'bool', min: 0, max: 1, step: 1, def: 0,
+    group: 'Lensing', tier: 2, structural: true,
+  },
+  {
+    key: 'lensThetaE', label: 'Einstein radius', min: 0, max: 0.5, step: 0.005, def: 0.16,
+    group: 'Lensing', tier: 3, u: 'uLensThetaE',
+  },
+  {
+    key: 'lensCore', label: 'Core radius', min: 0.001, max: 0.3, step: 0.001, def: 0.04,
+    group: 'Lensing', tier: 3, u: 'uLensCore',
+  },
+  {
+    key: 'lensX', label: 'Lens center X', min: 0, max: 1, step: 0.005, def: 0.5,
+    /* Scene params carry no ctx, so the aspect comes off the uniform itself */
+    group: 'Lensing', tier: 3, set: (U, v) => { U.uLensAt.value.x = v * U.uAspect.value; },
+  },
+  {
+    key: 'lensY', label: 'Lens center Y', min: 0, max: 1, step: 0.005, def: 0.5,
+    group: 'Lensing', tier: 3, set: (U, v) => { U.uLensAt.value.y = v; },
+  },
+  {
+    key: 'lensEllip', label: 'Ellipticity', min: -0.8, max: 0.8, step: 0.01, def: 0.25,
+    group: 'Lensing', tier: 3, u: 'uLensEllip',
+  },
+  {
+    key: 'lensAngle', label: 'Lens angle', min: 0, max: 3.14, step: 0.01, def: 0.6,
+    group: 'Lensing', tier: 3, u: 'uLensRot',
+  },
+  {
+    key: 'lensPoint', label: 'Point-mass blend', min: 0, max: 1, step: 0.01, def: 0,
+    group: 'Lensing', tier: 3, u: 'uLensPoint',
+  },
+  {
+    key: 'lensShear1', label: 'Shear γ₁', min: -0.3, max: 0.3, step: 0.005, def: 0.05,
+    group: 'Lensing', tier: 3, set: (U, v) => { U.uLensShear.value.x = v; },
+  },
+  {
+    key: 'lensShear2', label: 'Shear γ₂', min: -0.3, max: 0.3, step: 0.005, def: 0,
+    group: 'Lensing', tier: 3, set: (U, v) => { U.uLensShear.value.y = v; },
+  },
+  {
+    key: 'lensHalos', label: 'Sub-halos', min: 0, max: 3, step: 1, def: 0,
+    group: 'Lensing', tier: 3, structural: true,
+  },
+  {
+    key: 'lensHaloStr', label: 'Sub-halo strength', min: 0, max: 1, step: 0.01, def: 0.35,
+    group: 'Lensing', tier: 3, u: 'uLensHaloStr',
+  },
+  {
+    key: 'lensHaloSpread', label: 'Sub-halo spread', min: 0, max: 0.6, step: 0.005, def: 0.25,
+    group: 'Lensing', tier: 3, u: 'uLensHaloSpread',
+  },
+  {
+    key: 'lensMag', label: 'Arc boost', min: 0, max: 1, step: 0.01, def: 0.35,
+    group: 'Lensing', tier: 3, u: 'uLensMag',
+  },
 ];
 
 const p = (key, label, min, max, step, def, group, tier, extra = {}) => ({
@@ -105,7 +165,28 @@ export const JET_LOOKS = [
    makes the pick build-time: a new asset means a new texture and a new graph. */
 export const SHAPE_ASSETS = [
   { id: 'assets/shapes/horsehead.json', label: 'Horsehead (Barnard 33)' },
+  { id: 'assets/shapes/mystic-mountain.json', label: 'Mystic Mountain' },
+  { id: 'assets/shapes/bubble.json', label: 'Bubble' },
+  { id: 'assets/shapes/crab.json', label: 'Crab' },
+  { id: 'assets/shapes/pillars.json', label: 'Pillars (HST)' },
+  { id: 'assets/shapes/pillars-miri.json', label: 'Pillars (MIRI)' },
   { id: 'assets/shapes/test-blob.json', label: 'Test Blob' },
+];
+
+/* The showpiece silhouettes. Each is a build-time branch, so a scene only
+   compiles the morphology it picked; the flags below are the stored state. */
+export const GALAXY_LOOKS = [
+  { id: 'spiral', label: 'Grand-Design Spiral', look: { shell: 0, ring: 0, spokes: 0, polar: 0 } },
+  { id: 'shell', label: 'Shell Elliptical', look: { shell: 1, ring: 0, spokes: 0, polar: 0 } },
+  { id: 'hoag', label: "Hoag's Ring", look: { shell: 0, ring: 1, spokes: 0, polar: 0 } },
+  { id: 'cartwheel', label: 'Cartwheel Ring', look: { shell: 0, ring: 1, spokes: 1, polar: 0 } },
+  { id: 'polar', label: 'Polar Ring', look: { shell: 0, ring: 1, spokes: 0, polar: 1 } },
+];
+
+/* Flattened near/mid/far RGB. Must match Z_RAMPS in engine/shaders/tsl/galaxies.js */
+export const Z_RAMPS = [
+  { id: 'hubble', label: 'Hubble', stops: [0.72, 0.84, 1.0, 1.0, 0.88, 0.6, 1.0, 0.55, 0.34] },
+  { id: 'jwst', label: 'JWST', stops: [0.55, 0.9, 1.0, 0.86, 1.0, 0.9, 1.0, 0.52, 0.3] },
 ];
 
 /* `rank` is the default depth order (top of the list = farthest). It matches
@@ -142,7 +223,7 @@ export const ENTITY_TYPES = [
     type: 'emission',
     label: 'Emission nebula',
     salt: 2,
-    rank: 3,
+    rank: 4,
     depth: 0.3,
     depthParam: { u: 'uDepthLine', max: 1 },
     mute: { gain: 0 },
@@ -200,7 +281,7 @@ export const ENTITY_TYPES = [
     type: 'darkDust',
     label: 'Dark wisps',
     salt: 4,
-    rank: 12,
+    rank: 14,
     depth: 0.55,
     depthParam: { u: 'uDepthWisp', max: 1 },
     mute: { tau: 0 },
@@ -218,7 +299,7 @@ export const ENTITY_TYPES = [
     type: 'globules',
     label: 'Bok globules',
     salt: 5,
-    rank: 13,
+    rank: 15,
     depth: 0.6,
     depthParam: { u: 'uDepthGlob', max: 0.95 },
     addable: true,
@@ -271,7 +352,7 @@ export const ENTITY_TYPES = [
     type: 'reflection',
     label: 'Reflection nebula',
     salt: 6,
-    rank: 4,
+    rank: 5,
     depth: 0.35,
     depthParam: { u: 'uDepthRefl', max: 0.95 },
     addable: true,
@@ -324,7 +405,7 @@ export const ENTITY_TYPES = [
     type: 'filaments',
     label: 'SNR filaments',
     salt: 7,
-    rank: 2,
+    rank: 3,
     depth: 0.25,
     depthParam: { u: 'uDepthFil', max: 0.95 },
     addable: true,
@@ -366,7 +447,7 @@ export const ENTITY_TYPES = [
     type: 'echo',
     label: 'Light echo',
     salt: 83,
-    rank: 5,
+    rank: 6,
     depth: 0.4,
     /* Past 0.58 its tau sits in front of the globules and sky2d warns: the
        compose rim exemption only holds while globules are the nearest tau. */
@@ -427,7 +508,7 @@ export const ENTITY_TYPES = [
     type: 'searchlight',
     label: 'Protoplanetary beams',
     salt: 97,
-    rank: 6,
+    rank: 7,
     depth: 0.4,
     depthParam: { u: 'uDepthBeam', max: 0.58 },
     addable: true,
@@ -494,7 +575,7 @@ export const ENTITY_TYPES = [
     type: 'shadowFan',
     label: 'Shadow fan',
     salt: 89,
-    rank: 7,
+    rank: 8,
     depth: 0.42,
     depthParam: { u: 'uDepthFan', max: 0.58 },
     addable: true,
@@ -545,7 +626,7 @@ export const ENTITY_TYPES = [
     type: 'jets',
     label: 'HH jets',
     salt: 103,
-    rank: 8,
+    rank: 9,
     depth: 0.42,
     depthParam: { u: 'uDepthJet', max: 0.95 },
     addable: true,
@@ -626,7 +707,7 @@ export const ENTITY_TYPES = [
     type: 'wrbubble',
     label: 'Wolf-Rayet bubble',
     salt: 107,
-    rank: 9,
+    rank: 10,
     depth: 0.42,
     depthParam: { u: 'uDepthWrb', max: 0.95 },
     addable: true,
@@ -688,7 +769,7 @@ export const ENTITY_TYPES = [
     type: 'planetary',
     label: 'Planetary nebula',
     salt: 101,
-    rank: 10,
+    rank: 11,
     depth: 0.45,
     depthParam: { u: 'uDepthPn', max: 0.95 },
     addable: true,
@@ -746,7 +827,7 @@ export const ENTITY_TYPES = [
     type: 'shape',
     label: 'Shape asset',
     salt: 109,
-    rank: 11,
+    rank: 12,
     depth: 0.5,
     /* Its tau has to stay behind the globules', which is what compose exempts */
     depthParam: { u: 'uDepthShp', max: 0.58 },
@@ -813,6 +894,247 @@ export const ENTITY_TYPES = [
       p('oiii', 'Glow OIII', 0, 2, 0.01, 0.35, 'Glow', 3, { u: 'uShpOiii' }),
       p('sii', 'Glow SII', 0, 2, 0.01, 0.1, 'Glow', 3, { u: 'uShpSii' }),
       p('morphRate', 'Morph rate', 0, 1, 0.01, 0.06, 'Evolution', 3, { u: 'uShpMorph' }),
+    ],
+  },
+
+  {
+    type: 'galaxies',
+    label: 'Galaxies',
+    salt: 120,
+    /* Sits just behind IFN, which lands the field at the back of the stack
+       without shuffling any other type's default depth. */
+    rank: 2,
+    depth: 0.13,
+    depthParam: { u: 'uDepthGx', max: 0.95 },
+    addable: true,
+    mute: { gain: 0, fieldLum: 0, hii: 0 },
+    groups: [
+      'Tiers', 'Deep Field', 'Clustering', 'Redshift', 'Showpiece', 'Spiral Arms',
+      'Bulge', 'Dust Lane', 'HII Knots', 'Shells', 'Ring', 'Spokes', 'Polar Ring',
+      'Evolution', 'Depth',
+    ],
+    params: [
+      p('field', 'Deep-field tier', 0, 1, 1, 1, 'Tiers', 1, { kind: 'bool', structural: true }),
+      p('showpiece', 'Showpiece tier', 0, 1, 1, 1, 'Tiers', 1, { kind: 'bool', structural: true }),
+      p('fieldLum', 'Field luminosity', 0, 0.4, 0.001, 0.03, 'Deep Field', 1, { u: 'uGxfLum' }),
+      p('fieldCells', 'Cell frequency', 1, 40, 0.5, 5.0, 'Deep Field', 1, { u: 'uGxfCells' }),
+      p('fieldDensity', 'Occupancy', 0, 1, 0.01, 0.1, 'Deep Field', 1, { u: 'uGxfDensity' }),
+      /* In cell units, not sky units: past ~0.45 the 3×3 search clips the disk */
+      p('fieldRadius', 'Galaxy radius', 0.01, 0.45, 0.005, 0.13, 'Deep Field', 1, { u: 'uGxfRadius' }),
+      p('fieldFlat', 'Edge-on ratio', 0.02, 1, 0.01, 0.16, 'Deep Field', 2, { u: 'uGxfFlat' }),
+      p('fieldCoreAmt', 'Core weight', 0, 5, 0.01, 1.1, 'Deep Field', 2, { u: 'uGxfCoreAmt' }),
+      p('fieldLaneDepth', 'Lane depth', 0, 1, 0.01, 0.55, 'Deep Field', 2, { u: 'uGxfLaneDepth' }),
+      p('fieldCoreFall', 'Core falloff', 0.5, 15, 0.05, 5.5, 'Deep Field', 3, { u: 'uGxfCoreFall' }),
+      p('fieldDiskFall', 'Disk falloff', 0.2, 10, 0.05, 2.2, 'Deep Field', 3, { u: 'uGxfDiskFall' }),
+      p('fieldCoreR', 'Core tint radius', 0.05, 2, 0.01, 0.55, 'Deep Field', 3, { u: 'uGxfCoreR' }),
+      p('fieldFeather', 'Edge feather', 0.05, 2, 0.01, 0.55, 'Deep Field', 3, { u: 'uGxfFeather' }),
+      p('fieldLaneAt', 'Lane gate', 0, 1, 0.01, 0.3, 'Deep Field', 3, { u: 'uGxfLaneAt' }),
+      p('fieldLaneW', 'Lane width', 0.02, 2, 0.01, 0.42, 'Deep Field', 3, { u: 'uGxfLaneW' }),
+      p('fieldCore.0', 'Core R', 0, 1.5, 0.01, 1.0, 'Deep Field', 3, { u: 'uGxfCore', comp: 'x' }),
+      p('fieldCore.1', 'Core G', 0, 1.5, 0.01, 0.8, 'Deep Field', 3, { u: 'uGxfCore', comp: 'y' }),
+      p('fieldCore.2', 'Core B', 0, 1.5, 0.01, 0.58, 'Deep Field', 3, { u: 'uGxfCore', comp: 'z' }),
+      p('fieldDisk.0', 'Disk R', 0, 1.5, 0.01, 0.62, 'Deep Field', 3, { u: 'uGxfDisk', comp: 'x' }),
+      p('fieldDisk.1', 'Disk G', 0, 1.5, 0.01, 0.74, 'Deep Field', 3, { u: 'uGxfDisk', comp: 'y' }),
+      p('fieldDisk.2', 'Disk B', 0, 1.5, 0.01, 1.0, 'Deep Field', 3, { u: 'uGxfDisk', comp: 'z' }),
+      p('cluster', 'Clustering', 0, 1, 0.01, 0, 'Clustering', 1, { u: 'uGxfCluster' }),
+      p('clusterPeak', 'Core crowding', 1, 20, 0.1, 6.0, 'Clustering', 2, { u: 'uGxfClusterPeak' }),
+      p('clusterR', 'Core radius', 0.05, 2, 0.01, 0.45, 'Clustering', 2, { u: 'uGxfClusterR' }),
+      p('clusterAt.0', 'Center X', -0.5, 2.5, 0.01, 0.5, 'Clustering', 2, aspectX('uGxfAt')),
+      p('clusterAt.1', 'Center Y', -0.5, 1.5, 0.01, 0.5, 'Clustering', 2, plainY('uGxfAt')),
+      {
+        key: 'ramp',
+        label: 'z → color ramp',
+        group: 'Redshift',
+        tier: 1,
+        kind: 'enum',
+        /* Writes ramp.0–8 and stores nothing of its own, so a tuned ramp
+           survives in the preset instead of collapsing back to a preset name. */
+        derived: true,
+        structural: true,
+        refresh: true,
+        options: Z_RAMPS,
+        read: (params) => Z_RAMPS.find(
+          (o) => o.stops.every((v, i) => getPath(params, `ramp.${i}`) === v),
+        )?.id ?? Z_RAMPS[0].id,
+        write: (params, id) => {
+          const pick = Z_RAMPS.find((o) => o.id === id) ?? Z_RAMPS[0];
+          pick.stops.forEach((v, i) => setPath(params, `ramp.${i}`, v));
+        },
+      },
+      p('zTint', 'Ramp blend', 0, 1, 0.01, 0, 'Redshift', 1, { u: 'uGxfZTint' }),
+      p('zLo', 'Nearest z', 0, 8, 0.01, 0.2, 'Redshift', 2, pairLo('uGxfZLo', 'uGxfZHi', 'zHi')),
+      p('zHi', 'Farthest z', 0, 12, 0.01, 3.0, 'Redshift', 2, pairHi('uGxfZHi', 'zLo')),
+      p('zSize', 'Size dimming', 0, 3, 0.01, 0, 'Redshift', 2, { u: 'uGxfZSize' }),
+      p('zDim', 'Surface dimming', 0, 6, 0.01, 0, 'Redshift', 2, { u: 'uGxfZDim' }),
+      p('ramp.0', 'Near R', 0, 1.5, 0.01, 0.72, 'Redshift', 3, { u: 'uGxfZNear', comp: 'x' }),
+      p('ramp.1', 'Near G', 0, 1.5, 0.01, 0.84, 'Redshift', 3, { u: 'uGxfZNear', comp: 'y' }),
+      p('ramp.2', 'Near B', 0, 1.5, 0.01, 1.0, 'Redshift', 3, { u: 'uGxfZNear', comp: 'z' }),
+      p('ramp.3', 'Mid R', 0, 1.5, 0.01, 1.0, 'Redshift', 3, { u: 'uGxfZMid', comp: 'x' }),
+      p('ramp.4', 'Mid G', 0, 1.5, 0.01, 0.88, 'Redshift', 3, { u: 'uGxfZMid', comp: 'y' }),
+      p('ramp.5', 'Mid B', 0, 1.5, 0.01, 0.6, 'Redshift', 3, { u: 'uGxfZMid', comp: 'z' }),
+      p('ramp.6', 'Far R', 0, 1.5, 0.01, 1.0, 'Redshift', 3, { u: 'uGxfZFar', comp: 'x' }),
+      p('ramp.7', 'Far G', 0, 1.5, 0.01, 0.55, 'Redshift', 3, { u: 'uGxfZFar', comp: 'y' }),
+      p('ramp.8', 'Far B', 0, 1.5, 0.01, 0.34, 'Redshift', 3, { u: 'uGxfZFar', comp: 'z' }),
+      {
+        key: 'look',
+        label: 'Morphology',
+        group: 'Showpiece',
+        tier: 1,
+        kind: 'enum',
+        derived: true,
+        structural: true,
+        refresh: true,
+        options: GALAXY_LOOKS,
+        read: (params) => {
+          if (getPath(params, 'look.shell')) return 'shell';
+          if (!getPath(params, 'look.ring')) return 'spiral';
+          if (getPath(params, 'look.polar')) return 'polar';
+          return getPath(params, 'look.spokes') ? 'cartwheel' : 'hoag';
+        },
+        write: (params, id) => {
+          const pick = GALAXY_LOOKS.find((o) => o.id === id) ?? GALAXY_LOOKS[0];
+          for (const key of Object.keys(pick.look)) setPath(params, `look.${key}`, pick.look[key]);
+        },
+      },
+      p('look.shell', 'Merger shells', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
+      p('look.ring', 'Detached ring', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
+      p('look.spokes', 'Cartwheel spokes', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
+      p('look.polar', 'Second ring plane', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
+      p('gain', 'Gain', 0, 2, 0.01, 0.14, 'Showpiece', 1, { u: 'uGxGain' }),
+      p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.72, 'Showpiece', 1, aspectX('uGxCenter')),
+      p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.34, 'Showpiece', 1, plainY('uGxCenter')),
+      p('size', 'Radius', 0.01, 1, 0.005, 0.16, 'Showpiece', 1, { u: 'uGxSize' }),
+      p('cosI', 'Inclination', 0.06, 1, 0.01, 0.42, 'Showpiece', 1, { u: 'uGxCosI' }),
+      p('pa', 'Position angle', -3.1416, 3.1416, 0.01, 0.55, 'Showpiece', 1, { u: 'uGxPa', unit: 'rad' }),
+      p('cutIn', 'Fade start', 0.1, 4, 0.01, 1.15, 'Showpiece', 3, pairLo('uGxCutIn', 'uGxCutOut', 'cutOut')),
+      p('cutOut', 'Fade end', 0.1, 6, 0.01, 1.75, 'Showpiece', 3, pairHi('uGxCutOut', 'cutIn')),
+      p('armAmt', 'Arm contrast', 0, 1, 0.01, 0.85, 'Spiral Arms', 1, { u: 'uGxArmAmt' }),
+      p('wind', 'Winding', 0.2, 12, 0.01, 3.0, 'Spiral Arms', 1, { u: 'uGxWind' }),
+      p('armSharp', 'Arm sharpness', 0, 8, 0.01, 1.6, 'Spiral Arms', 2, { u: 'uGxArmSharp' }),
+      p('armBlend', 'Two-to-three arms', 0, 1, 0.01, 0, 'Spiral Arms', 2, { u: 'uGxArmBlend' }),
+      p('diskFall', 'Disk falloff', 0.2, 10, 0.01, 3.2, 'Spiral Arms', 2, { u: 'uGxDiskFall' }),
+      p('motAmt', 'Flocculence', 0, 1, 0.01, 0.45, 'Spiral Arms', 2, { u: 'uGxMotAmt' }),
+      p('motFreq', 'Mottle frequency', 0.2, 12, 0.01, 3.2, 'Spiral Arms', 3, { u: 'uGxMotFreq' }),
+      p('phase', 'Arm phase', -3.1416, 3.1416, 0.01, 0, 'Spiral Arms', 3, { u: 'uGxPhase', unit: 'rad' }),
+      p('bulgeAmt', 'Bulge weight', 0, 6, 0.01, 1.6, 'Bulge', 1, { u: 'uGxBulgeAmt' }),
+      p('bulgeR', 'Bulge radius', 0.005, 1, 0.005, 0.16, 'Bulge', 1, { u: 'uGxBulgeR' }),
+      p('bulgeBeta', 'Moffat beta', 0.5, 6, 0.01, 1.5, 'Bulge', 2, { u: 'uGxBulgeBeta' }),
+      p('tintLo', 'Tint low', 0, 1, 0.01, 0.18, 'Bulge', 3, pairLo('uGxTintLo', 'uGxTintHi', 'tintHi')),
+      p('tintHi', 'Tint high', 0, 1, 0.01, 0.62, 'Bulge', 3, pairHi('uGxTintHi', 'tintLo')),
+      p('bulge.0', 'Bulge R', 0, 1.5, 0.01, 1.0, 'Bulge', 3, { u: 'uGxBulge', comp: 'x' }),
+      p('bulge.1', 'Bulge G', 0, 1.5, 0.01, 0.78, 'Bulge', 3, { u: 'uGxBulge', comp: 'y' }),
+      p('bulge.2', 'Bulge B', 0, 1.5, 0.01, 0.5, 'Bulge', 3, { u: 'uGxBulge', comp: 'z' }),
+      p('disk.0', 'Disk R', 0, 1.5, 0.01, 0.6, 'Bulge', 3, { u: 'uGxDisk', comp: 'x' }),
+      p('disk.1', 'Disk G', 0, 1.5, 0.01, 0.74, 'Bulge', 3, { u: 'uGxDisk', comp: 'y' }),
+      p('disk.2', 'Disk B', 0, 1.5, 0.01, 1.0, 'Bulge', 3, { u: 'uGxDisk', comp: 'z' }),
+      p('laneDepth', 'Lane depth', 0, 1, 0.01, 0.45, 'Dust Lane', 2, { u: 'uGxLaneDepth' }),
+      p('lanePhase', 'Lane lag', -3.1416, 3.1416, 0.01, 0.55, 'Dust Lane', 2, { u: 'uGxLanePhase', unit: 'rad' }),
+      p('laneSharp', 'Lane sharpness', 0, 8, 0.01, 2.4, 'Dust Lane', 3, { u: 'uGxLaneSharp' }),
+      p('nearSide', 'Near side', -1, 1, 0.01, 1.0, 'Dust Lane', 3, { u: 'uGxNearSide' }),
+      p('nearSoft', 'Near-side softness', 0.01, 2, 0.01, 0.45, 'Dust Lane', 3, { u: 'uGxNearSoft' }),
+      p('hii', 'Knot gain', 0, 2, 0.01, 0.3, 'HII Knots', 1, { u: 'uGxHii' }),
+      p('hiiTh', 'Knot threshold', 0, 1, 0.01, 0.62, 'HII Knots', 2, { u: 'uGxHiiTh' }),
+      p('hiiFreq', 'Knot frequency', 1, 60, 0.5, 24.0, 'HII Knots', 2, { u: 'uGxHiiFreq' }),
+      p('hiiOiii', 'Knot OIII', 0, 2, 0.01, 0.25, 'HII Knots', 3, { u: 'uGxHiiOiii' }),
+      p('hiiSii', 'Knot SII', 0, 2, 0.01, 0.08, 'HII Knots', 3, { u: 'uGxHiiSii' }),
+      p('shellAmt', 'Shell amount', 0, 2, 0.01, 0.5, 'Shells', 1, { u: 'uGxShellAmt' }),
+      p('shellFreq', 'Shell count', 1, 40, 0.1, 9.0, 'Shells', 1, { u: 'uGxShellFreq' }),
+      p('shellSharp', 'Shell sharpness', 0, 40, 0.1, 10.0, 'Shells', 2, { u: 'uGxShellSharp' }),
+      p('shellRot', 'Alternation axis', -3.1416, 3.1416, 0.01, 0.4, 'Shells', 2, { u: 'uGxShellRot', unit: 'rad' }),
+      /* At 0 the alternation smoothstep collapses and every arc closes into a
+         full annulus, which is the one thing shell galaxies never do. */
+      p('shellCut', 'Arc taper', 0.005, 1, 0.005, 0.3, 'Shells', 2, { u: 'uGxShellCut' }),
+      p('shellFall', 'Shell falloff', 0, 6, 0.01, 1.1, 'Shells', 2, { u: 'uGxShellFall' }),
+      p('shellIn', 'Inner cutoff', 0.01, 2, 0.01, 0.35, 'Shells', 3, { u: 'uGxShellIn' }),
+      p('shellPhase', 'Shell phase', -3.1416, 3.1416, 0.01, 0, 'Shells', 3, { u: 'uGxShellPhase', unit: 'rad' }),
+      p('devRe', 'Effective radius', 0.05, 2, 0.005, 0.55, 'Shells', 3, { u: 'uGxDevRe' }),
+      p('devFloor', 'Profile floor', 0.005, 0.3, 0.001, 0.04, 'Shells', 3, {
+        /* The r^1/4 law is singular at 0; the floor bounds it and the peak
+           normalizer keeps gain meaning the same thing at any floor. */
+        set: (U, v) => {
+          const f = Math.max(v, 1e-4);
+          U.uGxDevFloor.value = f;
+          U.uGxDevNorm.value = 1 / Math.exp(-7.669 * (f ** 0.25 - 1));
+        },
+      }),
+      p('shellTint.0', 'Shell R', 0, 1.5, 0.01, 0.78, 'Shells', 3, { u: 'uGxShellTint', comp: 'x' }),
+      p('shellTint.1', 'Shell G', 0, 1.5, 0.01, 0.86, 'Shells', 3, { u: 'uGxShellTint', comp: 'y' }),
+      p('shellTint.2', 'Shell B', 0, 1.5, 0.01, 1.0, 'Shells', 3, { u: 'uGxShellTint', comp: 'z' }),
+      p('ringAmt', 'Ring gain', 0, 3, 0.01, 1.0, 'Ring', 1, { u: 'uGxRingAmt' }),
+      p('ringR', 'Ring radius', 0.05, 3, 0.005, 0.78, 'Ring', 1, { u: 'uGxRingR' }),
+      p('ringW', 'Ring width', 0.005, 1, 0.005, 0.09, 'Ring', 1, { u: 'uGxRingW' }),
+      p('knotAmt', 'Ring beading', 0, 1, 0.01, 0.65, 'Ring', 2, { u: 'uGxKnotAmt' }),
+      p('knotFreq', 'Bead frequency', 1, 40, 0.1, 9.0, 'Ring', 2, { u: 'uGxKnotFreq' }),
+      p('ring.0', 'Ring R', 0, 1.5, 0.01, 0.55, 'Ring', 3, { u: 'uGxRing', comp: 'x' }),
+      p('ring.1', 'Ring G', 0, 1.5, 0.01, 0.78, 'Ring', 3, { u: 'uGxRing', comp: 'y' }),
+      p('ring.2', 'Ring B', 0, 1.5, 0.01, 1.0, 'Ring', 3, { u: 'uGxRing', comp: 'z' }),
+      p('spokeAmt', 'Spoke gain', 0, 2, 0.01, 0.35, 'Spokes', 1, { u: 'uGxSpokeAmt' }),
+      p('spokeFreq', 'Spoke count', 1, 40, 0.1, 7.0, 'Spokes', 2, { u: 'uGxSpokeFreq' }),
+      p('spokeTh', 'Spoke threshold', 0, 1, 0.01, 0.52, 'Spokes', 2, { u: 'uGxSpokeTh' }),
+      p('spokeIn', 'Hub radius', 0.01, 1.5, 0.005, 0.22, 'Spokes', 3, { u: 'uGxSpokeIn' }),
+      p('spokeAniso', 'Radial drift', 0, 3, 0.01, 0.35, 'Spokes', 3, { u: 'uGxSpokeAniso' }),
+      p('polarAmt', 'Polar gain', 0, 3, 0.01, 0.8, 'Polar Ring', 1, { u: 'uGxPolarAmt' }),
+      p('polarR', 'Polar radius', 0.05, 3, 0.005, 0.8, 'Polar Ring', 1, { u: 'uGxPolarR' }),
+      p('polarW', 'Polar width', 0.005, 1, 0.005, 0.09, 'Polar Ring', 2, { u: 'uGxPolarW' }),
+      p('polarPa', 'Plane offset', -3.1416, 3.1416, 0.01, 1.5708, 'Polar Ring', 2, { u: 'uGxPolarPa', unit: 'rad' }),
+      p('polarCosI', 'Polar inclination', 0.06, 1, 0.01, 0.25, 'Polar Ring', 2, { u: 'uGxPolarCosI' }),
+      /* Below ~0.0008 rad/h the 4096 h wrap quantizes the pattern to a stop */
+      p('spin', 'Arm rotation', 0, 0.02, 0.000001, 0.001534, 'Evolution', 2, { u: 'uGxSpin' }),
+      p('morphRate', 'Morph rate', 0, 1, 0.01, 0.03, 'Evolution', 2, { u: 'uGxMorph' }),
+    ],
+  },
+
+  {
+    type: 'voorwerp',
+    label: 'Ionization echo cloud',
+    salt: 131,
+    rank: 13,
+    depth: 0.5,
+    depthParam: { u: 'uDepthVwp', max: 0.95 },
+    addable: true,
+    mute: { gain: 0 },
+    groups: ['Cloud', 'Hole', 'Ionization Cone', 'Echo Delay', 'Lacework', 'Species', 'Evolution', 'Depth'],
+    params: [
+      p('gain', 'Gain', 0, 3, 0.01, 1.35, 'Cloud', 1, { u: 'uVwpGain' }),
+      p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.5, 'Cloud', 1, aspectX('uVwpCenter')),
+      p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.36, 'Cloud', 1, plainY('uVwpCenter')),
+      p('size', 'Cloud radius', 0.01, 1, 0.005, 0.18, 'Cloud', 1, { u: 'uVwpSize' }),
+      p('squash', 'Ellipticity', 0.05, 3, 0.01, 0.8, 'Cloud', 2, { u: 'uVwpSquash' }),
+      p('rot', 'Rotation', -3.1416, 3.1416, 0.01, -0.35, 'Cloud', 2, { u: 'uVwpRot', unit: 'rad' }),
+      /* Both are in cloud radii, so resizing never re-tunes the silhouette */
+      p('ragged', 'Edge raggedness', 0, 1.5, 0.01, 0.34, 'Cloud', 2, { u: 'uVwpRagged' }),
+      p('ragFreq', 'Raggedness freq', 0.2, 8, 0.05, 1.9, 'Cloud', 3, { u: 'uVwpRagFreq' }),
+      p('feather', 'Edge feather', 0.005, 1, 0.005, 0.16, 'Cloud', 3, { u: 'uVwpFeather' }),
+      p('holeR', 'Hole radius', 0, 1, 0.005, 0.3, 'Hole', 1, { u: 'uVwpHoleR' }),
+      /* Offsets, not framed positions, so the aspect scale must not reach these */
+      p('holeAt.0', 'Hole offset X', -1.5, 1.5, 0.01, -0.14, 'Hole', 2, { u: 'uVwpHoleAt', comp: 'x' }),
+      p('holeAt.1', 'Hole offset Y', -1.5, 1.5, 0.01, -0.3, 'Hole', 2, { u: 'uVwpHoleAt', comp: 'y' }),
+      p('holeSoft', 'Hole edge', 0.0001, 0.1, 0.0001, 0.006, 'Hole', 3, { u: 'uVwpHoleSoft' }),
+      p('src.0', 'Nucleus X', -0.5, 2.5, 0.01, 0.62, 'Ionization Cone', 1, aspectX('uVwpSrc')),
+      p('src.1', 'Nucleus Y', -0.5, 1.5, 0.01, 0.76, 'Ionization Cone', 1, plainY('uVwpSrc')),
+      p('cone', 'Cone bearing', -3.1416, 3.1416, 0.01, -2.0, 'Ionization Cone', 1, { u: 'uVwpCone', unit: 'rad' }),
+      p('half', 'Cone half-angle', 0.02, 1.5, 0.005, 0.3, 'Ionization Cone', 1, { u: 'uVwpHalf', unit: 'rad' }),
+      p('litR', 'Flux radius', 0.01, 2, 0.01, 0.34, 'Ionization Cone', 2, { u: 'uVwpLitR' }),
+      /* This uniform IS the cone's sharpness; a large value erases the read */
+      p('coneSoft', 'Cone edge', 0.001, 0.3, 0.001, 0.045, 'Ionization Cone', 3, { u: 'uVwpConeSoft', unit: 'rad' }),
+      p('fall', 'Flux falloff', 0, 5, 0.01, 1.3, 'Ionization Cone', 3, { u: 'uVwpFall' }),
+      /* The apex trails the nucleus by the light-travel time, which is the
+         physically correct wrongness: the quasar moved before the light landed. */
+      p('lag', 'Echo delay', 0, 1, 0.005, 0.05, 'Echo Delay', 2, { u: 'uVwpLag' }),
+      p('lagBear', 'Delay bearing', -3.1416, 3.1416, 0.01, 1.1, 'Echo Delay', 2, { u: 'uVwpLagBear', unit: 'rad' }),
+      p('threshold', 'Threshold', 0, 1, 0.01, 0.55, 'Lacework', 2, { u: 'uVwpTh' }),
+      p('freq', 'Lace frequency', 0.5, 40, 0.1, 13.0, 'Lacework', 2, { u: 'uVwpFreq' }),
+      p('clump', 'Knot break-up', 0, 1, 0.01, 0.5, 'Lacework', 2, { u: 'uVwpClump' }),
+      p('shade', 'Patch shading', 0, 1, 0.01, 0.7, 'Lacework', 2, { u: 'uVwpShade' }),
+      p('glow', 'Inter-knot glow', 0, 1, 0.005, 0.05, 'Lacework', 2, { u: 'uVwpGlow' }),
+      p('blob', 'Lyman-alpha blob', 0, 1, 1, 0, 'Lacework', 2, { kind: 'bool', structural: true }),
+      p('sharp', 'Ridge sharpness', 0, 8, 0.01, 2.2, 'Lacework', 3, { u: 'uVwpSharp' }),
+      p('softness', 'Edge softness', 0.001, 1, 0.001, 0.36, 'Lacework', 3, { u: 'uVwpSoft' }),
+      p('clumpFreq', 'Break-up freq', 0.2, 12, 0.05, 3.0, 'Lacework', 3, { u: 'uVwpClumpFreq' }),
+      p('oiii', 'OIII strength', 0, 2, 0.01, 1.0, 'Species', 1, { u: 'uVwpOiii' }),
+      p('ha', 'Knot Hα', 0, 2, 0.01, 0.16, 'Species', 2, { u: 'uVwpHa' }),
+      p('sii', 'SII strength', 0, 2, 0.01, 0.0, 'Species', 3, { u: 'uVwpSii' }),
+      p('morphRate', 'Morph rate', 0, 1, 0.01, 0.03, 'Evolution', 2, { u: 'uVwpMorph' }),
     ],
   },
 ];

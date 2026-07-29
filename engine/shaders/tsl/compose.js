@@ -13,12 +13,13 @@ import { echoTau } from './echo.js';
 import { shadowFanTau } from './shadowfan.js';
 import { searchlightTau } from './searchlight.js';
 import { shapeTauAndRim } from './shape.js';
+import { lensWarp } from './lensing.js';
 
 /* Interstellar reddening: blue is extinguished ~1.9× harder than red. That
    reflection self-extinguishes under its own summed tau is deliberate. */
 const SIGMA = vec3(1.0, 1.35, 1.9);
 
-export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} }) {
+export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {}, lens = null }) {
   return Fn(() => {
     const screen = uv();
 
@@ -28,13 +29,19 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {} 
 
     /* Overscanned layer RTs: mapping through the margin keeps parallax off RT
        edges, and subtracting moves the image with the star quads. */
-    const sampleAt = (depth) => {
+    const sampleAt = (depth, at = screen) => {
       const offUV = par.mul(depth).div(U.uResolution);
-      return screen.sub(0.5).sub(offUV).div(U.uMarginScale).add(0.5);
+      return at.sub(0.5).sub(offUV).div(U.uMarginScale).add(0.5);
     };
 
-    const line = texture(lineTex, sampleAt(U.uDepthLine)).rgb;
-    const cont = texture(contTex, sampleAt(U.uDepthCont)).rgb;
+    /* Lensing warps the two scene RTs and nothing else. The bright star tier
+       keeps its own untouched RT because foreground stars are not lensed, and
+       that asymmetry — spikes straight, background smeared — is the whole read. */
+    const warp = lens ? lensWarp(screen, U, lens) : null;
+    const lineRaw = texture(lineTex, sampleAt(U.uDepthLine, warp?.at)).rgb;
+    const contRaw = texture(contTex, sampleAt(U.uDepthCont, warp?.at)).rgb;
+    const line = warp ? lineRaw.mul(warp.gain) : lineRaw;
+    const cont = warp ? contRaw.mul(warp.gain) : contRaw;
     const bright = texture(brightTex, screen).rgb;
 
     /* Sky y increases downward, the way the layer RTs and the baked shape frames

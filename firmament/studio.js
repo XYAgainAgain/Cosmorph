@@ -262,6 +262,15 @@ function isGroupOpen(type, group, hasBasic) {
   return ui.openGroups.has(key) || hasBasic;
 }
 
+/* Remembering which groups the user opened survives a tier switch */
+function rememberGroup(type, details) {
+  if (!details.classList?.contains('group')) return;
+  const key = groupKey(type, details.dataset.group);
+  ui.openGroups.delete(key);
+  ui.openGroups.delete(`-${key}`);
+  ui.openGroups.add(details.open ? key : `-${key}`);
+}
+
 /* Rendering */
 
 /* Every render replaces a whole subtree, which parks the scroller at the top.
@@ -272,11 +281,27 @@ function keepScroll(paint) {
   if (dom.body.scrollTop !== top) dom.body.scrollTop = top;
 }
 
+/* Grouped the same way entity params are, and in first-appearance order, so the
+   lensing dials do not land as twenty unlabeled rows under the grading ones. */
 function renderSceneParams() {
-  const visible = SCENE_PARAMS.filter((p) => p.tier <= ui.tier);
-  dom.sceneParams.innerHTML = visible
-    .map((p) => sliderRow(p, scene.grading[p.key], 'scene'))
-    .join('');
+  const byGroup = new Map();
+  for (const param of SCENE_PARAMS) {
+    if (param.tier > ui.tier) continue;
+    const group = param.group ?? 'Grading';
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push(param);
+  }
+
+  dom.sceneParams.innerHTML = [...byGroup].map(([group, list]) => {
+    const open = isGroupOpen('scene', group, list.some((p) => p.tier === 1));
+    const rows = list.map((p) => sliderRow(p, scene.grading[p.key], 'scene')).join('');
+    return `<details class="group" data-group="${group}" ${open ? 'open' : ''}>
+      <summary class="group__summary">
+        <span class="group__name">${group}</span>
+      </summary>
+      <div class="params">${rows}</div>
+    </details>`;
+  }).join('');
 }
 
 function renderEntityList() {
@@ -515,6 +540,9 @@ function onParamEvent(event) {
     scene.grading[key] = value;
     updateReadout(node, param, value);
     if (host.uniforms) applyParam(host.uniforms, param, value, {});
+    /* A build gate (the lensing warp, its sub-halo count) changes the compose
+       graph, so it cannot be poked; it has to go back through a rebuild. */
+    if (param.structural) scheduleRebuild();
     host.requestRender();
     markDirty();
     return;
@@ -1020,15 +1048,8 @@ function wire() {
     event.target.closest?.('.is-rolling')?.classList.remove('is-rolling');
   });
 
-  /* Remembering which groups the user opened survives a tier switch */
-  dom.detail.addEventListener('toggle', (event) => {
-    const details = event.target;
-    if (!details.classList?.contains('group')) return;
-    const key = groupKey(ui.selected, details.dataset.group);
-    ui.openGroups.delete(key);
-    ui.openGroups.delete(`-${key}`);
-    ui.openGroups.add(details.open ? key : `-${key}`);
-  }, true);
+  dom.detail.addEventListener('toggle', (e) => rememberGroup(ui.selected, e.target), true);
+  dom.sceneParams.addEventListener('toggle', (e) => rememberGroup('scene', e.target), true);
 
   dom.list.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-act]');

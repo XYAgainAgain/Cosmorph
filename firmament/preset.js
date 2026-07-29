@@ -67,6 +67,26 @@ function engineParams(entity) {
   return out;
 }
 
+/* The two build gates have to reach sky2d through the config; the rest are live
+   uniforms, but they ride along so a fresh build starts where the sliders sit. */
+function lensingFrom(grading) {
+  return {
+    on: grading.lens === 1,
+    halos: grading.lensHalos,
+    thetaE: grading.lensThetaE,
+    core: grading.lensCore,
+    center: [grading.lensX, grading.lensY],
+    ellip: grading.lensEllip,
+    angle: grading.lensAngle,
+    point: grading.lensPoint,
+    shear1: grading.lensShear1,
+    shear2: grading.lensShear2,
+    haloStrength: grading.lensHaloStr,
+    haloSpread: grading.lensHaloSpread,
+    magBoost: grading.lensMag,
+  };
+}
+
 export function buildEngineConfig(scene) {
   const listed = new Set(scene.entities.map((e) => e.type));
   const entities = scene.entities.map((e) => ({
@@ -97,6 +117,7 @@ export function buildEngineConfig(scene) {
     scnr: scene.grading.scnr,
     exposure: scene.grading.exposure,
     stretchK: scene.grading.stretchK,
+    lensing: lensingFrom(scene.grading),
     entities,
   };
 }
