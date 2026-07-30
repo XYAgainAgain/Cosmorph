@@ -22,9 +22,35 @@
 
 <jelly-theme mode="dark" class="ui">
 
-  <div class="themebar">
-    <span class="themebar__mark" aria-hidden="true"></span>
-    <jelly-select class="themebar__pick" id="ui-theme" label="UI theme" size="small"></jelly-select>
+  <div class="hud" id="hud">
+    <button class="hud__tab" id="hud-tab" type="button" aria-controls="hud-tray" aria-expanded="false">
+      <span class="hud__mark" aria-hidden="true"></span>
+      <span>Studio</span>
+      <svg class="hud__chev" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M4.5 6.5 8 10l3.5-3.5"/>
+      </svg>
+    </button>
+
+    <div class="hud__tray" id="hud-tray">
+      <div class="hud__bar">
+        <a class="btn hud__home" id="fly-home" href="/">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" d="M2.5 7.2 8 2.5l5.5 4.7M4 8.4v5h8v-5"/>
+          </svg>
+          Fly Home
+        </a>
+        <jelly-select class="hud__pick" id="ui-theme" label="UI theme" size="small"></jelly-select>
+        <jelly-segmented class="hud__dock" id="dock" label="Panel side" size="small" value="end">
+          <jelly-segment value="start">Dock left</jelly-segment>
+          <jelly-segment value="end">Dock right</jelly-segment>
+        </jelly-segmented>
+        <div class="hud__fade">
+          <span class="hud__cap" id="alpha-cap">Panel glass</span>
+          <jelly-slider class="hud__alpha" id="panel-alpha" label="Panel opacity"
+            min="0.2" max="1" step="0.01" value="0.64" size="small"></jelly-slider>
+        </div>
+      </div>
+    </div>
   </div>
 
   <button class="panel-tab" id="panel-open" type="button" aria-controls="panel" aria-expanded="true" hidden>

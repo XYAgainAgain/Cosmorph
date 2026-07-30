@@ -44,6 +44,11 @@
     --font-body: "Outfit", ui-sans-serif, system-ui, sans-serif;
 
     --panel-inline: min(27.5rem, calc(100vw - 2rem));
+    /* The panel glass alpha, overridable per user from the studio tray. The
+       backdrop dim rides along, or thinning the fill would only reveal a sky
+       the brightness() had already crushed. 0.64 reproduces the shipped look. */
+    --panel-alpha: 0.64;
+    --glass-dim: clamp(0.06, calc(0.26 + (0.64 - var(--panel-alpha)) * 0.8), 0.85);
     /* Jelly's small checkbox box is 28px; the lock column is sized to it so the
        header glyph and the checkbox share one center line */
     --lock-col: 1.75rem;
@@ -87,8 +92,11 @@
     --accent-2: oklch(0.85 0.1 200);
   }
 
-  /* The only theme allowed to re-tint the neutrals: dark adaptation */
+  /* The only theme allowed to re-tint the neutrals: dark adaptation. Its denser
+     glass is a default, not a floor: an explicit user alpha still wins. */
   [data-theme="night"] {
+    --panel-alpha: 0.86;
+    --glass-dim: clamp(0.04, calc(0.16 + (0.86 - var(--panel-alpha)) * 0.8), 0.7);
     --accent: oklch(0.66 0.21 28);
     --accent-2: oklch(0.55 0.17 28);
     --ink: oklch(0.72 0.14 28);
@@ -186,11 +194,11 @@
     grid-template-rows: auto minmax(0, 1fr) auto;
     border: 1px solid var(--edge);
     border-radius: 10px;
-    background: var(--glass);
+    background: oklch(0 0 0 / var(--panel-alpha));
     /* brightness() in the backdrop rather than more alpha in the fill: the sky
        stays visible through the glass while every text role still clears 4.5:1,
        measured against a blown-out white core sitting directly behind it */
-    backdrop-filter: blur(16px) brightness(0.26) saturate(1.15);
+    backdrop-filter: blur(16px) brightness(var(--glass-dim)) saturate(1.15);
     overflow: clip;
     transition: translate 0.45s var(--ease-out), opacity 0.3s var(--ease-out);
   }
@@ -201,11 +209,35 @@
     pointer-events: none;
   }
 
+  /* Dock side. Everything anchored to the panel edge mirrors from this one
+     attribute: the panel, its tab, the collapse chevrons, and the scrollbar. */
+  [data-dock="start"] .panel {
+    inset-inline-end: auto;
+    inset-inline-start: 1rem;
+  }
+  [data-dock="start"] .panel.is-collapsed { translate: calc(-100% - 1.5rem) 0; }
+  [data-dock="start"] .panel-tab {
+    inset-inline-end: auto;
+    inset-inline-start: 1rem;
+  }
+  [data-dock="start"] .panel-tab svg,
+  [data-dock="start"] #panel-close svg { scale: -1 1; }
+
+  /* The only way to move a scrollbar to the other edge is to flip the scroller's
+     direction; every direct child flips back so no layout inherits the swap. */
+  [data-dock="start"] .panel__body { direction: rtl; }
+  [data-dock="start"] .panel__body > * { direction: ltr; }
+
   /* Night Vision dims the neutrals on purpose for dark adaptation, which costs
      it the 4.5:1 floor against a bright sky. The glass takes the hit instead:
      someone dark-adapting does not want the sky burning through the chrome. */
-  [data-theme="night"] .panel,
-  [data-theme="night"] .themebar {
+  [data-theme="night"] .panel {
+    background: oklch(0 0 0 / var(--panel-alpha));
+    backdrop-filter: blur(16px) brightness(var(--glass-dim)) saturate(1.1);
+  }
+  /* The tray holds the setting, so it never dims with it */
+  [data-theme="night"] .hud__bar,
+  [data-theme="night"] .hud__tab {
     background: oklch(0 0 0 / 0.86);
     backdrop-filter: blur(16px) brightness(0.16) saturate(1.1);
   }
@@ -272,19 +304,42 @@
     background: oklch(0 0 0 / 0.35);
   }
 
+  /* Sections are separated by a rule and a step in shade, not by the rule alone:
+     at this density one hairline reads as another row border. */
   .block {
     padding: 0.7rem var(--pad) 0.9rem;
-    border-block-end: 1px solid var(--edge);
+    border-block-end: 1px solid var(--edge-strong);
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.03);
   }
   .block:last-child { border-block-end: 0; }
 
   /* A foldable section keeps its h2 as the heading; the summary is the toggle */
-  .block__fold { cursor: pointer; }
-  .block__fold::marker { color: var(--edge-strong); }
+  .block__fold {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    list-style: none;
+  }
+  .block__fold::-webkit-details-marker { display: none; }
+  .block__fold::before {
+    content: "";
+    flex: none;
+    inline-size: 0.4em;
+    block-size: 0.4em;
+    border-inline-end: 1.5px solid var(--accent);
+    border-block-end: 1.5px solid var(--accent);
+    rotate: -45deg;
+    transition: rotate 0.28s var(--ease-out);
+  }
+  details.block[open] > .block__fold::before { rotate: 45deg; }
   .block__fold .block__title { display: inline; margin-block-end: 0; }
   details.block[open] .block__fold { margin-block-end: 0.6rem; }
 
   .block__title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     margin-block-end: 0.6rem;
     font-family: var(--font-display);
     font-weight: 400;
@@ -292,6 +347,15 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--ink);
+  }
+  /* The tick is the section marker; a fold puts its chevron in the same slot */
+  .block > .block__title::before {
+    content: "";
+    flex: none;
+    inline-size: 0.2rem;
+    block-size: 0.85em;
+    border-radius: 1px;
+    background: var(--accent);
   }
 
   .hint {
@@ -436,6 +500,44 @@
   }
   .lockmark svg { inline-size: 1.15rem; block-size: auto; }
 
+  /* Naming the column is what ties the padlock to the dice: the checkbox only
+     ever exempts a row from Reroll Cosmos, never from the per-entity dice. */
+  .entities__cap {
+    grid-column: 3 / span 2;
+    justify-self: end;
+    color: var(--faint);
+    font-weight: var(--weight-small);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .seedcell {
+    display: flex;
+    align-items: center;
+    justify-content: end;
+    gap: 0.25rem;
+    min-inline-size: 0;
+  }
+
+  .entity__lock {
+    display: none;
+    color: var(--accent);
+  }
+  .entity__lock svg { inline-size: 0.85rem; block-size: auto; }
+  .entity.is-locked .entity__lock { display: grid; place-items: center; }
+  .entity.is-locked .seed { color: var(--accent); }
+
+  /* Pointing at the global dice paints its scope onto the list: every row it
+     will reseed lifts, every locked row falls back. */
+  .entities.is-scoping .entity:not(.is-locked) {
+    background: color-mix(in oklab, var(--accent) 12%, transparent);
+  }
+  .entities.is-scoping .entity:not(.is-locked) .seed { color: var(--accent); }
+  .entities.is-scoping .entity.is-locked { opacity: 0.45; }
+  .entities.is-scoping .lockmark { color: var(--accent); }
+  .entity:has(jelly-checkbox:hover) { background: oklch(1 0 0 / 0.06); }
+
   .grip {
     display: grid;
     place-items: center;
@@ -518,15 +620,43 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     cursor: pointer;
+    /* The UA triangle sits in a different place in every engine, so the state
+       glyph is authored instead: one chevron that rotates on open. */
+    list-style: none;
   }
-  .group__summary::marker { color: var(--edge-strong); }
+  .group__summary::-webkit-details-marker { display: none; }
+  .group__summary::before {
+    content: "";
+    flex: none;
+    inline-size: 0.42em;
+    block-size: 0.42em;
+    border-inline-end: 1.5px solid currentColor;
+    border-block-end: 1.5px solid currentColor;
+    rotate: -45deg;
+    translate: 0 -0.1em;
+    transition: rotate 0.28s var(--ease-out), translate 0.28s var(--ease-out);
+  }
+  details[open] > .group__summary::before { rotate: 45deg; translate: 0 -0.15em; }
+  details[open] > .group__summary { color: var(--ink); }
   .group__summary:hover { color: var(--ink); }
   .group__name { flex: 1; }
 
+  /* An open group carries a rail in the accent so the eye can count sections
+     without reading a single label */
   .params {
     display: grid;
     gap: 0.4rem;
+    margin-block-end: 0.2rem;
     padding-block: 0.15rem 0.7rem;
+    padding-inline-start: 0.55rem;
+    border-inline-start: 2px solid color-mix(in oklab, var(--accent) 32%, transparent);
+  }
+
+  /* A group whose gate is off keeps only the gate itself, and says so */
+  .group[data-gated] > .group__summary { color: var(--faint); }
+  .group[data-gated] > .group__summary .group__name::after {
+    content: " · off";
+    color: var(--accent-2);
   }
 
   .param {
@@ -693,41 +823,129 @@
 }
 
 @layer controls {
-  /* Detached from the panel on purpose: the theme is chrome for the studio, not
-     a property of the sky, and it stays reachable while the panel is collapsed. */
-  .themebar {
+  /* Studio chrome, not scene state: it belongs to Firmament rather than to the
+     sky, and it stays reachable while the panel is collapsed. Top-center is the
+     one edge no dock side ever claims. */
+  .hud {
     position: fixed;
     z-index: 3;
-    inset-block-start: 1rem;
-    /* Leading edge, not center: the panel docks trailing, and a centered bar
-       collides with it on narrower desktops */
-    inset-inline-start: 1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.3rem 0.4rem 0.3rem 0.7rem;
-    border: 1px solid var(--edge);
-    border-radius: 999px;
-    background: var(--glass);
-    backdrop-filter: blur(16px) brightness(0.26) saturate(1.15);
+    inset-block-start: 0;
+    inset-inline-start: 50%;
+    translate: -50% 0;
+    display: grid;
+    justify-items: center;
   }
 
+  .hud__tab {
+    display: flex;
+    align-items: center;
+    gap: 0.45em;
+    padding: 0.3rem 0.75rem 0.35rem;
+    border: 1px solid var(--edge);
+    border-block-start: 0;
+    border-start-start-radius: 0;
+    border-start-end-radius: 0;
+    border-end-start-radius: 12px;
+    border-end-end-radius: 12px;
+    background: var(--glass);
+    backdrop-filter: blur(16px) brightness(0.26) saturate(1.15);
+    color: var(--muted);
+    font: inherit;
+    font-weight: var(--weight-small);
+    font-size: 0.8rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: default;
+    transition: color 0.25s var(--ease-out), border-color 0.25s var(--ease-out);
+  }
+  .hud:is(:hover, :focus-within) .hud__tab,
+  .hud.is-open .hud__tab { color: var(--ink); border-color: var(--edge-strong); }
+
   /* A dot in the live accent, so the mark previews the theme it switches */
-  .themebar__mark {
+  .hud__mark {
     flex: none;
-    inline-size: 0.7rem;
-    block-size: 0.7rem;
+    inline-size: 0.55rem;
+    block-size: 0.55rem;
     border-radius: 50%;
     color: var(--accent);
     background: currentColor;
     box-shadow: 0 0 0.55rem currentColor;
   }
 
-  .themebar__pick {
+  .hud__chev {
+    inline-size: 0.8em;
+    block-size: auto;
+    transition: rotate 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .hud:is(:hover, :focus-within) .hud__chev,
+  .hud.is-open .hud__chev { rotate: -180deg; }
+
+  /* The padding is the hover bridge: with no gap to cross, the pointer never
+     leaves the .hud subtree on its way down to the bar. */
+  .hud__tray {
+    position: absolute;
+    inset-block-start: 100%;
+    padding-block-start: 0.4rem;
+    opacity: 0;
+    visibility: hidden;
+    translate: 0 -0.5rem;
+    scale: 0.94;
+    transition:
+      opacity 0.18s var(--ease-out),
+      translate 0.42s cubic-bezier(0.34, 1.56, 0.64, 1),
+      scale 0.42s cubic-bezier(0.34, 1.7, 0.64, 1),
+      visibility 0s linear 0.42s;
+  }
+  .hud:is(:hover, :focus-within) .hud__tray,
+  .hud.is-open .hud__tray {
+    opacity: 1;
+    visibility: visible;
+    translate: 0 0;
+    scale: 1;
+    transition-delay: 0s;
+  }
+
+  .hud__bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem 0.7rem;
+    inline-size: max-content;
+    max-inline-size: min(54rem, calc(100vw - 2rem));
+    padding: 0.45rem 0.7rem;
+    border: 1px solid var(--edge);
+    border-radius: 14px;
+    background: var(--glass-deep);
+    backdrop-filter: blur(16px) brightness(0.26) saturate(1.15);
+  }
+
+  .hud__home {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    text-decoration: none;
+  }
+  .hud__home svg { inline-size: 1.1em; block-size: auto; }
+
+  .hud__pick {
     inline-size: 9.25rem;
     block-size: 2.2rem;
     --jelly-fill: oklch(0.15 0.008 250);
   }
+
+  .hud__fade {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .hud__cap {
+    color: var(--muted);
+    font-weight: var(--weight-small);
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+  .hud__alpha { inline-size: 7.5rem; }
 
   .speed { inline-size: 5.9rem; block-size: 2.2rem; }
 }
@@ -752,8 +970,27 @@
     .panel-tab,
     .btn,
     .grip,
-    .icon-btn { transition: none; }
+    .icon-btn,
+    .hud__tab,
+    .hud__chev,
+    .group__summary::before,
+    .block__fold::before { transition: none; }
 
     .icon-btn.is-rolling svg { animation: none; }
+
+    /* No jiggle and no travel: the tray fades in place and stays reachable */
+    .hud__tray {
+      translate: none;
+      scale: 1;
+      transition: opacity 0.12s linear, visibility 0s linear 0.12s;
+    }
+    /* This layer outranks the controls one, so the open state has to clear the
+       visibility delay again or focus lands in a tray still hidden. */
+    .hud:is(:hover, :focus-within) .hud__tray,
+    .hud.is-open .hud__tray {
+      translate: none;
+      scale: 1;
+      transition-delay: 0s;
+    }
   }
 }

@@ -4,7 +4,8 @@
 import { createSkyHost } from './sky-host.js';
 import {
   ENTITY_TYPES, TYPE_BY_ID, SCENE_PARAMS, PALETTE_OPTIONS, UI_THEMES, SPEED_STEPS,
-  DEFAULT_THEME, CAMERA_RANGE, CAPTURE_SIZES, getPath, setPath, formatValue,
+  DEFAULT_THEME, CAMERA_RANGE, CAPTURE_SIZES, GROUP_GATES,
+  getPath, setPath, formatValue,
 } from './spec.js';
 import {
   createScene, buildEngineConfig, serialize, deserialize, sortEntities,
@@ -15,6 +16,8 @@ import { deriveSeed } from '/engine/core/rng.js';
 
 const STORE_PRESET = 'cosmorph:firmament:preset';
 const STORE_UI = 'cosmorph:firmament:ui';
+const STORE_AUTO = 'cosmorph:firmament:autosave';
+const AUTOSAVE_MS = 60000;
 const REBUILD_MS = 180;
 const VEIL_MS = 950;
 const T_WRAP_H = 4096;
@@ -37,6 +40,11 @@ const dom = {
   seed: el('master-seed'),
   palette: el('palette'),
   theme: el('ui-theme'),
+  hud: el('hud'),
+  hudTab: el('hud-tab'),
+  flyHome: el('fly-home'),
+  dock: el('dock'),
+  alpha: el('panel-alpha'),
   sceneParams: el('scene-params'),
   list: el('entity-list'),
   adders: el('entity-adders'),
@@ -65,6 +73,9 @@ const dom = {
 const ui = {
   tier: 1,
   theme: DEFAULT_THEME,
+  dock: 'end',
+  /* null means "never touched": the themes' own glass defaults still apply */
+  panelAlpha: null,
   collapsed: false,
   selected: 'emission',
   openGroups: new Set(),
@@ -188,7 +199,7 @@ function saveUi() {
     localStorage.setItem(STORE_UI, JSON.stringify({
       tier: ui.tier, theme: ui.theme, collapsed: ui.collapsed, selected: ui.selected,
       filingOpen: ui.filingOpen, shotSize: ui.shotSize, camOpen: ui.camOpen,
-      creditsOpen: ui.creditsOpen,
+      creditsOpen: ui.creditsOpen, dock: ui.dock, panelAlpha: ui.panelAlpha,
     }));
   } catch { /* storage blocked: session-only */ }
 }
@@ -201,6 +212,8 @@ function loadUi() {
     if (UI_THEMES.some((t) => t.id === raw.theme)) ui.theme = raw.theme;
     if (TYPE_BY_ID[raw.selected]) ui.selected = raw.selected;
     if (CAPTURE_SIZES.some((c) => c.id === raw.shotSize)) ui.shotSize = raw.shotSize;
+    if (raw.dock === 'start' || raw.dock === 'end') ui.dock = raw.dock;
+    if (Number.isFinite(raw.panelAlpha)) ui.panelAlpha = clampAlpha(raw.panelAlpha);
     ui.collapsed = raw.collapsed === true;
     ui.filingOpen = raw.filingOpen === true;
     ui.camOpen = raw.camOpen !== false;
@@ -208,11 +221,37 @@ function loadUi() {
   } catch { /* ignore a corrupt blob and keep defaults */ }
 }
 
-/* Themes */
+/* Themes and studio chrome */
+
+const ALPHA_MIN = 0.2;
+const clampAlpha = (v) => Math.min(Math.max(v, ALPHA_MIN), 1);
+
+function applyDock() {
+  document.body.dataset.dock = ui.dock;
+}
+
+function applyPanelAlpha() {
+  const style = document.documentElement.style;
+  if (ui.panelAlpha === null) style.removeProperty('--panel-alpha');
+  else style.setProperty('--panel-alpha', String(ui.panelAlpha));
+}
+
+/* Themes carry their own glass default, so an untouched slider has to read the
+   computed value rather than the base theme's. */
+function effectiveAlpha() {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--panel-alpha');
+  const value = Number.parseFloat(raw.trim());
+  return Number.isFinite(value) ? value : 0.64;
+}
+
+function syncAlphaControl() {
+  dom.alpha.setAttribute('value', String(ui.panelAlpha ?? effectiveAlpha()));
+}
 
 function applyTheme() {
   if (ui.theme && ui.theme !== DEFAULT_THEME) document.documentElement.dataset.theme = ui.theme;
   else delete document.documentElement.dataset.theme;
+  if (ui.panelAlpha === null) syncAlphaControl();
   /* Jelly's canvas-painted controls cache resolved token colors; this is the
      bundle's own repaint signal */
   window.dispatchEvent(new CustomEvent('jelly-theme-change'));
@@ -271,6 +310,64 @@ function rememberGroup(type, details) {
   ui.openGroups.add(details.open ? key : `-${key}`);
 }
 
+/* Conditional visibility
+
+   An unchecked build gate makes its group's dials inert, so they come off the
+   panel; the gate control itself never hides. A gate no control at the current
+   tier can reach is ignored, which is what guarantees every hidden row has a
+   visible control that brings it back. */
+
+function gateList(type, group) {
+  const entry = GROUP_GATES[type]?.[group];
+  if (!entry) return null;
+  return Array.isArray(entry) ? entry : [entry];
+}
+
+const bareKey = (raw) => (raw.startsWith('!') ? raw.slice(1) : raw);
+
+/* A `look.*` flag row is Expert-only while the enum that writes it is not, so an
+   out-of-tier gate falls back to the tier of the row that owns its prefix. */
+function gateTier(gate, key, params) {
+  if (gate.tier <= ui.tier) return gate.tier;
+  const dot = key.indexOf('.');
+  if (dot < 0) return gate.tier;
+  return params.find((q) => q.key === key.slice(0, dot))?.tier ?? gate.tier;
+}
+
+function gateOpen(keys, params, values) {
+  return keys.every((raw) => {
+    const key = bareKey(raw);
+    const gate = params.find((q) => q.key === key);
+    if (!gate || gateTier(gate, key, params) > ui.tier) return true;
+    return !!getPath(values, key) !== raw.startsWith('!');
+  });
+}
+
+const isGateRow = (keys, key) => keys.some((raw) => bareKey(raw) === key);
+
+const gateKeyCache = new Map();
+
+/* Every key that can flip a group's visibility for this type, so an edit to one
+   knows to repaint the panel rather than only its own row. */
+function gateKeys(type) {
+  let keys = gateKeyCache.get(type);
+  if (keys) return keys;
+  keys = new Set();
+  for (const entry of Object.values(GROUP_GATES[type] ?? {})) {
+    for (const raw of (Array.isArray(entry) ? entry : [entry])) keys.add(bareKey(raw));
+  }
+  gateKeyCache.set(type, keys);
+  return keys;
+}
+
+/* True when muting this type writes a build-gated key, which no live poke can
+   reach: the starcloud's rift tau is the only one so far. */
+function mutesStructural(type) {
+  const spec = TYPE_BY_ID[type];
+  const muted = Object.keys(spec.mute ?? {});
+  return spec.params.some((p) => p.structural && muted.includes(p.key));
+}
+
 /* Rendering */
 
 /* Every render replaces a whole subtree, which parks the scroller at the top.
@@ -293,9 +390,13 @@ function renderSceneParams() {
   }
 
   dom.sceneParams.innerHTML = [...byGroup].map(([group, list]) => {
-    const open = isGroupOpen('scene', group, list.some((p) => p.tier === 1));
-    const rows = list.map((p) => sliderRow(p, scene.grading[p.key], 'scene')).join('');
-    return `<details class="group" data-group="${group}" ${open ? 'open' : ''}>
+    const keys = gateList('scene', group);
+    const gated = keys ? !gateOpen(keys, SCENE_PARAMS, scene.grading) : false;
+    const shown = gated ? list.filter((p) => isGateRow(keys, p.key)) : list;
+    if (!shown.length) return '';
+    const open = isGroupOpen('scene', group, shown.some((p) => p.tier === 1));
+    const rows = shown.map((p) => sliderRow(p, scene.grading[p.key], 'scene')).join('');
+    return `<details class="group" data-group="${group}" ${gated ? 'data-gated' : ''} ${open ? 'open' : ''}>
       <summary class="group__summary">
         <span class="group__name">${group}</span>
       </summary>
@@ -315,7 +416,7 @@ function renderEntityList() {
          row swallows the gesture rather than starting the row's drag. */
       : `<button class="grip" type="button" draggable="true" data-act="grip" data-type="${entity.type}"
           aria-label="Reorder ${spec.label}, ${index + 1} of ${ordered.length} from farthest. Arrow up moves it farther, arrow down nearer.">${GRIP}</button>`;
-    return `<li class="entity ${current ? 'is-current' : ''} ${entity.hidden ? 'is-hidden' : ''}"
+    return `<li class="entity ${current ? 'is-current' : ''} ${entity.hidden ? 'is-hidden' : ''} ${entity.lock ? 'is-locked' : ''}"
       data-type="${entity.type}" data-index="${index}" ${spec.pinned ? '' : 'draggable="true"'}>
       ${grip}
       <button class="icon-btn" type="button" data-act="visible" data-type="${entity.type}"
@@ -324,9 +425,12 @@ function renderEntityList() {
       </button>
       <button class="entity__pick" type="button" data-act="select" data-type="${entity.type}"
         ${current ? 'aria-current="true"' : ''}>${spec.label}</button>
-      <span class="seed">#${entity.seed}</span>
+      <span class="seedcell">
+        <span class="entity__lock" aria-hidden="true">${LOCK}</span>
+        <span class="seed">#${entity.seed}</span>
+      </span>
       <jelly-checkbox size="small" data-act="lock" data-type="${entity.type}"
-        label="Lock ${spec.label} against a global reroll" ${entity.lock ? 'checked' : ''}></jelly-checkbox>
+        label="Lock ${spec.label}: keep this seed through Reroll Cosmos" ${entity.lock ? 'checked' : ''}></jelly-checkbox>
     </li>`;
   });
   keepScroll(() => { dom.list.innerHTML = HEAD_ROW + rows.join(''); });
@@ -372,7 +476,10 @@ function renderEntityDetail() {
 
   const eff = effectiveParams(entity);
   const groups = spec.groups.map((group) => {
-    const list = byGroup.get(group) ?? [];
+    const keys = gateList(entity.type, group);
+    const gated = keys ? !gateOpen(keys, spec.params, eff) : false;
+    const full = byGroup.get(group) ?? [];
+    const list = gated ? full.filter((p) => isGateRow(keys, p.key)) : full;
     if (!list.length) return '';
     const hasBasic = list.some((p) => p.tier === 1);
     const open = isGroupOpen(entity.type, group, hasBasic);
@@ -383,10 +490,11 @@ function renderEntityDetail() {
       else value = getPath(eff, param.key);
       return sliderRow(param, value, entity.type);
     }).join('');
-    /* Depth holds one synthetic row and nothing the dice could roll */
-    const dice = list.every((param) => param.synthetic) ? '' : `<button class="icon-btn" type="button" data-act="reroll-group" data-group="${group}"
+    /* Depth holds one synthetic row and nothing the dice could roll, and a gated
+       group has nothing on show but the gate itself */
+    const dice = gated || list.every((param) => param.synthetic) ? '' : `<button class="icon-btn" type="button" data-act="reroll-group" data-group="${group}"
       aria-label="Reroll the ${group} parameters">${DICE}</button>`;
-    return `<details class="group" data-group="${group}" ${open ? 'open' : ''}>
+    return `<details class="group" data-group="${group}" ${gated ? 'data-gated' : ''} ${open ? 'open' : ''}>
       <summary class="group__summary">
         <span class="group__name">${group}</span>
         ${dice}
@@ -449,9 +557,11 @@ const GRIP = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><g f
 const PIN = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M9.7 1.3 14.7 6.3l-1.3 1.3-1.1-.3-2.6 2.6.4 1.8-1.2 1.2-2.9-2.9-3.5 3.5-.8-.8 3.5-3.5-2.9-2.9L3.3 5.1l1.8.4L7.7 2.9l-.3-1.1z"/></svg>';
 const LOCK = '<svg viewBox="0 0 16 16" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M5.15 7.5V5.1a2.85 2.85 0 0 1 5.7 0v2.4"/><rect x="2.7" y="7.4" width="10.6" height="7.1" rx="1.7" fill="currentColor"/><circle cx="8" cy="10.9" r="1.2" fill="#000"/></svg>';
 
-/* Column header, not a row: the checkboxes carry no visible label of their own */
+/* Column header, not a row: the checkboxes carry no visible label of their own,
+   and the caption is what names the scope the padlock exempts a row from */
 const HEAD_ROW = `<li class="entities__head" aria-hidden="true">
-  <span class="lockmark" title="Lock against a global reroll">${LOCK}</span>
+  <span class="entities__cap">Reroll scope</span>
+  <span class="lockmark">${LOCK}</span>
 </li>`;
 
 /* Parameter edits */
@@ -492,7 +602,9 @@ async function reseedShapeAsset(entity) {
     : Number(meta.densityScale) > 0 ? Number(meta.densityScale) * 4 : tauP.def;
   const seeds = {
     tau: Math.min(Math.max(Math.round(rawTau / tauP.step) * tauP.step, tauP.min), tauP.max),
-    glow: mode === 'emission' ? 0.9 : 0,
+    /* A dark-polarity emission bake has glow = 1 everywhere outside the polygon,
+       which lights the whole frame; mirror the engine's shapeBag gate. */
+    glow: mode === 'emission' && meta.polarity === 'bright' ? 0.9 : 0,
   };
   const prev = shapeSeeds.get(entity) ?? { tau: tauP.def, glow: glowP.def };
   let changed = false;
@@ -568,6 +680,10 @@ const DEPTH_PARAM = {
 function onParamEvent(event) {
   const node = event.target.closest?.('[data-role="param"]');
   if (!node) return;
+  /* A checkbox's native input event is composed, so it escapes the shadow root
+     ahead of the component reflecting its `checked` attribute: read that early
+     and every toggle reports the state it just left. Only change is truthful. */
+  if (event.type === 'input' && node.localName === 'jelly-checkbox') return;
   const key = node.dataset.key;
   const entity = scene.entities.find((e) => e.type === ui.selected);
 
@@ -575,12 +691,19 @@ function onParamEvent(event) {
     const param = SCENE_PARAMS.find((p) => p.key === key);
     if (!param) return;
     const value = readControl(node, param);
+    const moved = scene.grading[key] !== value;
     scene.grading[key] = value;
     updateReadout(node, param, value);
     if (host.uniforms) applyParam(host.uniforms, param, value, {});
     /* A build gate (the lensing warp, its sub-halo count) changes the compose
        graph, so it cannot be poked; it has to go back through a rebuild. */
     if (param.structural) scheduleRebuild();
+    /* A gate also decides which rows exist, and the repaint drops the node the
+       event came from, so focus is re-seated by key. */
+    if (moved && gateKeys('scene').has(key)) {
+      renderSceneParams();
+      dom.sceneParams.querySelector(`[data-role="param"][data-key="${key}"]`)?.focus();
+    }
     host.requestRender();
     markDirty();
     return;
@@ -591,9 +714,10 @@ function onParamEvent(event) {
   if (!param) return;
   const value = readControl(node, param);
   if (!commitParam(entity, param, value, event.type === 'input')) return;
-  /* A control that writes its neighbors' state has to repaint them; the
-     repaint destroys the focused node, so focus is re-seated by key. */
-  if (param.refresh) {
+  /* A control that writes its neighbors' state, or gates whether they show at
+     all, has to repaint them; the repaint destroys the focused node, so focus
+     is re-seated by key. */
+  if (param.refresh || gateKeys(entity.type).has(key)) {
     renderEntityDetail();
     dom.detail.querySelector(`[data-role="param"][data-key="${key}"]`)?.focus();
   }
@@ -784,6 +908,36 @@ function savePreset() {
   } catch (err) {
     console.warn('Firmament: save failed.', err);
     say('Could not save: browser storage is unavailable.', 'warn');
+  }
+}
+
+/* Autosave
+
+   A crash used to cost the whole session, so the live scene goes to its own
+   slot on a timer. It is never the Save button's slot and it never touches the
+   dirty dot: this is a crash net, not a save. */
+
+function autosave(force = false) {
+  if (!host.ready || (document.hidden && !force)) return;
+  try {
+    localStorage.setItem(STORE_AUTO, JSON.stringify(currentPreset()));
+  } catch (err) {
+    console.warn('Firmament: autosave failed.', err);
+  }
+}
+
+/* Without a flush the net is only as good as the last tick; pagehide is the one
+   teardown event bfcache does not skip, and hiding usually precedes the close. */
+window.addEventListener('pagehide', () => autosave(true));
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) autosave(true);
+});
+
+function readAutosave() {
+  try {
+    return JSON.parse(localStorage.getItem(STORE_AUTO) ?? 'null');
+  } catch {
+    return null;
   }
 }
 
@@ -987,6 +1141,77 @@ function setCollapsed(on) {
   saveUi();
 }
 
+/* The studio tray
+
+   Hover and keyboard focus both open it through CSS alone, so the only jobs
+   here are keeping aria-expanded honest and giving a coarse pointer, which has
+   no hover to give, a tap that latches it open. */
+function wireHud() {
+  const coarse = window.matchMedia('(hover: none)');
+
+  const syncHud = () => {
+    const open = dom.hud.classList.contains('is-open')
+      || dom.hud.matches(':hover, :focus-within');
+    dom.hudTab.setAttribute('aria-expanded', String(open));
+  };
+  /* Read after the event settles: :focus-within still matches during focusout */
+  const sync = () => requestAnimationFrame(syncHud);
+  for (const type of ['pointerenter', 'pointerleave', 'focusin', 'focusout']) {
+    dom.hud.addEventListener(type, sync);
+  }
+
+  /* A tap is the touch stand-in for hover, and Safari does not focus a button on
+     one, so the latch cannot lean on :focus-within. The pointer type is read as
+     well as the media query: a hybrid laptop reports hover and still gets taps. */
+  let tapped = false;
+  dom.hudTab.addEventListener('pointerdown', (event) => {
+    tapped = event.pointerType === 'touch' || event.pointerType === 'pen';
+  });
+  dom.hudTab.addEventListener('click', () => {
+    const latch = coarse.matches || tapped;
+    tapped = false;
+    if (!latch) return;
+    dom.hud.classList.toggle('is-open');
+    syncHud();
+  });
+  dom.hud.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    dom.hud.classList.remove('is-open');
+    /* Focusing the tab would leave :focus-within matching and hold the tray
+       open, so focus leaves the hud entirely instead. */
+    document.activeElement?.blur?.();
+    syncHud();
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!dom.hud.classList.contains('is-open') || dom.hud.contains(event.target)) return;
+    dom.hud.classList.remove('is-open');
+    syncHud();
+  });
+
+  dom.flyHome.addEventListener('click', (event) => {
+    if (!ui.dirty) return;
+    const go = window.confirm('This sky has unsaved changes. Fly home anyway?');
+    if (!go) event.preventDefault();
+  });
+
+  dom.dock.addEventListener('change', () => {
+    const next = dom.dock.getAttribute('value');
+    if ((next !== 'start' && next !== 'end') || next === ui.dock) return;
+    ui.dock = next;
+    applyDock();
+    saveUi();
+  });
+
+  dom.alpha.addEventListener('input', () => {
+    const value = Number(dom.alpha.value);
+    if (!Number.isFinite(value)) return;
+    ui.panelAlpha = clampAlpha(value);
+    applyPanelAlpha();
+  });
+  /* Stored on release, not per drag tick */
+  dom.alpha.addEventListener('change', saveUi);
+}
+
 function wire() {
   fillSelect(dom.palette, PALETTE_OPTIONS, scene.palette);
   fillSelect(dom.theme, UI_THEMES, ui.theme);
@@ -1040,6 +1265,8 @@ function wire() {
     applyTheme();
     saveUi();
   });
+
+  wireHud();
 
   dom.sceneParams.addEventListener('input', onParamEvent);
   dom.sceneParams.addEventListener('change', onParamEvent);
@@ -1105,6 +1332,9 @@ function wire() {
       if (!entity) return;
       entity.hidden = !entity.hidden;
       if (host.uniforms) applyAll({ uniforms: host.uniforms });
+      /* A structural mute key cannot be poked, so hiding the band would leave
+         its rift extinction in the graph at full strength. Rebuild instead. */
+      if (mutesStructural(type)) scheduleRebuild();
       host.requestRender();
       renderEntityList();
       if (type === ui.selected) renderEntityDetail();
@@ -1188,6 +1418,9 @@ function wire() {
     const entity = scene.entities.find((e) => e.type === box.dataset.type);
     if (!entity) return;
     entity.lock = box.hasAttribute('checked');
+    /* Marked on the row rather than through a repaint, which would replace the
+       checkbox the user just clicked and drop its focus */
+    box.closest('li.entity')?.classList.toggle('is-locked', entity.lock);
     markDirty();
   });
 
@@ -1248,6 +1481,13 @@ function wire() {
   el('shot').addEventListener('click', capturePng);
 
   dom.reroll.addEventListener('click', rerollCosmos);
+  /* Pointing at the global dice paints its scope onto the list, which is the
+     only place the padlocks say what they actually exempt a row from */
+  const scope = (on) => dom.list.classList.toggle('is-scoping', on);
+  dom.reroll.addEventListener('pointerenter', () => scope(true));
+  dom.reroll.addEventListener('pointerleave', () => scope(false));
+  dom.reroll.addEventListener('focusin', () => scope(true));
+  dom.reroll.addEventListener('focusout', () => scope(false));
   el('save').addEventListener('click', savePreset);
   el('load').addEventListener('click', loadPreset);
   el('export').addEventListener('click', exportPreset);
@@ -1259,11 +1499,38 @@ function wire() {
 
 /* Boot */
 
+/* Boot precedence: an autosave wins, because it is the session the user was in
+   the middle of. An explicit ?seed that disagrees with it wins over that: the
+   URL always carries the current seed, so only a pasted, different one is a
+   real request for another sky. */
+/* Returns the restore's warnings, or null when nothing was restored: a restore
+   that quietly dropped entities has to say so, exactly as a load does. */
+function restoreAutosave() {
+  const raw = readAutosave();
+  if (!raw) return null;
+  if (Number.isFinite(urlSeed) && urlSeed !== raw.seed) return null;
+  try {
+    const { scene: next, savedT, warnings } = deserialize(raw);
+    scene = next;
+    host.setTime(savedT);
+    return warnings;
+  } catch (err) {
+    console.warn('Firmament: the autosave could not be read.', err);
+    return null;
+  }
+}
+
 async function boot() {
   loadUi();
   wire();
   applyTheme();
+  applyDock();
+  applyPanelAlpha();
   dom.tier.setAttribute('value', String(ui.tier));
+  dom.dock.setAttribute('value', ui.dock);
+  syncAlphaControl();
+  const restored = restoreAutosave();
+  if (restored) syncSeedUrl();
   if (ui.collapsed) {
     dom.panel.classList.add('is-collapsed');
     dom.panel.inert = true;
@@ -1278,7 +1545,14 @@ async function boot() {
   paletteRows = sky2d.PALETTES;
 
   await host.apply(buildEngineConfig(scene));
-  say(`Rendering on ${host.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'}.`);
+  const backend = host.backend === 'webgpu' ? 'WebGPU' : 'WebGL2';
+  if (restored?.length) {
+    say(`Restored your last sky: ${restored[0]}`, 'warn');
+    if (restored.length > 1) console.warn('Firmament: autosave warnings.', restored);
+  } else {
+    say(restored ? `Restored your last sky. Rendering on ${backend}.` : `Rendering on ${backend}.`);
+  }
+  setInterval(autosave, AUTOSAVE_MS);
   syncPlayButton();
   if (host.frozen) say('Reduced motion is on: evolution is frozen. Scrub time by hand.');
 

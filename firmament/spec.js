@@ -142,7 +142,7 @@ export const SCENE_PARAMS = [
     group: 'Lensing', tier: 3, u: 'uLensRingW',
   },
   {
-    key: 'lensChroma', label: 'Dispersion', min: 0, max: 1, step: 0.01, def: 0.35,
+    key: 'lensChroma', label: 'Dispersion', min: 0, max: 1, step: 0.01, def: 0.12,
     group: 'Lensing', tier: 3, u: 'uLensChroma',
   },
 ];
@@ -287,10 +287,10 @@ export const ENTITY_TYPES = [
       /* Without this the ionized cavity keeps landing in a coverage hole */
       p('covIon', 'Source coverage bias', 0, 1, 0.01, 0.35, 'Coverage', 2, { u: 'uCovIon' }),
       p('ionRadius', 'Source radius', 0.05, 2, 0.01, 0.62, 'Ionizing Source', 1, {
-        set: (U, v) => { U.uIonR2.value = Math.max(v * v, 1e-4); },
+        set: (U, v) => { U.uNebIonR2.value = Math.max(v * v, 1e-4); },
       }),
-      p('ionSrc.0', 'Source X', -0.5, 2.5, 0.01, 0.74, 'Ionizing Source', 2, aspectX('uIonSrc')),
-      p('ionSrc.1', 'Source Y', -0.5, 1.5, 0.01, 0.66, 'Ionizing Source', 2, plainY('uIonSrc')),
+      p('ionSrc.0', 'Source X', -0.5, 2.5, 0.01, 0.74, 'Ionizing Source', 2, aspectX('uNebIonSrc')),
+      p('ionSrc.1', 'Source Y', -0.5, 1.5, 0.01, 0.66, 'Ionizing Source', 2, plainY('uNebIonSrc')),
       /* Where on the ionization scalar the glow stops dead against dark cloud */
       p('frontAt', 'Front level', 0, 1, 0.005, 0.3, 'Ionization Front', 1, { u: 'uFrontAt' }),
       p('frontWidth', 'Front width', 0.002, 0.2, 0.001, 0.012, 'Ionization Front', 1, { u: 'uFrontW' }),
@@ -324,6 +324,12 @@ export const ENTITY_TYPES = [
       p('rot', 'Comb bearing', -3.1416, 3.1416, 0.01, 0.7, 'Structure', 2, { u: 'uIfnRot', unit: 'rad' }),
       p('gamma', 'Void contrast', 0.5, 4, 0.05, 1.9, 'Structure', 2, { u: 'uIfnGamma' }),
       p('warp', 'Tearing', 0, 5, 0.01, 2.4, 'Structure', 2, { u: 'uIfnWarp' }),
+      /* The four below are neutral at 0 and the hero sky leaves them there; swirl
+         and grain are build-gated off, so its graph stays byte-identical. */
+      p('swirl', 'Swirl', 0, 4, 0.01, 0, 'Structure', 2, { u: 'uIfnSwirl', unit: 'rad', structural: true }),
+      p('feather', 'Feathering', 0, 1, 0.01, 0, 'Structure', 2, { u: 'uIfnFeather' }),
+      p('soft', 'Edge softness', 0, 1, 0.01, 0, 'Structure', 2, { u: 'uIfnSoft' }),
+      p('grain', 'Graininess', 0, 1, 0.005, 0, 'Structure', 3, { u: 'uIfnGrain', structural: true }),
       p('morphRate', 'Morph rate', 0, 1, 0.01, 0.08, 'Evolution', 2, { u: 'uIfnMorph' }),
     ],
   },
@@ -631,6 +637,15 @@ export const ENTITY_TYPES = [
       p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.5, 'Beams', 1, aspectX('uBeamCenter')),
       p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.52, 'Beams', 1, plainY('uBeamCenter')),
       p('axis', 'Polar axis', -3.1416, 3.1416, 0.01, 0.55, 'Beams', 1, { u: 'uBeamAxis', unit: 'rad' }),
+      /* One angle drives both projection factors: 0 is edge-on, PI/2 face-on */
+      p('incl', 'Disk inclination', 0, 1.5708, 0.005, 0.4, 'Beams', 1, {
+        unit: 'rad',
+        set: (U, v) => {
+          const a = Math.min(Math.max(v, 0), Math.PI / 2);
+          U.uBeamSinI.value = Math.sin(a);
+          U.uBeamCosI.value = Math.cos(a);
+        },
+      }),
       p('len', 'Beam length', 0.05, 2, 0.01, 0.6, 'Beams', 1, { u: 'uBeamLen' }),
       p('half', 'Cone half-angle', 0.02, 1.45, 0.005, 0.3, 'Beams', 1, { u: 'uBeamHalf', unit: 'rad' }),
       p('throat', 'Throat radius', 0.001, 0.5, 0.001, 0.05, 'Beams', 2, { u: 'uBeamThroat' }),
@@ -659,7 +674,10 @@ export const ENTITY_TYPES = [
       p('raySoft', 'Ray softness', 0.001, 1, 0.001, 0.14, 'Rays', 3, { u: 'uBeamRaySoft' }),
       p('arcs', 'Mass-loss arcs', 0, 1, 1, 1, 'Arcs', 2, { kind: 'bool', structural: true }),
       p('arcAmp', 'Arc amplitude', 0, 0.5, 0.001, 0.2, 'Arcs', 2, { u: 'uBeamArcAmp' }),
+      /* 0 keeps the arcs spherical shells, 1 lays them flat in the tilted disk */
+      p('arcTilt', 'Arc ellipticity', 0, 1, 0.01, 0.85, 'Arcs', 2, { u: 'uBeamArcTilt' }),
       p('arcR', 'Arc decay radius', 0.01, 1.5, 0.01, 0.12, 'Arcs', 2, { u: 'uBeamArcR' }),
+      /* Same 0.0008 dead band as the axis spin: both ride the seamless fold */
       p('arcDrift', 'Arc drift', 0, 0.05, 0.0005, 0.009, 'Arcs', 2, { u: 'uBeamArcDrift' }),
       p('arcFreq', 'Arc frequency', 1, 120, 0.5, 78.0, 'Arcs', 3, { u: 'uBeamArcFreq' }),
       p('arcSharp', 'Arc sharpness', 0, 8, 0.05, 3.0, 'Arcs', 3, { u: 'uBeamArcSharp' }),
@@ -862,6 +880,13 @@ export const ENTITY_TYPES = [
       p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.46, 'Shell', 1, aspectX('uWrbCenter')),
       p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.52, 'Shell', 1, plainY('uWrbCenter')),
       p('radius', 'Radius', 0.01, 1.5, 0.005, 0.28, 'Shell', 1, { u: 'uWrbRadius' }),
+      /* The cauliflower outline: a radius that varies with direction. Past ~0.5
+         the lobes pinch off into separate bubbles, which is a look, not a bug. */
+      p('lump', 'Lumpiness', 0, 1, 0.01, 0.22, 'Shell', 1, { u: 'uWrbLump' }),
+      p('lumpFreq', 'Lump count', 0.2, 8, 0.05, 1.4, 'Shell', 2, { u: 'uWrbLumpFreq' }),
+      /* Thins the interior against a limb that is normalized to 1, so the shell
+         reads as a transparent bubble rather than a filled disk. */
+      p('limbK', 'Interior clarity', 1, 5, 0.01, 2.6, 'Shell', 1, { u: 'uWrbLimbK' }),
       p('ratio', 'OIII shell ratio', 0.15, 0.95, 0.01, 0.9, 'Shell', 2, { u: 'uWrbRatio' }),
       /* Below ~0.05 the chord's sqrt cusp narrows to a crawling one-pixel ring */
       p('thick', 'Hα thickness', 0.02, 0.9, 0.005, 0.2, 'Shell', 2, { u: 'uWrbThick' }),
@@ -1068,11 +1093,11 @@ export const ENTITY_TYPES = [
     depth: 0.13,
     depthParam: { u: 'uDepthGx', max: 0.95 },
     addable: true,
-    mute: { gain: 0, fieldLum: 0, hii: 0 },
+    mute: { gain: 0, fieldLum: 0, hii: 0, flowerGain: 0 },
     groups: [
       'Tiers', 'Deep Field', 'Clustering', 'Redshift', 'Showpiece', 'Spiral Arms',
-      'Bulge', 'Dust Lane', 'HII Knots', 'Shells', 'Ring', 'Spokes', 'Polar Ring',
-      'Evolution', 'Depth',
+      'Bar', 'Granulation', 'Bulge', 'Dust Lane', 'HII Knots', 'Shells', 'Ring',
+      'Spokes', 'Polar Ring', 'Evolution', 'Depth',
     ],
     params: [
       p('field', 'Deep-field tier', 0, 1, 1, 1, 'Tiers', 1, { kind: 'bool', structural: true }),
@@ -1161,7 +1186,7 @@ export const ENTITY_TYPES = [
       p('look.ring', 'Detached ring', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
       p('look.spokes', 'Cartwheel spokes', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
       p('look.polar', 'Second ring plane', 0, 1, 1, 0, 'Showpiece', 3, { kind: 'bool', structural: true, refresh: true }),
-      p('gain', 'Gain', 0, 2, 0.01, 0.14, 'Showpiece', 1, { u: 'uGxGain' }),
+      p('gain', 'Gain', 0, 2, 0.01, 0.17, 'Showpiece', 1, { u: 'uGxGain' }),
       p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.72, 'Showpiece', 1, aspectX('uGxCenter')),
       p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.34, 'Showpiece', 1, plainY('uGxCenter')),
       p('size', 'Radius', 0.01, 1, 0.005, 0.16, 'Showpiece', 1, { u: 'uGxSize' }),
@@ -1172,11 +1197,24 @@ export const ENTITY_TYPES = [
       p('armAmt', 'Arm contrast', 0, 1, 0.01, 0.85, 'Spiral Arms', 1, { u: 'uGxArmAmt' }),
       p('wind', 'Winding', 0.2, 12, 0.01, 3.0, 'Spiral Arms', 1, { u: 'uGxWind' }),
       p('armSharp', 'Arm sharpness', 0, 8, 0.01, 1.6, 'Spiral Arms', 2, { u: 'uGxArmSharp' }),
-      p('armBlend', 'Two-to-three arms', 0, 1, 0.01, 0, 'Spiral Arms', 2, { u: 'uGxArmBlend' }),
+      p('armCount', 'Arm count', 1, 6, 0.05, 2, 'Spiral Arms', 2, { u: 'uGxArmCount' }),
+      p('armAsym', 'Lopsidedness', 0, 1, 0.01, 0, 'Spiral Arms', 2, { u: 'uGxArmAsym' }),
       p('diskFall', 'Disk falloff', 0.2, 10, 0.01, 3.2, 'Spiral Arms', 2, { u: 'uGxDiskFall' }),
       p('motAmt', 'Flocculence', 0, 1, 0.01, 0.45, 'Spiral Arms', 2, { u: 'uGxMotAmt' }),
       p('motFreq', 'Mottle frequency', 0.2, 12, 0.01, 3.2, 'Spiral Arms', 3, { u: 'uGxMotFreq' }),
       p('phase', 'Arm phase', -3.1416, 3.1416, 0.01, 0, 'Spiral Arms', 3, { u: 'uGxPhase', unit: 'rad' }),
+      /* Zero drops the whole bar chain, so it rebuilds */
+      p('barAmt', 'Bar strength', 0, 3, 0.01, 0, 'Bar', 2, { structural: true }),
+      /* The bar IS the arm pattern held at this radius, so its length also sets
+         where the arms appear to root; it is not a free cosmetic dial. */
+      p('barLen', 'Bar length', 0.05, 1.5, 0.005, 0.45, 'Bar', 2, { u: 'uGxBarLen' }),
+      p('barSharp', 'Bar sharpness', 0, 12, 0.1, 3.0, 'Bar', 3, { u: 'uGxBarSharp' }),
+      p('granBright', 'Star clouds', 0, 2, 0.01, 0.55, 'Granulation', 2, { u: 'uGxGranBright' }),
+      /* Past ~0.6 the summed coverage floor pins at its cap and the arms stop
+         carving; the cells also degenerate to salt-and-pepper past ~400 on 1080p. */
+      p('granDark', 'Dust mottling', 0, 0.6, 0.01, 0.2, 'Granulation', 2, { u: 'uGxGranDark' }),
+      p('granFreq', 'Grain frequency', 20, 400, 1, 200, 'Granulation', 2, { u: 'uGxGranFreq' }),
+      p('granTh', 'Grain threshold', 0.05, 0.95, 0.01, 0.7, 'Granulation', 3, { u: 'uGxGranTh' }),
       p('bulgeAmt', 'Bulge weight', 0, 6, 0.01, 1.6, 'Bulge', 1, { u: 'uGxBulgeAmt' }),
       p('bulgeR', 'Bulge radius', 0.005, 1, 0.005, 0.16, 'Bulge', 1, { u: 'uGxBulgeR' }),
       p('bulgeBeta', 'Moffat beta', 0.5, 6, 0.01, 1.5, 'Bulge', 2, { u: 'uGxBulgeBeta' }),
@@ -1198,6 +1236,14 @@ export const ENTITY_TYPES = [
       p('hiiFreq', 'Knot frequency', 1, 60, 0.5, 24.0, 'HII Knots', 2, { u: 'uGxHiiFreq' }),
       p('hiiOiii', 'Knot OIII', 0, 2, 0.01, 0.25, 'HII Knots', 3, { u: 'uGxHiiOiii' }),
       p('hiiSii', 'Knot SII', 0, 2, 0.01, 0.08, 'HII Knots', 3, { u: 'uGxHiiSii' }),
+      p('flowerGain', 'Complex gain', 0, 3, 0.01, 0.9, 'HII Knots', 2, { u: 'uGxFlowerGain' }),
+      p('flowerTh', 'Complex threshold', 0, 1, 0.01, 0.78, 'HII Knots', 2, { u: 'uGxFlowerTh' }),
+      p('flowerSoft', 'Complex skirt', 0.005, 0.5, 0.005, 0.12, 'HII Knots', 3, { u: 'uGxFlowerSoft' }),
+      p('flowerLo', 'Inner cutoff', 0, 2, 0.01, 0.25, 'HII Knots', 3, pairLo('uGxFlowerLo', 'uGxFlowerHi', 'flowerHi')),
+      p('flowerHi', 'Outer cutoff', 0, 3, 0.01, 0.7, 'HII Knots', 3, pairHi('uGxFlowerHi', 'flowerLo')),
+      p('flowerTint.0', 'Complex Hα', 0, 2, 0.01, 1.0, 'HII Knots', 3, { u: 'uGxFlowerTint', comp: 'x' }),
+      p('flowerTint.1', 'Complex OIII', 0, 2, 0.01, 0.24, 'HII Knots', 3, { u: 'uGxFlowerTint', comp: 'y' }),
+      p('flowerTint.2', 'Complex SII', 0, 2, 0.01, 0.1, 'HII Knots', 3, { u: 'uGxFlowerTint', comp: 'z' }),
       p('shellAmt', 'Shell amount', 0, 2, 0.01, 0.5, 'Shells', 1, { u: 'uGxShellAmt' }),
       p('shellFreq', 'Shell count', 1, 40, 0.1, 9.0, 'Shells', 1, { u: 'uGxShellFreq' }),
       p('shellSharp', 'Shell sharpness', 0, 40, 0.1, 10.0, 'Shells', 2, { u: 'uGxShellSharp' }),
@@ -1246,56 +1292,169 @@ export const ENTITY_TYPES = [
   },
 
   {
-    type: 'voorwerp',
-    label: 'Ionization echo cloud',
+    type: 'ionCloud',
+    label: 'Ionization Cloud',
     salt: 131,
     rank: 13,
     depth: 0.5,
-    depthParam: { u: 'uDepthVwp', max: 0.95 },
+    depthParam: { u: 'uDepthIon', max: 0.95 },
     addable: true,
     mute: { gain: 0 },
-    groups: ['Cloud', 'Hole', 'Ionization Cone', 'Echo Delay', 'Lacework', 'Species', 'Evolution', 'Depth'],
+    groups: ['Cloud', 'Hole', 'Ionization Cone', 'Lacework', 'Species', 'Evolution', 'Depth'],
     params: [
-      p('gain', 'Gain', 0, 3, 0.01, 1.35, 'Cloud', 1, { u: 'uVwpGain' }),
-      p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.5, 'Cloud', 1, aspectX('uVwpCenter')),
-      p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.36, 'Cloud', 1, plainY('uVwpCenter')),
-      p('size', 'Cloud radius', 0.01, 1, 0.005, 0.18, 'Cloud', 1, { u: 'uVwpSize' }),
-      p('squash', 'Ellipticity', 0.05, 3, 0.01, 0.8, 'Cloud', 2, { u: 'uVwpSquash' }),
-      p('rot', 'Rotation', -3.1416, 3.1416, 0.01, -0.35, 'Cloud', 2, { u: 'uVwpRot', unit: 'rad' }),
+      p('gain', 'Gain', 0, 3, 0.01, 1.35, 'Cloud', 1, { u: 'uIonGain' }),
+      p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.5, 'Cloud', 1, aspectX('uIonCenter')),
+      p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.58, 'Cloud', 1, plainY('uIonCenter')),
+      p('size', 'Cloud radius', 0.01, 1, 0.005, 0.18, 'Cloud', 1, { u: 'uIonSize' }),
+      p('squash', 'Ellipticity', 0.05, 3, 0.01, 0.8, 'Cloud', 2, { u: 'uIonSquash' }),
+      p('rot', 'Rotation', -3.1416, 3.1416, 0.01, -0.35, 'Cloud', 2, { u: 'uIonRot', unit: 'rad' }),
       /* Both are in cloud radii, so resizing never re-tunes the silhouette */
-      p('ragged', 'Edge raggedness', 0, 1.5, 0.01, 0.34, 'Cloud', 2, { u: 'uVwpRagged' }),
-      p('ragFreq', 'Raggedness freq', 0.2, 8, 0.05, 1.9, 'Cloud', 3, { u: 'uVwpRagFreq' }),
-      p('feather', 'Edge feather', 0.005, 1, 0.005, 0.16, 'Cloud', 3, { u: 'uVwpFeather' }),
-      p('holeR', 'Hole radius', 0, 1, 0.005, 0.3, 'Hole', 1, { u: 'uVwpHoleR' }),
+      p('ragged', 'Edge raggedness', 0, 1.5, 0.01, 0.34, 'Cloud', 2, { u: 'uIonRagged' }),
+      p('ragFreq', 'Raggedness freq', 0.2, 8, 0.05, 1.9, 'Cloud', 3, { u: 'uIonRagFreq' }),
+      p('feather', 'Edge feather', 0.005, 1, 0.005, 0.16, 'Cloud', 3, { u: 'uIonFeather' }),
+      p('holeR', 'Hole radius', 0, 1, 0.005, 0.3, 'Hole', 1, { u: 'uIonHoleR' }),
       /* Offsets, not framed positions, so the aspect scale must not reach these */
-      p('holeAt.0', 'Hole offset X', -1.5, 1.5, 0.01, -0.14, 'Hole', 2, { u: 'uVwpHoleAt', comp: 'x' }),
-      p('holeAt.1', 'Hole offset Y', -1.5, 1.5, 0.01, -0.3, 'Hole', 2, { u: 'uVwpHoleAt', comp: 'y' }),
-      p('holeSoft', 'Hole edge', 0.0001, 0.1, 0.0001, 0.006, 'Hole', 3, { u: 'uVwpHoleSoft' }),
-      p('src.0', 'Nucleus X', -0.5, 2.5, 0.01, 0.62, 'Ionization Cone', 1, aspectX('uVwpSrc')),
-      p('src.1', 'Nucleus Y', -0.5, 1.5, 0.01, 0.76, 'Ionization Cone', 1, plainY('uVwpSrc')),
-      p('cone', 'Cone bearing', -3.1416, 3.1416, 0.01, -2.0, 'Ionization Cone', 1, { u: 'uVwpCone', unit: 'rad' }),
-      p('half', 'Cone half-angle', 0.02, 1.5, 0.005, 0.3, 'Ionization Cone', 1, { u: 'uVwpHalf', unit: 'rad' }),
-      p('litR', 'Flux radius', 0.01, 2, 0.01, 0.34, 'Ionization Cone', 2, { u: 'uVwpLitR' }),
+      p('holeAt.0', 'Hole offset X', -1.5, 1.5, 0.01, -0.14, 'Hole', 2, { u: 'uIonHoleAt', comp: 'x' }),
+      p('holeAt.1', 'Hole offset Y', -1.5, 1.5, 0.01, -0.3, 'Hole', 2, { u: 'uIonHoleAt', comp: 'y' }),
+      p('holeSoft', 'Hole edge', 0.0001, 0.1, 0.0001, 0.006, 'Hole', 3, { u: 'uIonHoleSoft' }),
+      /* Where the cone is thrown from, which need not be any illuminator in the
+         scene: an echo cone arrives from where the source was, not where it is. */
+      p('apex.0', 'Apex X', -0.5, 2.5, 0.01, 0.62, 'Ionization Cone', 1, aspectX('uIonApex')),
+      p('apex.1', 'Apex Y', -0.5, 1.5, 0.01, 0.18, 'Ionization Cone', 1, plainY('uIonApex')),
+      p('cone', 'Cone bearing', -3.1416, 3.1416, 0.01, 2.04, 'Ionization Cone', 1, { u: 'uIonCone', unit: 'rad' }),
+      p('half', 'Cone half-angle', 0.02, 1.5, 0.005, 0.3, 'Ionization Cone', 1, { u: 'uIonHalf', unit: 'rad' }),
+      p('litR', 'Flux radius', 0.01, 2, 0.01, 0.34, 'Ionization Cone', 2, { u: 'uIonLitR' }),
       /* This uniform IS the cone's sharpness; a large value erases the read */
-      p('coneSoft', 'Cone edge', 0.001, 0.3, 0.001, 0.045, 'Ionization Cone', 3, { u: 'uVwpConeSoft', unit: 'rad' }),
-      p('fall', 'Flux falloff', 0, 5, 0.01, 1.3, 'Ionization Cone', 3, { u: 'uVwpFall' }),
-      /* The apex trails the nucleus by the light-travel time, which is the
-         physically correct wrongness: the quasar moved before the light landed. */
-      p('lag', 'Echo delay', 0, 1, 0.005, 0.05, 'Echo Delay', 2, { u: 'uVwpLag' }),
-      p('lagBear', 'Delay bearing', -3.1416, 3.1416, 0.01, 1.1, 'Echo Delay', 2, { u: 'uVwpLagBear', unit: 'rad' }),
-      p('threshold', 'Threshold', 0, 1, 0.01, 0.55, 'Lacework', 2, { u: 'uVwpTh' }),
-      p('freq', 'Lace frequency', 0.5, 40, 0.1, 13.0, 'Lacework', 2, { u: 'uVwpFreq' }),
-      p('clump', 'Knot break-up', 0, 1, 0.01, 0.5, 'Lacework', 2, { u: 'uVwpClump' }),
-      p('shade', 'Patch shading', 0, 1, 0.01, 0.7, 'Lacework', 2, { u: 'uVwpShade' }),
-      p('glow', 'Inter-knot glow', 0, 1, 0.005, 0.05, 'Lacework', 2, { u: 'uVwpGlow' }),
+      p('coneSoft', 'Cone edge', 0.001, 0.3, 0.001, 0.045, 'Ionization Cone', 3, { u: 'uIonConeSoft', unit: 'rad' }),
+      p('fall', 'Flux falloff', 0, 5, 0.01, 1.3, 'Ionization Cone', 3, { u: 'uIonFall' }),
+      p('threshold', 'Threshold', 0, 1, 0.01, 0.55, 'Lacework', 2, { u: 'uIonTh' }),
+      p('freq', 'Lace frequency', 0.5, 40, 0.1, 13.0, 'Lacework', 2, { u: 'uIonFreq' }),
+      p('clump', 'Knot break-up', 0, 1, 0.01, 0.5, 'Lacework', 2, { u: 'uIonClump' }),
+      p('shade', 'Patch shading', 0, 1, 0.01, 0.7, 'Lacework', 2, { u: 'uIonShade' }),
+      p('glow', 'Inter-knot glow', 0, 1, 0.005, 0.05, 'Lacework', 2, { u: 'uIonGlow' }),
       p('blob', 'Lyman-alpha blob', 0, 1, 1, 0, 'Lacework', 2, { kind: 'bool', structural: true }),
-      p('sharp', 'Ridge sharpness', 0, 8, 0.01, 2.2, 'Lacework', 3, { u: 'uVwpSharp' }),
-      p('softness', 'Edge softness', 0.001, 1, 0.001, 0.36, 'Lacework', 3, { u: 'uVwpSoft' }),
-      p('clumpFreq', 'Break-up freq', 0.2, 12, 0.05, 3.0, 'Lacework', 3, { u: 'uVwpClumpFreq' }),
-      p('oiii', 'OIII strength', 0, 2, 0.01, 1.0, 'Species', 1, { u: 'uVwpOiii' }),
-      p('ha', 'Knot Hα', 0, 2, 0.01, 0.16, 'Species', 2, { u: 'uVwpHa' }),
-      p('sii', 'SII strength', 0, 2, 0.01, 0.0, 'Species', 3, { u: 'uVwpSii' }),
-      p('morphRate', 'Morph rate', 0, 1, 0.01, 0.03, 'Evolution', 2, { u: 'uVwpMorph' }),
+      p('sharp', 'Ridge sharpness', 0, 8, 0.01, 2.2, 'Lacework', 3, { u: 'uIonSharp' }),
+      p('softness', 'Edge softness', 0.001, 1, 0.001, 0.36, 'Lacework', 3, { u: 'uIonSoft' }),
+      p('clumpFreq', 'Break-up freq', 0.2, 12, 0.05, 3.0, 'Lacework', 3, { u: 'uIonClumpFreq' }),
+      p('oiii', 'OIII strength', 0, 2, 0.01, 1.0, 'Species', 1, { u: 'uIonOiii' }),
+      p('ha', 'Knot Hα', 0, 2, 0.01, 0.16, 'Species', 2, { u: 'uIonHa' }),
+      p('sii', 'SII strength', 0, 2, 0.01, 0.0, 'Species', 3, { u: 'uIonSii' }),
+      p('morphRate', 'Morph rate', 0, 1, 0.01, 0.03, 'Evolution', 2, { u: 'uIonMorph' }),
+    ],
+  },
+
+  /* Half-step ranks: these two slot between types whose integers are already
+     taken, and normalizeOrder replaces every order with a dense index anyway. */
+  {
+    type: 'starcloud',
+    label: 'Milky Way band',
+    salt: 71,
+    rank: 0.5,
+    depth: 0.1,
+    /* The rift is extinction, so the same depth ceiling the other tau layers
+       take: past 0.6 it would sit in front of globules and break the rim exemption. */
+    /* Compose takes one exp over the summed tau, so the rift dims every layer
+       whatever depth it sits at; band amplitude is the lever, not this. */
+    depthParam: { u: 'uDepthSC', max: 0.58 },
+    /* One per scene in the engine, but addable rather than base: a fresh sky is
+       the hero's four layers, and forcing a band into it would change every scene. */
+    addable: true,
+    mute: { gain: 0, riftTau: 0 },
+    groups: ['Band', 'Mottling', 'Great Rift', 'Evolution', 'Depth'],
+    params: [
+      /* Deep-background gain: the band is a luminosity gradient under the compose
+         stretch, and overshooting clips it flat rather than making it brighter. */
+      p('gain', 'Band gain', 0, 0.4, 0.001, 0.02, 'Band', 1, { u: 'uSCGain' }),
+      p('width', 'Band width', 0.02, 1.5, 0.005, 0.25, 'Band', 1, { u: 'uSCWidth' }),
+      /* The band line itself is the stars entity's Band offset and Band tilt:
+         one galactic plane, one pair of dials. */
+      p('falloff', 'Edge falloff', 0.05, 6, 0.01, 1.6, 'Band', 2, { u: 'uSCFalloff' }),
+      p('wing', 'Outer wing', 0, 2, 0.01, 0.12, 'Band', 2, { u: 'uSCWing' }),
+      p('wingScale', 'Wing width', 1, 8, 0.05, 2.6, 'Band', 3, { u: 'uSCWingScale' }),
+      p('tint.0', 'Tint R', 0, 1.5, 0.01, 1.0, 'Band', 3, { u: 'uSCTint', comp: 'x' }),
+      p('tint.1', 'Tint G', 0, 1.5, 0.01, 0.93, 'Band', 3, { u: 'uSCTint', comp: 'y' }),
+      p('tint.2', 'Tint B', 0, 1.5, 0.01, 0.8, 'Band', 3, { u: 'uSCTint', comp: 'z' }),
+      /* All three gate whole fbm chains out of the graph at 0, so they rebuild
+         rather than poke; the rift's eight compose-pass octaves are the big one. */
+      p('patch', 'Star clouds', 0, 2, 0.01, 0.45, 'Mottling', 1, { u: 'uSCPatch', structural: true }),
+      p('grain', 'Graininess', 0, 2, 0.01, 0.55, 'Mottling', 1, { u: 'uSCGrain', structural: true }),
+      p('patchFreq', 'Cloud scale', 0.2, 20, 0.05, 3.4, 'Mottling', 2, { u: 'uSCPatchFreq' }),
+      p('patchTh', 'Cloud threshold', 0, 1, 0.01, 0.52, 'Mottling', 2, { u: 'uSCPatchTh' }),
+      p('grainFreq', 'Grain frequency', 1, 80, 0.5, 22.0, 'Mottling', 2, { u: 'uSCGrainFreq' }),
+      p('patchSoft', 'Cloud edge', 0.001, 1, 0.001, 0.3, 'Mottling', 3, { u: 'uSCPatchSoft' }),
+      p('riftTau', 'Optical depth', 0, 8, 0.01, 1.6, 'Great Rift', 1, { u: 'uRiftTau', structural: true }),
+      p('riftW', 'Rift width', 0.005, 0.8, 0.005, 0.12, 'Great Rift', 1, { u: 'uRiftW' }),
+      p('riftCenter', 'Rift offset', -0.5, 0.5, 0.005, 0.03, 'Great Rift', 1, { u: 'uRiftCenter' }),
+      p('riftTh', 'Threshold', 0, 1, 0.01, 0.36, 'Great Rift', 2, { u: 'uRiftTh' }),
+      p('riftSoft', 'Edge softness', 0.001, 0.6, 0.001, 0.16, 'Great Rift', 2, { u: 'uRiftSoft' }),
+      /* A straight lane reads as a drawn stripe however the interior is textured */
+      p('riftWander', 'Meander', 0, 0.6, 0.005, 0.12, 'Great Rift', 2, { u: 'uRiftWander' }),
+      p('riftFreq', 'Lane frequency', 0.2, 20, 0.05, 4.2, 'Great Rift', 2, { u: 'uRiftFreq' }),
+      p('riftWanderFreq', 'Meander scale', 0.1, 8, 0.05, 1.4, 'Great Rift', 3, { u: 'uRiftWanderFreq' }),
+      /* Below 1 the domain compresses along the band, which is the braiding */
+      p('riftAniso', 'Lane stretch', 0.02, 2, 0.01, 0.28, 'Great Rift', 3, { u: 'uRiftAniso' }),
+      p('morphRate', 'Band morph', 0, 1, 0.01, 0.04, 'Evolution', 2, { u: 'uSCMorph' }),
+      p('riftMorph', 'Rift morph', 0, 1, 0.01, 0.04, 'Evolution', 3, { u: 'uRiftMorph' }),
+    ],
+  },
+
+  {
+    type: 'clusters',
+    label: 'Star cluster',
+    salt: 61,
+    rank: 2.5,
+    depth: 0.2,
+    depthParam: { u: 'uDepthClu', max: 0.95 },
+    addable: true,
+    /* Members carry their own gain, so muting the fused glow alone would leave
+       the whole field of resolved points behind. */
+    mute: { lum: 0, memGain: 0 },
+    groups: ['Profile', 'Members', 'Depth'],
+    params: [
+      p('lum', 'Core glow', 0, 8, 0.01, 2.4, 'Profile', 1, { u: 'uCluLum' }),
+      p('center.0', 'Center X', -0.5, 2.5, 0.01, 0.72, 'Profile', 1, aspectX('uCluCenter')),
+      p('center.1', 'Center Y', -0.5, 1.5, 0.01, 0.62, 'Profile', 1, plainY('uCluCenter')),
+      p('core', 'Core radius', 0.002, 0.3, 0.001, 0.018, 'Profile', 1, { u: 'uCluCore' }),
+      p('tidal', 'Tidal radius', 0.01, 1, 0.005, 0.13, 'Profile', 1, { u: 'uCluTidal' }),
+      p('squash', 'Ellipticity', 0.05, 3, 0.01, 0.94, 'Profile', 2, { u: 'uCluSquash' }),
+      p('rot', 'Rotation', -3.1416, 3.1416, 0.01, 0.4, 'Profile', 2, { u: 'uCluRot', unit: 'rad' }),
+      /* King truncates to exactly zero at the tidal radius; this wing is what
+         keeps the cluster from ending on a visible circle. */
+      p('halo', 'Outer halo', 0, 2, 0.01, 0.1, 'Profile', 2, { u: 'uCluHalo' }),
+      p('haloR', 'Halo radius', 0.005, 1, 0.005, 0.075, 'Profile', 3, { u: 'uCluHaloR' }),
+      p('tint.0', 'Glow R', 0, 1.5, 0.01, 1.0, 'Profile', 3, { u: 'uCluTint', comp: 'x' }),
+      p('tint.1', 'Glow G', 0, 1.5, 0.01, 0.86, 'Profile', 3, { u: 'uCluTint', comp: 'y' }),
+      p('tint.2', 'Glow B', 0, 1.5, 0.01, 0.62, 'Profile', 3, { u: 'uCluTint', comp: 'z' }),
+      p('memGain', 'Member gain', 0, 6, 0.01, 1.8, 'Members', 1, { u: 'uCluMemGain' }),
+      /* pxPerUnit / (4 × sprite radius), where the shader clamps that radius up
+         to 0.7 px: below memSize 0.56 the floor, not memSize, sets the cap. */
+      p('cells', 'Member cells', 4, 400, 1, 190, 'Members', 1, {
+        set: (U, v, ctx) => {
+          U.uCluCells.value = Math.min(
+            v, U.uPxPerUnit.value / Math.max(5 * ctx.params.memSize, 2.8));
+        },
+      }),
+      p('rich', 'Richness', 0, 4, 0.01, 1.0, 'Members', 1, { u: 'uCluRich' }),
+      p('memSize', 'Member size', 0.05, 3, 0.01, 0.85, 'Members', 2, {
+        set: (U, v, ctx) => {
+          U.uCluMemSize.value = v;
+          U.uCluCells.value = Math.min(
+            ctx.params.cells, U.uPxPerUnit.value / Math.max(5 * v, 2.8));
+        },
+      }),
+      /* Inside this radius the crowding is total, so points would read as sprite
+         pileup on top of the fused core rather than as stars. */
+      p('resolve', 'Fusion radius', 0, 0.3, 0.001, 0.032, 'Members', 2, { u: 'uCluResolve' }),
+      p('memFall', 'Density falloff', 0.05, 3, 0.01, 0.55, 'Members', 2, { u: 'uCluMemFall' }),
+      p('memMix', 'Second population', 0, 1, 0.01, 0.14, 'Members', 2, { u: 'uCluMemMix' }),
+      p('clump', 'Clumping', 0, 1, 0.01, 0, 'Members', 2, { u: 'uCluClump', structural: true }),
+      p('clumpFreq', 'Clump scale', 1, 80, 0.5, 30.0, 'Members', 3, { u: 'uCluClumpFreq' }),
+      p('memTint.0', 'Member R', 0, 1.5, 0.01, 1.0, 'Members', 3, { u: 'uCluMemTint', comp: 'x' }),
+      p('memTint.1', 'Member G', 0, 1.5, 0.01, 0.88, 'Members', 3, { u: 'uCluMemTint', comp: 'y' }),
+      p('memTint.2', 'Member B', 0, 1.5, 0.01, 0.7, 'Members', 3, { u: 'uCluMemTint', comp: 'z' }),
+      p('memTint2.0', 'Second pop R', 0, 1.5, 0.01, 0.74, 'Members', 3, { u: 'uCluMemTint2', comp: 'x' }),
+      p('memTint2.1', 'Second pop G', 0, 1.5, 0.01, 0.82, 'Members', 3, { u: 'uCluMemTint2', comp: 'y' }),
+      p('memTint2.2', 'Second pop B', 0, 1.5, 0.01, 1.0, 'Members', 3, { u: 'uCluMemTint2', comp: 'z' }),
     ],
   },
 ];
@@ -1353,3 +1512,34 @@ export function formatValue(param, value) {
   if (param.kind === 'bool') return value ? 'on' : 'off';
   return Number(value).toFixed(decimalsFor(param.step));
 }
+
+/* Which boolean gates a group's dials answer to, keyed entity type → group.
+   A value is one param key or a list that must all hold; a leading "!" inverts.
+   Every entry mirrors a real build gate in the shader, so a group listed here
+   genuinely renders nothing while its gate is off. "scene" holds SCENE_PARAMS.
+   The studio only enforces a gate whose own control the current tier exposes,
+   so a hidden row always has a visible checkbox that brings it back. */
+export const GROUP_GATES = {
+  scene: { Lensing: 'lens' },
+  searchlight: { Arcs: 'arcs', Rungs: 'rungs' },
+  wrbubble: { Horns: 'horns' },
+  planetary: { FLIERs: 'fliers' },
+  jets: { Beam: 'look.beam', 'Bow Shock': 'look.bow', Wake: 'look.wake' },
+  galaxies: {
+    'Deep Field': 'field',
+    Clustering: 'field',
+    Redshift: 'field',
+    Showpiece: 'showpiece',
+    Bulge: 'showpiece',
+    'HII Knots': 'showpiece',
+    /* showpieceGalaxy branches ring first, then shell, else spiral */
+    'Spiral Arms': ['showpiece', '!look.ring', '!look.shell'],
+    Bar: ['showpiece', '!look.ring', '!look.shell'],
+    Granulation: ['showpiece', '!look.ring', '!look.shell'],
+    'Dust Lane': ['showpiece', '!look.ring', '!look.shell'],
+    Shells: ['showpiece', '!look.ring', 'look.shell'],
+    Ring: ['showpiece', 'look.ring'],
+    Spokes: ['showpiece', 'look.ring', 'look.spokes'],
+    'Polar Ring': ['showpiece', 'look.ring', 'look.polar'],
+  },
+};
