@@ -341,11 +341,10 @@ const SCENES = {
           rimGain: 4.2, rimW: 0.012, rimHalo: 0, rimFacing: 0.7, rimEps: 0.01,
           rimDens: 0.8,
           rimKnot: 0.85, rimKnotFreq: 26, rimJit: 0.03, rimOiii: 0.3, rimSii: 0.2,
-          /* The photograph's own tau is near 1 because it is stretched, so 4 is
-             what makes the skull opaque; the low veil and small core boost are
-             what keep the mane and the bank transmitting through it. */
-          tau: 4.0, density: 1.0, core: 0.18, veil: 0.5, edgeFade: 0.06,
-          threshold: 0.12, softness: 0.2, erode: 0.22, freq: 7.0,
+          /* Just under the bake's own suggestion (3.71): the skull still reads
+             opaque, and the low veil is what lets the mane and bank transmit. */
+          tau: 3.1, density: 1.0, core: 0.18, veil: 0.42, edgeFade: 0.06,
+          threshold: 0.12, softness: 0.2, erode: 0.28, freq: 7.0,
         },
       },
     ]);
@@ -364,7 +363,7 @@ const SCENES = {
         /* Emission is always Hα-anchored, so the teal-and-gold Carina look only
            exists under SHO, where Hα lands in green and SII carries the gold. */
         params: {
-          gain: 1.05, covLo: 0.12, covHi: 0.42, contrast: 1.15,
+          gain: 0.9, covLo: 0.16, covHi: 0.52, contrast: 1.15,
           oiii: 0.75, sii: 0.3, mottle: 1.35, freq: 1.5,
           stria: 0.3, striaFreq: 12, striaAniso: 20,
           ionSrc: [0.5, -0.15], ionRadius: 1.3, hotLo: 0.35, hotHi: 0.85,
@@ -392,14 +391,17 @@ const SCENES = {
           /* The cluster sits off the top of the frame, which is what lights the
              crown of every spire and leaves the flanks in shadow. */
           ionSrc: [0.46, -0.22], ionRadius: 1.2,
-          rimGain: 1.6, rimW: 0.01, rimHalo: 0, rimFacing: 0.65, rimEps: 0.01,
-          rimDens: 0.75, rimKnot: 0.8, rimKnotFreq: 22, rimJit: 0.012,
+          rimGain: 1.2, rimW: 0.01, rimHalo: 0, rimFacing: 0.65, rimEps: 0.01,
+          rimDens: 0.75, rimKnot: 0.6, rimKnotFreq: 30, rimJit: 0.012,
           /* SII is the red row under SHO, so a SII-heavy rim is the gold one */
           rimOiii: 0.15, rimSii: 1.3,
-          /* Density and core well above the Horsehead's: the traced polygon is
-             all this asset gives, so opacity has to come from the envelope. */
-          tau: 3.2, density: 2.1, core: 0.75, veil: 0.4, edgeFade: 0.06,
-          threshold: 0.16, softness: 0.24, erode: 0.34, freq: 8.5, eroFreq: 20,
+          /* An emission-mode bake defaults to glow 0.9, which lights the column
+             across the whole frame; the crag is the dark one, so it stays off. */
+          glow: 0,
+          /* The v3 bake fills its own interior, so density and core came back
+             down: at 2.1 the column clipped frame-wide and ate the whole sky. */
+          tau: 1.9, density: 0.8, core: 0.6, veil: 0.5, edgeFade: 0.06,
+          threshold: 0.16, softness: 0.24, erode: 0.2, freq: 8.5, eroFreq: 30,
         },
       },
     ]);
@@ -442,12 +444,14 @@ const SCENES = {
              the G channel is carrying disappears under it. */
           core: 0.05,
           tau: 0.45, density: 1.0, veil: 0.65, edgeFade: 0.05,
-          threshold: 0.24, softness: 0.18, erode: 0.36, freq: 9.0, eroFreq: 22,
+          /* Fine over broad: the shell's filaments are the detail, and the
+             tighter cells also break up the traced crescent's vertex stair. */
+          threshold: 0.24, softness: 0.14, erode: 0.28, freq: 16.0, eroFreq: 26,
           /* Short falloff and a sub-unity glow: the crescent is a limb, so a
              long one fills it into a disc and clips the shell to white. */
           glow: 0.85, glowFall: 0.06, oiii: 1.5, sii: 0.1,
           ionSrc: [0.42, 0.35], ionRadius: 0.7,
-          rimGain: 0.55, rimW: 0.02, rimOiii: 0.9, rimKnotFreq: 18,
+          rimGain: 0.55, rimW: 0.02, rimOiii: 0.9, rimKnotFreq: 28,
         },
       },
     ]);
@@ -555,11 +559,13 @@ const SCENES = {
           scale: frameScale(aspect, center, 0.05, 2.0),
           rot: (r.next() - 0.5) * 0.06,
           ionSrc: [0.42, -0.25], ionRadius: 1.25,
-          rimGain: 3.6, rimW: 0.013, rimHalo: 0, rimFacing: 0.7, rimEps: 0.01,
+          rimGain: 2.4, rimW: 0.018, rimHalo: 0, rimFacing: 0.7, rimEps: 0.01,
           rimDens: 0.8, rimKnot: 0.85, rimKnotFreq: 24, rimJit: 0.03,
           rimOiii: 0.2, rimSii: 1.1,
-          tau: 3.4, density: 1.2, core: 0.22, veil: 0.55, edgeFade: 0.05,
-          threshold: 0.14, softness: 0.2, erode: 0.26, freq: 7.5, eroFreq: 18,
+          /* Well under the bake's 4.57: at the honest figure the columns go
+             flat black and the photo's brown-tan interior never shows. */
+          tau: 2.3, density: 1.1, core: 0.22, veil: 0.5, edgeFade: 0.05,
+          threshold: 0.14, softness: 0.2, erode: 0.24, freq: 9.5, eroFreq: 32,
         },
       },
     ]);
@@ -603,9 +609,11 @@ const SCENES = {
           scale: frameScale(aspect, center, 0.05, 1.95),
           rot: (r.next() - 0.5) * 0.06,
           core: 0.06,
-          tau: 0.55, glow: 0.38, glowFall: 0.09, oiii: 1.7, sii: 0.2,
-          density: 1.2, veil: 0.42, edgeFade: 0.05,
-          threshold: 0.24, softness: 0.2, erode: 0.4, freq: 8.0, eroFreq: 20,
+          /* Under the old 0.38 the tower crowns clipped to flat white, which is
+             what read as creamsicle rather than grey-blue dust. */
+          tau: 0.55, glow: 0.26, glowFall: 0.09, oiii: 1.4, sii: 0.2,
+          density: 1.2, veil: 0.55, edgeFade: 0.05,
+          threshold: 0.24, softness: 0.2, erode: 0.2, freq: 14.0, eroFreq: 26,
           ionSrc: [0.4, 0.08], ionRadius: 1.0,
           rimGain: 0.7, rimW: 0.02, rimOiii: 0.9, rimKnotFreq: 20,
         },
@@ -615,6 +623,130 @@ const SCENES = {
     scene.exposure = 0.85;
     scene.stretchK = 11;
     return scene;
+  },
+
+  /* M13 and the Jewel Box in one frame: a globular whose core fuses into a
+     single glow, and a loose blue-white open cluster that never fuses at all. */
+  clusters: (seed) => {
+    const r = jitter(seed, 47);
+    return base(seed, [
+      { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.35 } },
+      {
+        type: 'clusters',
+        seed: deriveSeed(seed, 65),
+        depth: 0.2,
+        lock: false,
+        /* Wider than the module default: at tidal 0.13 the ball reads as a smudge
+           rather than as the count of stars that is the whole point. */
+        params: {
+          center: [0.62 + r.next() * 0.16, 0.44 + r.next() * 0.16],
+          core: 0.026, tidal: 0.2, haloR: 0.11, halo: 0.16,
+          rot: r.next() * Math.PI, squash: 0.9 + r.next() * 0.12,
+          lum: 2.2, resolve: 0.03, memGain: 2.2, rich: 1.2,
+        },
+      },
+      {
+        /* The Jewel Box: no fused core, a handful of bright blue members, and
+           one warm supergiant carried by the second population. */
+        type: 'clusters',
+        seed: deriveSeed(seed, 66),
+        depth: 0.24,
+        lock: false,
+        params: {
+          center: [0.2 + r.next() * 0.14, 0.62 + r.next() * 0.14],
+          core: 0.075, tidal: 0.2, squash: 0.78, rot: (r.next() - 0.5) * 1.4,
+          /* Near-zero glow: an open cluster never fuses, so any core light at all
+             reads as a smudge where the reference has nothing but points. */
+          lum: 0.06, tint: [0.72, 0.8, 1.0], halo: 0.14, haloR: 0.13,
+          cells: 60, rich: 0.7, memGain: 4.0, memFall: 0.8, memSize: 1.35,
+          resolve: 0, memTint: [0.78, 0.85, 1.0], memTint2: [1.0, 0.72, 0.48],
+          memMix: 0.05, clump: 0.65, clumpFreq: 26.0,
+        },
+      },
+    ]);
+  },
+
+  /* The summer Milky Way: unresolved starlight as one broad continuum gradient,
+     split lengthwise by the Great Rift's extinction. */
+  starcloud: (seed) => {
+    const r = jitter(seed, 48);
+    const scene = base(seed, [
+      { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.3 } },
+      {
+        type: 'starcloud',
+        seed: deriveSeed(seed, 67),
+        depth: 0.1,
+        lock: false,
+        /* Well over the module default, which is tuned for the hero's deeper
+           stretch; at 0.02 this scene's 0.85/10 grading leaves it invisible. */
+        params: {
+          gain: 0.035, width: 0.2, wing: 0.12, patch: 0.7,
+          riftCenter: 0.02 + r.next() * 0.05, riftW: 0.11,
+          /* Under ~1.5 the lane keeps its carved interior; saturate it and every
+             braid inside collapses into one flat black ribbon. */
+          riftTau: 1.3, riftTh: 0.46, riftFreq: 6.5,
+          riftWander: 0.12 + r.next() * 0.08,
+        },
+      },
+    ]);
+    /* The band rides the star field's own galactic plane, so the demo tilts that
+       line rather than giving the layer a second, contradictory one. */
+    const stars = scene.entities.find((e) => e.type === 'stars');
+    if (stars) stars.params = { bandY: 0.52, bandTilt: -0.22, density: 0.85, count: 70 };
+    /* Thinned: at full amplitude the IFN fills the off-band sky the band is
+       supposed to be falling away into. */
+    const ifn = scene.entities.find((e) => e.type === 'ifn');
+    if (ifn) ifn.params = { amp: 0.3 };
+    return scene;
+  },
+
+  /* M51/NGC 1300/NGC 2841: the default showpiece spiral, with the arm count,
+     bar, lopsidedness, and star-cloud granulation all rolled off the seed */
+  spiralgal: (seed) => {
+    const r = jitter(seed, 45);
+    const arms = 2 + Math.floor(r.next() * 3);
+    /* A bar only reads on a fairly open spiral, so the two roll together */
+    const barred = r.next() < 0.5;
+    return base(seed, [
+      { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0 } },
+      {
+        type: 'galaxies',
+        seed: deriveSeed(seed, 45),
+        depth: 0.13,
+        lock: false,
+        params: {
+          look: { shell: false, ring: false, spokes: false, polar: false },
+          center: [0.42 + r.next() * 0.16, 0.4 + r.next() * 0.2],
+          size: 0.26,
+          cosI: 0.55 + r.next() * 0.4,
+          pa: r.next() * Math.PI,
+          gain: 0.9,
+          wind: barred ? 2.2 + r.next() * 0.8 : 3.2 + r.next() * 1.6,
+          armCount: arms + (r.next() < 0.4 ? r.next() * 0.6 : 0),
+          armAsym: r.next() * 0.35,
+          armAmt: 0.88,
+          armSharp: 1.9,
+          barAmt: barred ? 0.35 + r.next() * 0.35 : 0,
+          barLen: 0.3 + r.next() * 0.2,
+          bulgeAmt: 1.8,
+          bulgeR: 0.13,
+          diskFall: 2.8,
+          laneDepth: 0.3,
+          granBright: 0.6,
+          granDark: 0.22,
+          granFreq: 170 + r.next() * 90,
+          hii: 0.38,
+          flowerGain: 1.0,
+          cutIn: 1.2,
+          cutOut: 1.85,
+          fieldLum: 0.02,
+          fieldDensity: 0.07,
+        },
+      },
+    ]);
   },
 
   /* NGC 3923/NGC 474: an r^1/4 elliptical wearing nested merger shells that
@@ -850,35 +982,80 @@ const SCENES = {
     return scene;
   },
 
-  /* Hanny's Voorwerp: an isolated OIII cloud with a hole punched through it,
-     lit only where the nucleus above it aims its ionization cone */
+  /* Hanny's Voorwerp, composed from three entities: the showpiece spiral IC 2497,
+     the quasar burning at its nucleus, and the ionized tidal-tail cloud below,
+     lit only where the cone lands. One depth for all three, since they are one
+     system and must not parallax apart. */
   voorwerp: (seed, aspect = 1.7) => {
     const r = jitter(seed, 34);
-    /* Sky-unit y grows downward, so the nucleus sits above the cloud at a
-       negative offset. */
-    const center = [0.34 + r.next() * 0.3, 0.54 + r.next() * 0.12];
-    const src = [center[0] + (r.next() - 0.5) * 0.24, center[1] - 0.34 - r.next() * 0.12];
-    const lag = 0.05;
+    const DEPTH = 0.13;
+    /* Sky y grows downward, so the host sits above the cloud at the smaller y */
+    const nucleus = [0.46 + r.next() * 0.16, 0.22 + r.next() * 0.06];
+    const center = [0.34 + r.next() * 0.22, 0.66 + r.next() * 0.08];
+    /* The apex trails the nucleus by the light-travel delay: the quasar moved
+       while its light was in flight, so the cone misses its own source. */
     const lagBear = r.next() * Math.PI * 2;
-    /* Bearing is measured from the apex, not the nucleus, because that is what
-       the shader aims the cone from; and in sky units, since the host
-       aspect-scales every x before it reaches the uniform. */
-    const apex = [src[0] + Math.cos(lagBear) * lag, src[1] + Math.sin(lagBear) * lag];
+    const apex = [nucleus[0] + Math.cos(lagBear) * 0.03, nucleus[1] + Math.sin(lagBear) * 0.05];
+    /* Bearing is measured in sky units, since the host aspect-scales every x
+       before it reaches the uniform. */
     const cone = Math.atan2(center[1] - apex[1], (center[0] - apex[0]) * aspect);
+    const barred = r.next() < 0.35;
     return base(seed, [
       { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
-      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.25 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.18 } },
+      {
+        /* Every hue and arm key is written, because sky2d rolls a family and an
+           arm count for whatever the scene leaves unset. */
+        type: 'galaxies',
+        seed: deriveSeed(seed, 46),
+        depth: DEPTH,
+        lock: false,
+        params: {
+          look: { shell: false, ring: false, spokes: false, polar: false },
+          /* Copied, never aliased: the quasar shares this position, and a later
+             edit to one entity's center must not drag the other along. */
+          center: nucleus.slice(),
+          size: 0.16 + r.next() * 0.03,
+          cosI: 0.42 + r.next() * 0.2,
+          pa: r.next() * Math.PI,
+          gain: 1.0,
+          wind: barred ? 2.4 + r.next() * 0.6 : 3.4 + r.next() * 1.2,
+          armCount: 2 + Math.floor(r.next() * 2),
+          armAsym: 0.1 + r.next() * 0.25,
+          armAmt: 0.85,
+          armSharp: 1.9,
+          barAmt: barred ? 0.3 + r.next() * 0.3 : 0,
+          barLen: 0.3 + r.next() * 0.16,
+          bulgeAmt: 2.2,
+          bulgeR: 0.14,
+          diskFall: 2.6,
+          laneDepth: 0.34,
+          granBright: 0.55,
+          granDark: 0.22,
+          granFreq: 190 + r.next() * 70,
+          hii: 0.42,
+          flowerGain: 1.0,
+          cutIn: 1.2,
+          cutOut: 1.85,
+          /* The mauve-and-pink cast of the real IC 2497 exposure */
+          bulge: [1.0, 0.76, 0.6],
+          disk: [0.8, 0.7, 0.86],
+          flowerTint: [1.0, 0.18, 0.2],
+          fieldLum: 0.02,
+          fieldDensity: 0.07,
+        },
+      },
       {
         /* The quasar itself, so the scene shows its own cause: a compact
            illuminator at the nucleus, faint enough to stay a point. */
         type: 'reflection',
         seed: deriveSeed(seed, 6),
-        depth: 0.35,
+        depth: DEPTH,
         lock: false,
         params: {
-          star: src,
-          lum: 0.5,
-          radius: [0.035, 0.042, 0.055],
+          star: nucleus.slice(),
+          lum: 0.35,
+          radius: [0.024, 0.03, 0.04],
           warmAmt: 0.2,
           floor: 1,
           filAmp: 0,
@@ -886,20 +1063,22 @@ const SCENES = {
         },
       },
       {
-        type: 'voorwerp',
+        type: 'ionCloud',
         seed: deriveSeed(seed, 39),
-        depth: 0.5,
+        depth: DEPTH,
         lock: false,
         params: {
-          center,
-          src,
+          center: center.slice(),
+          apex: apex.slice(),
           cone,
-          lag,
-          lagBear,
           rot: (r.next() - 0.5) * 1.4,
-          size: 0.2 + r.next() * 0.08,
-          half: 0.24 + r.next() * 0.1,
+          size: 0.18 + r.next() * 0.05,
+          /* Narrow enough that the cone edge cuts the cloud instead of washing
+             over it: an unlit lobe is the whole point of the object. */
+          half: 0.2 + r.next() * 0.1,
           holeR: 0.24 + r.next() * 0.12,
+          litR: 0.4,
+          fall: 1.2,
         },
       },
     ]);
@@ -909,9 +1088,23 @@ const SCENES = {
 /* Everything at once, to prove the tau sum and the shared line RT co-exist */
 SCENES.all = (seed, aspect) => {
   const scene = SCENES.globules(seed);
+  /* The only scene that turns the IFN's character dials on; every other one,
+     the hero included, leaves them at their neutral zero. */
+  const ifn = scene.entities.find((e) => e.type === 'ifn');
+  if (ifn) ifn.params = { swirl: 1.8, feather: 0.45, soft: 0.3, grain: 0.3 };
+  /* Both continuum layers join at reduced amplitude: this is a co-existence
+     proof, not a composition, and a full band flattens everything under it. */
+  const band = SCENES.starcloud(seed).entities.find((e) => e.type === 'starcloud');
+  band.params = { ...band.params, gain: 0.02, riftTau: 1.0 };
+  const clu = SCENES.clusters(seed).entities.find((e) => e.type === 'clusters');
+  /* Member gain is not an amplitude the way lum is: under pow(h2.x, 6) a low one
+     resolves no members at all, which is the fused smudge this scene must avoid. */
+  clu.params = { ...clu.params, lum: 1.1, memGain: 1.1 };
   scene.entities.push(
     ...SCENES.reflection(seed).entities.filter((e) => e.type === 'reflection'),
     ...SCENES.filaments(seed, aspect).entities.filter((e) => e.type === 'filaments'),
+    band,
+    clu,
   );
   return scene;
 };
