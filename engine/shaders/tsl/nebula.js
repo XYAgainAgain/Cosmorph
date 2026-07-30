@@ -19,8 +19,8 @@ export function buildEmissionNodes(skyU, U) {
     const q2 = fbm3o4(p3.mul(1.7).add(vec3(5.2, 1.3, 2.8)));
     const M = fbm3o5(p3.mul(2.4).add(vec3(q1, q2, float(0)).mul(U.uWarp)));
 
-    const d = skyU.sub(U.uIonSrc);
-    const G = float(1).div(dot(d, d).div(U.uIonR2).add(1.0));
+    const d = skyU.sub(U.uNebIonSrc);
+    const G = float(1).div(dot(d, d).div(U.uNebIonR2).add(1.0));
 
     /* Bounded extent: low-frequency coverage carves real black sky, biased
        toward the ionizing source or the cavity lands in a coverage hole. */

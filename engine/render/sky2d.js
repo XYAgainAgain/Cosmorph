@@ -17,8 +17,13 @@ import { buildSearchlightNodes, SEARCHLIGHT_DEFAULTS } from '../shaders/tsl/sear
 import { buildPlanetaryNodes, PLANETARY_DEFAULTS } from '../shaders/tsl/planetary.js';
 import { buildJetNodes, JET_DEFAULTS } from '../shaders/tsl/jets.js';
 import { buildWrBubbleNodes, WRBUBBLE_DEFAULTS } from '../shaders/tsl/wrbubble.js';
-import { buildGalaxyNodes, GALAXY_DEFAULTS, devNormFor } from '../shaders/tsl/galaxies.js';
-import { buildVoorwerpNodes, VOORWERP_DEFAULTS } from '../shaders/tsl/voorwerp.js';
+import { buildClusterNodes, GLOBULAR_DEFAULTS } from '../shaders/tsl/clusters.js';
+import { buildStarcloudNodes, STARCLOUD_DEFAULTS } from '../shaders/tsl/starcloud.js';
+import {
+  buildGalaxyNodes, GALAXY_DEFAULTS, devNormFor, GX_FAMILIES, ARM_COUNT_TABLE,
+} from '../shaders/tsl/galaxies.js';
+import { ARM_MAX } from '../shaders/tsl/galaxy-showpiece.js';
+import { buildIonCloudNodes, ION_CLOUD_DEFAULTS } from '../shaders/tsl/ionization-cloud.js';
 import { SHAPE_DEFAULTS } from '../shaders/tsl/shape.js';
 import { loadShapeAsset } from '../entities/shape.js';
 import { LENS_DEFAULTS, LENS_MAX_HALOS } from '../shaders/tsl/lensing.js';
@@ -43,8 +48,11 @@ const DEFAULTS = {
     oiii: 0.9, sii: 0.12, hotHaCut: 0.45, morphRate: 0.35,
     covLo: 0.3, covHi: 0.48, covIon: 0.35, contrast: 1.2, gain: 0.42,
   },
+  /* swirl, feather, grain, and soft are neutral at 0 by construction: the hero
+     sky is signed off on this field and must render byte-identical without them. */
   ifn: {
     freq: 5.0, amp: 0.62, aniso: 2.0, rot: 0.7, gamma: 1.9, warp: 2.4,
+    swirl: 0, feather: 0, grain: 0, soft: 0,
     morphRate: 0.08,
   },
   stars: {
@@ -57,6 +65,9 @@ const DEFAULTS = {
     threshold: 0.62, softness: 0.22, fringe: 0.16, skirt: 0.3,
     tau: 3.6, morphRate: 0.18, occlude: false,
   },
+  /* The band rides the same galactic-plane line as the star gradient, so its
+     tilt and offset are the stars entity's uBandTilt/uBandY, not its own. */
+  starcloud: { ...STARCLOUD_DEFAULTS },
   globules: {
     freq: 2.0, radius: 0.3, fill: 0.62, core: 0.24, elong: 3.4, taper: 0.45,
     prof: 1.3, cluster: 0.55, clustFreq: 0.34, tailOp: 0.7,
@@ -80,8 +91,11 @@ const DEFAULTS = {
   planetary: { ...PLANETARY_DEFAULTS },
   jets: { ...JET_DEFAULTS },
   wrbubble: { ...WRBUBBLE_DEFAULTS },
+  /* Globular is the shipped default; the open cluster is the same code under
+     OPEN_CLUSTER_DEFAULTS, which scenes spread in themselves. */
+  clusters: { ...GLOBULAR_DEFAULTS },
   galaxies: { ...GALAXY_DEFAULTS },
-  voorwerp: { ...VOORWERP_DEFAULTS },
+  ionCloud: { ...ION_CLOUD_DEFAULTS },
   shape: { ...SHAPE_DEFAULTS },
 };
 
@@ -137,7 +151,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const featureEnts = {
     globules: [], reflection: [], filaments: [],
     echo: [], shadowFan: [], searchlight: [], planetary: [], jets: [], wrbubble: [],
-    galaxies: [], voorwerp: [], shape: [],
+    clusters: [], galaxies: [], ionCloud: [], shape: [],
   };
   for (const e of config.entities) {
     if (featureEnts[e.type]) {
@@ -228,8 +242,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uStriaFreq: uniform(striaFx),
     uStriaFreqY: uniform(striaFy),
     uStriaAngle: uniform(P.emission.striaAngle),
-    uIonSrc: uniform(new THREE.Vector2(0, 0)),
-    uIonR2: uniform(Math.max(P.emission.ionRadius ** 2, 1e-4)),
+    uNebIonSrc: uniform(new THREE.Vector2(0, 0)),
+    uNebIonR2: uniform(Math.max(P.emission.ionRadius ** 2, 1e-4)),
     uHotLo: uniform(P.emission.hotLo),
     uHotHi: uniform(Math.max(P.emission.hotHi, P.emission.hotLo + 0.001)),
     uFrontAt: uniform(P.emission.frontAt),
@@ -259,6 +273,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uIfnRot: uniform(P.ifn.rot),
     uIfnGamma: uniform(Math.max(P.ifn.gamma, 0.05)),
     uIfnWarp: uniform(Math.max(P.ifn.warp, 0)),
+    uIfnSwirl: uniform(Math.max(P.ifn.swirl, 0)),
+    uIfnFeather: uniform(Math.max(P.ifn.feather, 0)),
+    uIfnGrain: uniform(Math.max(P.ifn.grain, 0)),
+    uIfnSoft: uniform(clamp01(P.ifn.soft)),
     uIfnMorph: uniform(P.ifn.morphRate),
     uIfnOff: uniform(offsetFrom(byType.ifn?.seed ?? config.seed, 23)),
 
@@ -600,9 +618,15 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
 
   function searchlightBag(e, k) {
     const s = { ...DEFAULTS.searchlight, ...e.params };
+    const inclC = Math.min(Math.max(s.incl, 0), Math.PI / 2);
     const bag = makeBag(k, {
       uBeamCenter: uniform(new THREE.Vector2(0, 0)),
       uBeamAxis: uniform(s.axis),
+      /* Stored as the two projection factors rather than the angle: the shader
+         only ever divides by them, so the trig belongs on the host. */
+      uBeamSinI: uniform(Math.sin(inclC)),
+      uBeamCosI: uniform(Math.cos(inclC)),
+      uBeamArcTilt: uniform(clamp01(s.arcTilt)),
       /* The seamless fold multiplies the rate by 4096, so an unbounded one
          pushes the cos argument out of highp comfort */
       uBeamSpin: uniform(Math.min(Math.max(s.spin, 0), 0.05)),
@@ -784,6 +808,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uWrbRadius: uniform(w.radius),
       uWrbExpand: uniform(Math.max(w.expand, 0)),
       uWrbAxis: uniform(w.axis),
+      /* Past ~1 the lobes pinch off into separate bubbles; 2 would fold the shell. */
+      uWrbLump: uniform(Math.min(Math.max(w.lump, 0), 1)),
+      uWrbLumpFreq: uniform(Math.max(w.lumpFreq, 0)),
+      uWrbLimbK: uniform(Math.max(w.limbK, 1)),
       uWrbBow: uniform(Math.min(Math.max(w.bow, 0), 1.5)),
       uWrbWing: uniform(Math.min(Math.max(w.wing, 0), 0.8)),
       uWrbRatio: uniform(w.ratio),
@@ -831,6 +859,90 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     return bag;
   }
 
+  function clustersBag(e, k) {
+    const c = { ...DEFAULTS.clusters, ...e.params };
+    /* Member sprites peak at 1.25 × memSize device px, clamped up to 0.7, and the
+       loop searches 3×3 cells, so a cell holds ~4 sprite radii or wings truncate. */
+    const memSize = Math.max(c.memSize, 0.05);
+    const cells = Math.max(c.cells, 1e-3);
+    const bag = makeBag(k, {
+      uCluCenter: uniform(new THREE.Vector2(0, 0)),
+      uCluCore: uniform(c.core),
+      uCluTidal: uniform(c.tidal),
+      uCluSquash: uniform(c.squash),
+      uCluRot: uniform(c.rot),
+      /* Negative luminosities would subtract light from the shared continuum RT */
+      uCluLum: uniform(Math.max(c.lum, 0)),
+      uCluTint: uniform(new THREE.Vector3(...c.tint)),
+      uCluHalo: uniform(Math.max(c.halo, 0)),
+      uCluHaloR: uniform(c.haloR),
+      uCluCells: uniform(cells),
+      uCluRich: uniform(Math.max(c.rich, 0)),
+      uCluMemGain: uniform(Math.max(c.memGain, 0)),
+      uCluMemFall: uniform(c.memFall),
+      uCluMemSize: uniform(memSize),
+      uCluResolve: uniform(Math.max(c.resolve, 0)),
+      uCluMemTint: uniform(new THREE.Vector3(...c.memTint)),
+      uCluMemTint2: uniform(new THREE.Vector3(...c.memTint2)),
+      uCluMemMix: uniform(clamp01(c.memMix)),
+      /* Outside [0,1] the clump mix extrapolates past the density rescale */
+      uCluClump: uniform(clamp01(c.clump)),
+      uCluClumpFreq: uniform(c.clumpFreq),
+      uCluOff: uniform(offsetFrom(instanceSeed(e, 61, k), 61)),
+      uDepthClu: uniform(e.depth ?? 0.2),
+    }, (b, aspect) => {
+      b.uCluCenter.value.set(c.center[0] * aspect, c.center[1]);
+      /* pxPerUnit is only known once the canvas has a size, so the cell cap
+         re-seats on every resize rather than at build time. */
+      b.uCluCells.value = Math.min(cells, U.uPxPerUnit.value / Math.max(5 * memSize, 2.8));
+    });
+    bag.cluOpts = { clumped: c.clump > 0 };
+    return bag;
+  }
+
+  /* One per scene: the band is the galactic plane. It still gates like a feature
+     type, so a scene without it compiles with no uSC uniforms and no rift tau. */
+  function starcloudBag(e) {
+    const s = { ...DEFAULTS.starcloud, ...e.params };
+    const seed = e.seed ?? config.seed;
+    const bag = makeBag(0, {
+      uSCWidth: uniform(s.width),
+      uSCFalloff: uniform(s.falloff),
+      uSCWing: uniform(s.wing),
+      uSCWingScale: uniform(s.wingScale),
+      uSCGain: uniform(Math.max(s.gain, 0)),
+      uSCTint: uniform(new THREE.Vector3(...s.tint)),
+      uSCGrainFreq: uniform(s.grainFreq),
+      uSCGrain: uniform(Math.max(s.grain, 0)),
+      uSCPatchFreq: uniform(s.patchFreq),
+      uSCPatchTh: uniform(s.patchTh),
+      uSCPatchSoft: uniform(s.patchSoft),
+      uSCPatch: uniform(Math.max(s.patch, 0)),
+      uSCMorph: uniform(s.morphRate),
+      uSCOff: uniform(offsetFrom(seed, 71)),
+      uRiftCenter: uniform(s.riftCenter),
+      uRiftW: uniform(s.riftW),
+      uRiftWander: uniform(s.riftWander),
+      uRiftWanderFreq: uniform(s.riftWanderFreq),
+      uRiftFreq: uniform(s.riftFreq),
+      uRiftAniso: uniform(s.riftAniso),
+      uRiftTh: uniform(s.riftTh),
+      uRiftSoft: uniform(s.riftSoft),
+      /* A negative tau would amplify light through the exp instead of dimming it */
+      uRiftTau: uniform(Math.max(s.riftTau, 0)),
+      uRiftMorph: uniform(s.riftMorph),
+      uRiftOff: uniform(offsetFrom(seed, 79)),
+      /* The glow and the rift MUST read this same depth: two would parallax the
+         lane off the band it is cutting. */
+      uDepthSC: uniform(e.depth ?? 0.1),
+    });
+    /* The rift gate reaches compose, not this pass: its eight octaves are the
+       most expensive thing in the layer and a rift-less band must not pay them. */
+    bag.scOpts = { grain: s.grain > 0, patch: s.patch > 0, rift: s.riftTau > 0 };
+    warnTauDepth('starcloud', e.depth ?? 0.1);
+    return bag;
+  }
+
   /* Every uniform is created whether or not its tier is in the build: the
      studio's `set` callbacks poke slots directly and would throw on a gap. */
   function galaxiesBag(e, k) {
@@ -838,6 +950,29 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     /* Nine flat stops, not three triples, so the studio can address them as
        ramp.0–8; a short array would NaN the whole continuum target. */
     const ramp = Array.isArray(g.ramp) && g.ramp.length === 9 ? g.ramp : GALAXY_DEFAULTS.ramp;
+
+    /* Per-instance character, but only for keys the scene left alone. Firmament
+       writes every param explicitly, so the studio never sees these rolls. */
+    const set = e.params ?? {};
+    const look = { ...GALAXY_DEFAULTS.look, ...g.look };
+    const roll = createRng(deriveSeed(instanceSeed(e, 120, k), 122));
+    const family = GX_FAMILIES[Math.floor(roll.next() * GX_FAMILIES.length) % GX_FAMILIES.length];
+    /* The table is a disk-galaxy palette. A shell elliptical and a ring galaxy
+       color off uGxShellTint and uGxRing, so a family would only fight them. */
+    const hued = !look.shell && !look.ring;
+    const bulge = set.bulge ?? (hued ? family.bulge : g.bulge);
+    const disk = set.disk ?? (hued ? family.disk : g.disk);
+    const flowerTint = set.flowerTint ?? (hued ? family.flowerLines : g.flowerTint);
+    /* Every branch below keys off earlier roll values only, never off a scene
+       param, so an explicitly set param can never shift the rolls that follow. */
+    const armPick = ARM_COUNT_TABLE[
+      Math.floor(roll.next() * ARM_COUNT_TABLE.length) % ARM_COUNT_TABLE.length];
+    const armFrac = roll.next() < 0.35 ? roll.next() * 0.6 : 0;
+    const asymPick = roll.next() * 0.3;
+    /* armBlend was the old 2-to-3 dial; its whole range is armCount's [2, 3] */
+    const legacy = set.armBlend !== undefined ? 2 + clamp01(set.armBlend) : null;
+    const armCount = set.armCount ?? legacy ?? armPick + armFrac;
+    const armAsym = set.armAsym ?? asymPick;
     const bag = makeBag(k, {
       uGxfCells: uniform(Math.max(g.fieldCells, 0.1)),
       uGxfDensity: uniform(g.fieldDensity),
@@ -875,9 +1010,17 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uGxWind: uniform(g.wind),
       uGxPhase: uniform(g.phase),
       uGxSpin: uniform(g.spin),
-      uGxArmBlend: uniform(clamp01(g.armBlend)),
+      uGxArmCount: uniform(Math.min(Math.max(armCount, 1), ARM_MAX)),
+      uGxArmAsym: uniform(clamp01(armAsym)),
       uGxArmAmt: uniform(clamp01(g.armAmt)),
       uGxArmSharp: uniform(Math.max(g.armSharp, 0)),
+      uGxBarAmt: uniform(Math.max(g.barAmt, 0)),
+      uGxBarLen: uniform(Math.max(g.barLen, 1e-3)),
+      uGxBarSharp: uniform(Math.max(g.barSharp, 0)),
+      uGxGranFreq: uniform(Math.max(g.granFreq, 0)),
+      uGxGranBright: uniform(Math.max(g.granBright, 0)),
+      uGxGranDark: uniform(clamp01(g.granDark)),
+      uGxGranTh: uniform(clamp01(g.granTh)),
       uGxMotFreq: uniform(g.motFreq),
       uGxMotAmt: uniform(g.motAmt),
       uGxMorph: uniform(g.morphRate),
@@ -892,8 +1035,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uGxNearSoft: uniform(Math.max(g.nearSoft, 1e-3)),
       uGxCutIn: uniform(g.cutIn),
       uGxCutOut: uniform(Math.max(g.cutOut, g.cutIn + 1e-3)),
-      uGxBulge: uniform(new THREE.Vector3(...g.bulge)),
-      uGxDisk: uniform(new THREE.Vector3(...g.disk)),
+      uGxBulge: uniform(new THREE.Vector3(...bulge)),
+      uGxDisk: uniform(new THREE.Vector3(...disk)),
       uGxTintLo: uniform(g.tintLo),
       uGxTintHi: uniform(Math.max(g.tintHi, g.tintLo + 1e-3)),
       uGxGain: uniform(Math.max(g.gain, 0)),
@@ -903,6 +1046,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uGxHiiTh: uniform(g.hiiTh),
       uGxHiiOiii: uniform(Math.max(g.hiiOiii, 0)),
       uGxHiiSii: uniform(Math.max(g.hiiSii, 0)),
+
+      uGxFlowerGain: uniform(Math.max(g.flowerGain, 0)),
+      uGxFlowerTh: uniform(clamp01(g.flowerTh)),
+      uGxFlowerSoft: uniform(Math.max(g.flowerSoft, 1e-3)),
+      uGxFlowerLo: uniform(Math.max(g.flowerLo, 0)),
+      uGxFlowerHi: uniform(Math.max(g.flowerHi, g.flowerLo + 1e-3)),
+      uGxFlowerTint: uniform(new THREE.Vector3(...flowerTint)),
 
       uGxDevRe: uniform(Math.max(g.devRe, 1e-3)),
       uGxDevFloor: uniform(Math.max(g.devFloor, 1e-4)),
@@ -941,58 +1091,58 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       b.uGxCenter.value.set(g.center[0] * aspect, g.center[1]);
       b.uGxfAt.value.set(g.clusterAt[0] * aspect, g.clusterAt[1]);
     });
+    /* look.bar is derived, not stored: the bar chain is a build gate, so a scene
+       at the barAmt=0 default compiles a graph with no bar math in it at all. */
     bag.gxOpts = {
       field: g.field !== false,
       showpiece: g.showpiece !== false,
-      look: { ...GALAXY_DEFAULTS.look, ...g.look },
+      look: { ...look, bar: g.barAmt > 0 },
     };
     return bag;
   }
 
-  function voorwerpBag(e, k) {
-    const v = { ...DEFAULTS.voorwerp, ...e.params };
+  function ionCloudBag(e, k) {
+    const v = { ...DEFAULTS.ionCloud, ...e.params };
     const bag = makeBag(k, {
-      uVwpCenter: uniform(new THREE.Vector2(0, 0)),
-      uVwpRot: uniform(v.rot),
-      uVwpSize: uniform(Math.max(v.size, 1e-3)),
-      uVwpSquash: uniform(Math.max(v.squash, 0.05)),
-      uVwpRagged: uniform(Math.max(v.ragged, 0)),
-      uVwpRagFreq: uniform(v.ragFreq),
-      uVwpFeather: uniform(Math.max(v.feather, 1e-3)),
+      uIonCenter: uniform(new THREE.Vector2(0, 0)),
+      uIonRot: uniform(v.rot),
+      uIonSize: uniform(Math.max(v.size, 1e-3)),
+      uIonSquash: uniform(Math.max(v.squash, 0.05)),
+      uIonRagged: uniform(Math.max(v.ragged, 0)),
+      uIonRagFreq: uniform(v.ragFreq),
+      uIonFeather: uniform(Math.max(v.feather, 1e-3)),
       /* In units of the cloud radius, so the aspect scale must not reach it */
-      uVwpHoleAt: uniform(new THREE.Vector2(...v.holeAt)),
-      uVwpHoleR: uniform(Math.max(v.holeR, 0)),
-      uVwpHoleSoft: uniform(Math.max(v.holeSoft, 1e-4)),
-      uVwpFreq: uniform(v.freq),
-      uVwpSharp: uniform(Math.max(v.sharp, 0)),
-      uVwpTh: uniform(v.threshold),
-      uVwpSoft: uniform(Math.max(v.softness, 1e-3)),
-      uVwpClump: uniform(clamp01(v.clump)),
-      uVwpClumpFreq: uniform(v.clumpFreq),
-      uVwpShade: uniform(clamp01(v.shade)),
-      uVwpGlow: uniform(Math.max(v.glow, 0)),
-      uVwpSrc: uniform(new THREE.Vector2(0, 0)),
-      uVwpCone: uniform(v.cone),
+      uIonHoleAt: uniform(new THREE.Vector2(...v.holeAt)),
+      uIonHoleR: uniform(Math.max(v.holeR, 0)),
+      uIonHoleSoft: uniform(Math.max(v.holeSoft, 1e-4)),
+      uIonFreq: uniform(v.freq),
+      uIonSharp: uniform(Math.max(v.sharp, 0)),
+      uIonTh: uniform(v.threshold),
+      uIonSoft: uniform(Math.max(v.softness, 1e-3)),
+      uIonClump: uniform(clamp01(v.clump)),
+      uIonClumpFreq: uniform(v.clumpFreq),
+      uIonShade: uniform(clamp01(v.shade)),
+      uIonGlow: uniform(Math.max(v.glow, 0)),
+      uIonApex: uniform(new THREE.Vector2(0, 0)),
+      uIonCone: uniform(v.cone),
       /* Past ~1.5 rad the cone opens past the hemisphere and stops reading as one */
-      uVwpHalf: uniform(Math.min(Math.max(v.half, 0.02), 1.5)),
-      uVwpConeSoft: uniform(Math.min(Math.max(v.coneSoft, 0.001), 0.3)),
-      uVwpLag: uniform(v.lag),
-      uVwpLagBear: uniform(v.lagBear),
-      uVwpLitR: uniform(Math.max(v.litR, 1e-3)),
-      uVwpFall: uniform(Math.max(v.fall, 0)),
+      uIonHalf: uniform(Math.min(Math.max(v.half, 0.02), 1.5)),
+      uIonConeSoft: uniform(Math.min(Math.max(v.coneSoft, 0.001), 0.3)),
+      uIonLitR: uniform(Math.max(v.litR, 1e-3)),
+      uIonFall: uniform(Math.max(v.fall, 0)),
       /* Negative gains would subtract light from the shared additive RT */
-      uVwpGain: uniform(Math.max(v.gain, 0)),
-      uVwpHa: uniform(Math.max(v.ha, 0)),
-      uVwpOiii: uniform(Math.max(v.oiii, 0)),
-      uVwpSii: uniform(Math.max(v.sii, 0)),
-      uVwpMorph: uniform(v.morphRate),
-      uVwpOff: uniform(offsetFrom(instanceSeed(e, 131, k), 131)),
-      uDepthVwp: uniform(e.depth ?? 0.5),
+      uIonGain: uniform(Math.max(v.gain, 0)),
+      uIonHa: uniform(Math.max(v.ha, 0)),
+      uIonOiii: uniform(Math.max(v.oiii, 0)),
+      uIonSii: uniform(Math.max(v.sii, 0)),
+      uIonMorph: uniform(v.morphRate),
+      uIonOff: uniform(offsetFrom(instanceSeed(e, 131, k), 131)),
+      uDepthIon: uniform(e.depth ?? 0.5),
     }, (b, aspect) => {
-      b.uVwpCenter.value.set(v.center[0] * aspect, v.center[1]);
-      b.uVwpSrc.value.set(v.src[0] * aspect, v.src[1]);
+      b.uIonCenter.value.set(v.center[0] * aspect, v.center[1]);
+      b.uIonApex.value.set(v.apex[0] * aspect, v.apex[1]);
     });
-    bag.vwpOpts = { blob: v.blob === true };
+    bag.ionOpts = { blob: v.blob === true };
     return bag;
   }
 
@@ -1001,9 +1151,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     /* Polarity is the asset's own call, so it seeds the gains before the
        entity's params get the final word. */
     const pol = asset.polarity === 'bright' ? { tau: 0.4, rimGain: 0.5 } : {};
-    /* Glow follows what the column measured, not the silhouette: an emission bake
-       lights its body even when the traced shape is the dark one. */
-    const lit = asset.densityMode === 'emission' ? { glow: 0.9 } : {};
+    /* Glow follows what the column measured, but only where the traced shape is
+       the bright one: a dark-polarity emission bake lights the whole frame. */
+    const lit = asset.densityMode === 'emission' && asset.polarity !== 'dark'
+      ? { glow: 0.9 } : {};
     /* The baker's suggestion is 4× its honest measured scale, which alone reads
        ghost-thin, so a bake predating the suggestion needs the same factor. */
     const ds = asset.suggestedTau > 0 ? { tau: asset.suggestedTau }
@@ -1079,8 +1230,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const pnInst = featureEnts.planetary.map((e, k) => planetaryBag(e, k));
   const jetInst = featureEnts.jets.map((e, k) => jetsBag(e, k));
   const wrbInst = featureEnts.wrbubble.map((e, k) => wrbubbleBag(e, k));
+  const cluInst = featureEnts.clusters.map((e, k) => clustersBag(e, k));
+  const scBag = byType.starcloud ? starcloudBag(byType.starcloud) : null;
   const gxInst = featureEnts.galaxies.map((e, k) => galaxiesBag(e, k));
-  const vwpInst = featureEnts.voorwerp.map((e, k) => voorwerpBag(e, k));
+  const ionInst = featureEnts.ionCloud.map((e, k) => ionCloudBag(e, k));
   const shapeInst = featureEnts.shape.map((e, i) => shapeBag(e, shapeIdx[i]));
 
   /* Layer passes render an overscanned domain so compose can offset without
@@ -1142,8 +1295,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     const nodes = buildGalaxyNodes(skyAtDepth(bag.uDepthGx, U.uDepthLine), bag, bag.gxOpts);
     if (nodes.line) lineNode = lineNode.add(vec4(nodes.line, 0.0));
   }
-  for (const bag of vwpInst) {
-    lineNode = lineNode.add(vec4(buildVoorwerpNodes(skyAtDepth(bag.uDepthVwp, U.uDepthLine), bag, bag.vwpOpts).line, 0.0));
+  for (const bag of ionInst) {
+    lineNode = lineNode.add(vec4(buildIonCloudNodes(skyAtDepth(bag.uDepthIon, U.uDepthLine), bag, bag.ionOpts).line, 0.0));
   }
   /* Scattered starlight has no line signature, so echo only reaches the line RT
      when the host opts into the Hα whisper; the module builds no `line` otherwise. */
@@ -1152,7 +1305,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     lineNode = lineNode.add(vec4(buildEchoNodes(skyAtDepth(bag.uDepthEcho, U.uDepthLine), bag, bag.echoOpts).line, 0.0));
   }
 
-  let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, U);
+  let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, U,
+    { grain: P.ifn.grain > 0, swirl: P.ifn.swirl > 0 });
   for (const bag of reflInst) {
     contNode = contNode.add(vec4(buildReflectionNodes(skyAtDepth(bag.uDepthRefl, U.uDepthCont), bag).continuum, 0.0));
   }
@@ -1178,6 +1332,16 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   for (const bag of gxInst) {
     contNode = contNode.add(vec4(buildGalaxyNodes(skyAtDepth(bag.uDepthGx, U.uDepthCont), bag, bag.gxOpts).continuum, 0.0));
   }
+  /* Starlight, resolved or not, carries no line signature: both of these write
+     continuum only, and the band's rift reaches compose as optical depth. */
+  for (const bag of cluInst) {
+    contNode = contNode.add(vec4(buildClusterNodes(
+      skyAtDepth(bag.uDepthClu, U.uDepthCont), U.uPxPerUnit, bag, bag.cluOpts).continuum, 0.0));
+  }
+  if (scBag) {
+    contNode = contNode.add(vec4(buildStarcloudNodes(
+      skyAtDepth(scBag.uDepthSC, U.uDepthCont), scBag, scBag.scOpts).continuum, 0.0));
+  }
 
   const lineScene = fullscreenPass(lineNode);
   const contScene = fullscreenPass(contNode);
@@ -1190,6 +1354,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       shadowFan: fanInst,
       searchlight: beamInst,
       shape: shapeInst,
+      starcloud: scBag?.scOpts.rift ? [scBag] : [],
     },
     lens: lensOn ? { halos: lensHalos } : null,
   }));
@@ -1335,7 +1500,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     U.uAspect.value = aspect;
     U.uMarginScale.value.set(1 + (2 * margin) / w, 1 + (2 * margin) / h);
     U.uPxPerUnit.value = Math.max(h, 1) / U.uMarginScale.value.y;
-    U.uIonSrc.value.set(P.emission.ionSrc[0] * aspect, P.emission.ionSrc[1]);
+    U.uNebIonSrc.value.set(P.emission.ionSrc[0] * aspect, P.emission.ionSrc[1]);
     /* Sky x spans [0, aspect], so framed positions scale or they slide toward
        the left edge as the canvas widens */
     for (const reseat of reseats) reseat(aspect);
@@ -1416,8 +1581,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       planetary: pnInst.slice(),
       jets: jetInst.slice(),
       wrbubble: wrbInst.slice(),
+      clusters: cluInst.slice(),
       galaxies: gxInst.slice(),
-      voorwerp: vwpInst.slice(),
+      ionCloud: ionInst.slice(),
       shape: shapeInst.slice(),
     },
   };

@@ -3,7 +3,7 @@
    wavelength-dependent transmittance so thin edges redden before going black. */
 
 import { Fn, float, vec2, vec3, vec4, cos, sin, exp, mix, smoothstep, abs } from 'three/tsl';
-import { fbm3o2, fbm3o4, FBM2_NORM, FBM2_MID, FBM4_NORM } from './noise.js';
+import { fbm3o2, fbm3o4, valueNoise3, FBM2_NORM, FBM2_MID, FBM4_NORM } from './noise.js';
 import { rot2 } from './sdf.js';
 import { faintStarLayer } from './stars.js';
 
@@ -13,7 +13,8 @@ export const WISP_SIGMA = /*@__PURE__*/ vec3(1.0, 1.35, 1.9);
 
 /* Continuum pass: IFN wisps at a few percent of range (the dither QA target)
    plus the two faint star grid scales. */
-export function buildContinuumNodes(skyU, pxPerUnit, U) {
+export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
+  const { grain = false, swirl = false } = opts;
   return Fn(() => {
     const zSlow = U.uTev.mul(U.uIfnMorph);
     /* Real IFN combs one axis: squashing y in a rotated frame stretches the
@@ -22,13 +23,29 @@ export function buildContinuumNodes(skyU, pxPerUnit, U) {
     const q = vec2(qr.x, qr.y.mul(U.uIfnAniso)).toVar();
     /* One warp tap tears the fbm into sheets; unwarped it is round blobs, and
        the reference's wisps are sheared and filamentary at every scale. */
-    const warp = fbm3o2(vec3(q.mul(U.uIfnFreq.mul(0.45)), zSlow).add(U.uIfnOff.mul(3.0)))
-      .sub(FBM2_MID).mul(U.uIfnWarp).toVar();
+    const wn = fbm3o2(vec3(q.mul(U.uIfnFreq.mul(0.45)), zSlow).add(U.uIfnOff.mul(3.0)))
+      .sub(FBM2_MID).toVar();
+    const warp = wn.mul(U.uIfnWarp).toVar();
+    /* The same tap read as an angle instead of an offset: translating the
+       domain tears the sheets, rotating it curls them, and the two together
+       are what reads as flow rather than as torn paper. */
+    const qs = swirl ? rot2(q, wn.mul(U.uIfnSwirl)).toVar() : q;
     /* Four octaves for the torn-cotton scales, then a gamma rather than a
        threshold: it crushes the low end into dark voids and keeps edges soft. */
-    const n = fbm3o4(vec3(q.mul(U.uIfnFreq).add(warp), zSlow).add(U.uIfnOff))
+    const n = fbm3o4(vec3(qs.mul(U.uIfnFreq).add(warp), zSlow).add(U.uIfnOff))
       .mul(FBM4_NORM).toVar();
-    const ifn = n.max(1e-4).pow(U.uIfnGamma);
+    /* Remap, never multiply. The coarse tap as a bias widens each wisp into a
+       skirt where it runs high and eats the edge where it runs low; the fine
+       tap is the plate grain every long-exposure reference carries. */
+    let carved = n.add(wn.mul(U.uIfnFeather));
+    if (grain) {
+      carved = carved.add(valueNoise3(vec3(qs.mul(U.uIfnFreq.mul(7.0)), zSlow)
+        .add(U.uIfnOff.mul(5.0))).sub(0.5).mul(U.uIfnGrain));
+    }
+    carved = carved.toVar();
+    /* Blending back toward the ungamma'd field lifts the void floor, so a wisp
+       feathers out instead of ending on a contrast step. */
+    const ifn = mix(carved.max(1e-4).pow(U.uIfnGamma), carved, U.uIfnSoft);
     const ifnCol = vec3(0.16, 0.14, 0.12).mul(ifn.mul(U.uIfnAmp));
 
     /* Galactic-plane gradient + fbm clumping; uniform scatter is the tell */

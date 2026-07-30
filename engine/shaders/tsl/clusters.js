@@ -3,7 +3,7 @@
    Globular and open are the same code under different parameters. */
 
 import {
-  Fn, float, vec2, vec3, clamp, dot, floor, mix, pow, smoothstep, step,
+  Fn, float, vec2, vec3, clamp, dot, floor, mix, smoothstep, step,
 } from 'three/tsl';
 import { hash3, fbm3o2, CELL_BIAS } from './noise.js';
 import { rot2 } from './sdf.js';
@@ -101,8 +101,10 @@ function membersWith(sky, pxPerUnit, U, F, clumped = true) {
         .mul(U.uCluRich).mul(resolved).mul(clump);
       const present = step(h1.z, dens);
 
-      const rel = pow(h2.x, 3.0);
-      const L = pow(h2.x, 6.0).mul(U.uCluMemGain);
+      /* pow(x,3) and its square as multiplies: the exponents are compile-time
+         constants, and three transcendentals × 9 taps is real per-fragment cost. */
+      const rel = h2.x.mul(h2.x).mul(h2.x).toVar();
+      const L = rel.mul(rel).mul(U.uCluMemGain);
 
       /* Flux-preserving sub-pixel clamp, as stars.js */
       const aTrue = mix(0.45, 1.25, rel).mul(U.uCluMemSize.max(0.05)).toVar();
@@ -162,7 +164,9 @@ export const GLOBULAR_DEFAULTS = {
   haloR: 0.075,
   cells: 190,
   rich: 1.0,
-  memGain: 0.55,
+  /* In the same band as the faint field's brightScale (stars.js, 1.7 and 4.0):
+     under pow(h2.x, 6) anything much lower resolves no members at all. */
+  memGain: 1.8,
   memFall: 0.55,
   memSize: 0.85,
   resolve: 0.032,

@@ -3,7 +3,7 @@
    dust torus that hides the star. Scattered starlight, so continuum, never line. */
 
 import {
-  Fn, float, vec3, clamp, cos, floor, length, mix, smoothstep, step,
+  Fn, float, vec2, vec3, clamp, cos, floor, length, mix, smoothstep, step,
 } from 'three/tsl';
 import { fbm3o2, FBM2_NORM } from './noise.js';
 import { rot2 } from './sdf.js';
@@ -24,13 +24,22 @@ function beamFrame(sky, U) {
   return rot2(sky.sub(U.uBeamCenter), axis.negate()).toVar();
 }
 
+/* Inclination is one angle for the whole system: the polar axis leans out of
+   the sky plane by cos i, which foreshortens the beams and widens their cones,
+   while the disk perpendicular to it opens from a bar into an ellipse by sin i.
+   Dividing recovers the system's own coordinate from the projected one. */
+function polarFrame(q, U) {
+  return vec2(q.x, q.y.div(U.uBeamCosI.max(0.05))).toVar();
+}
+
 export function buildSearchlightNodes(skyU, U, opts = {}) {
   const useArcs = opts.arcs !== false;
   const useRungs = opts.rungs === true;
 
   const continuum = Fn(() => {
     const zEvo = U.uTev.mul(U.uBeamMorph);
-    const q = beamFrame(skyU, U);
+    const qProj = beamFrame(skyU, U);
+    const q = polarFrame(qProj, U);
     const rad = length(q).max(1e-4).toVar();
     const along = q.y.abs().max(1e-4).toVar();
     const drift = (useArcs || useRungs) ? seamlessPhase(U.uTev, U.uBeamArcDrift).toVar() : null;
@@ -102,13 +111,18 @@ export function buildSearchlightNodes(skyU, U, opts = {}) {
       /* Pulsed mass-loss shells: cos of radius with amplitude decay, broken up
          by a slow azimuthal field. No local torus mask: the dust lane darkens
          the arcs only through the shared extinction sum, so wire the tau. */
-      const ring = cos(rad.mul(U.uBeamArcFreq).sub(drift)).mul(0.5).add(0.5);
+      /* Spherical shells project as circles at any tilt, DSHARP's rings open
+         with the disk, and this dial runs between the two readings. */
+      const dArc = vec2(qProj.x,
+        qProj.y.div(mix(float(1.0), U.uBeamSinI.max(0.02), U.uBeamArcTilt.clamp(0.0, 1.0)))).toVar();
+      const rArc = length(dArc).max(1e-4).toVar();
+      const ring = cos(rArc.mul(U.uBeamArcFreq).sub(drift)).mul(0.5).add(0.5);
       const shells = ring.max(1e-4).pow(U.uBeamArcSharp.max(0.0)).toVar();
-      const rr = rad.div(U.uBeamArcR.max(1e-3)).toVar();
-      const azim = fbm3o2(vec3(q.div(rad).mul(U.uBeamArcAzimFreq), zEvo.mul(0.5))
+      const rr = rArc.div(U.uBeamArcR.max(1e-3)).toVar();
+      const azim = fbm3o2(vec3(dArc.div(rArc).mul(U.uBeamArcAzimFreq), zEvo.mul(0.5))
         .add(U.uBeamOff.mul(3.0))).mul(FBM2_NORM);
       lit.addAssign(shells
-        .mul(smoothstep(0.0, U.uBeamArcIn.max(1e-4), rad))
+        .mul(smoothstep(0.0, U.uBeamArcIn.max(1e-4), rArc))
         .div(rr.mul(rr).add(1.0))
         .mul(mix(float(0.3), float(1.0), azim))
         .mul(U.uBeamArcAmp));
@@ -136,10 +150,16 @@ export function searchlightTau(skyW, U) {
   /* A real torus flares outward, and the flare also keeps the ansae from
      ending on a cut edge. */
   const halfT = U.uBeamTorusT.max(1e-4)
-    .mul(across.div(rr).mul(U.uBeamTorusFlare).add(1.0)).toVar();
+    .mul(across.div(rr).mul(U.uBeamTorusFlare).add(1.0)).max(1e-4).toVar();
+  /* Tilting the disk toward us fills the bar into an ellipse: the projected
+     half-height is the ring's own chord times sin i, and zero when edge-on. */
+  const rise = rr.mul(rr).sub(across.mul(across)).max(0.0).sqrt()
+    .mul(U.uBeamSinI).toVar();
   /* Ramping from 0 gave a gradient with no edge, which read as a smudge; the
-     plateau to 0.45 makes the lane a bar with a defined boundary. */
-  const lane = float(1).sub(smoothstep(0.45, 1.0, q.y.abs().div(halfT)))
+     plateau to 0.45 makes the lane a bar with a defined boundary. Only the
+     outer edge follows the tilt: the opaque core is the midplane seen edge-on,
+     and the ellipse it fades into is the disk face, which is not a slab. */
+  const lane = float(1).sub(smoothstep(halfT.mul(0.45), halfT.add(rise), q.y.abs()))
     .mul(float(1).sub(smoothstep(rr.mul(0.55), rr, across))).toVar();
 
   /* Ansae: an edge-on ring is deepest at its tangent points, where the line of
@@ -163,6 +183,10 @@ export function searchlightTau(skyW, U) {
 export const SEARCHLIGHT_DEFAULTS = {
   center: [0.5, 0.52],
   axis: 0.55,
+  /* Radians off edge-on. 0 restores the shipped flat silhouette for beams and
+     torus, for the arcs only with arcTilt 0; PI/2 puts the disk face-on. */
+  incl: 0.4,
+  arcTilt: 0.85,
   spin: 0.003,
   half: 0.3,
   soft: 0.035,

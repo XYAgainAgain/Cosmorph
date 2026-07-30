@@ -27,24 +27,32 @@ function bandProfile(across, U) {
   return core.add(wing.mul(wgt)).div(wgt.add(1.0));
 }
 
-export function buildStarcloudNodes(skyU, U) {
+/* Both fbm chains are build-gated: at 0 the term is arithmetically inert but
+   the octaves still run, and the five-octave grain is the whole layer's cost. */
+export function buildStarcloudNodes(skyU, U, opts = {}) {
+  const { grain: grainOn = false, patch: patchOn = false } = opts;
   const continuum = Fn(() => {
     const across = bandFrame(skyU, U).across;
     const zEvo = U.uTev.mul(U.uSCMorph).toVar();
     const prof = bandProfile(across, U).toVar();
 
+    let lit = prof;
+    if (patchOn) {
+      /* Profile lowers the threshold the mottle must clear (remap doctrine, sdf.js) */
+      const m = fbm3o2(vec3(skyU.mul(U.uSCPatchFreq), zEvo).add(U.uSCOff.mul(3.0))).mul(FBM2_NORM);
+      const th = mix(float(1.0), U.uSCPatchTh, prof).toVar();
+      /* Not "patch": that is a reserved WGSL keyword and toVar-ing it is fatal */
+      const mottle = smoothstep(th, th.add(U.uSCPatchSoft.max(1e-3)), m);
+      lit = prof.add(mottle.mul(U.uSCPatch));
+    }
     /* Five octaves are what sell billions of unresolved stars. This modulates an
        emissivity rather than combining noise with a silhouette, so it multiplies. */
-    const g = fbm3o5(vec3(skyU.mul(U.uSCGrainFreq), zEvo.mul(0.25)).add(U.uSCOff)).mul(FBM5_NORM);
-    const grain = float(1).add(g.sub(0.5).mul(U.uSCGrain)).max(0.0);
+    if (grainOn) {
+      const g = fbm3o5(vec3(skyU.mul(U.uSCGrainFreq), zEvo.mul(0.25)).add(U.uSCOff)).mul(FBM5_NORM);
+      lit = lit.mul(float(1).add(g.sub(0.5).mul(U.uSCGrain)).max(0.0));
+    }
 
-    /* Profile lowers the threshold the mottle must clear (remap doctrine, sdf.js) */
-    const m = fbm3o2(vec3(skyU.mul(U.uSCPatchFreq), zEvo).add(U.uSCOff.mul(3.0))).mul(FBM2_NORM);
-    const th = mix(float(1.0), U.uSCPatchTh, prof).toVar();
-    /* Not "patch": that is a reserved WGSL keyword and toVar-ing it is fatal */
-    const mottle = smoothstep(th, th.add(U.uSCPatchSoft.max(1e-3)), m);
-
-    const lum = prof.add(mottle.mul(U.uSCPatch)).mul(grain).mul(U.uSCGain);
+    const lum = lit.mul(U.uSCGain);
     return U.uSCTint.mul(lum);
   })();
 

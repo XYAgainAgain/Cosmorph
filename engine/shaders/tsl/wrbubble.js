@@ -14,6 +14,7 @@ const WARP_A = /*@__PURE__*/ vec3(13.7, 5.1, 29.3);
 const WARP_B = /*@__PURE__*/ vec3(41.9, 23.7, 7.9);
 const WARP_C = /*@__PURE__*/ vec3(3.1, 47.3, 17.7);
 const WARP_D = /*@__PURE__*/ vec3(27.3, 11.9, 43.1);
+const WARP_E = /*@__PURE__*/ vec3(19.3, 7.7, 31.1);
 
 /* Fixed shear direction for the fine warp; arbitrary, only needs to be oblique */
 const KINK_DIR = /*@__PURE__*/ vec3(0.7, -0.5, 0.9);
@@ -27,8 +28,16 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
 
     /* uTev's 4096 h wrap bounds expansion but also resets it: one shell snap
        every ~170 days, accepted as in filaments.js. The cap bounds the domain. */
-    const R = U.uWrbRadius.add(U.uTev.mul(U.uWrbExpand))
-      .min(U.uWrbRadius.mul(1.5)).max(1e-3).toVar();
+    const rBase = U.uWrbRadius.add(U.uTev.mul(U.uWrbExpand))
+      .min(U.uWrbRadius.mul(1.5)).toVar();
+
+    /* Thor's Helmet is a knot of sub-bubbles, not a sphere, and only a radius
+       that varies with direction gets that outline. Read off the undeformed
+       direction so the lumps do not chase the bow-shock squash below. */
+    const dHat = d.div(length(d).max(1e-4)).toVar();
+    const lump = fbm3o2(vec3(dHat.mul(U.uWrbLumpFreq), zEvo.mul(0.3)).add(WARP_E))
+      .sub(FBM2_MID).mul(FBM2_NORM).toVar();
+    const R = rBase.mul(float(1).add(lump.mul(U.uWrbLump))).max(1e-3).toVar();
 
     /* Deform space before evaluating the shell: scaling a coordinate up shrinks
        the bubble along it, so the leading face flattens and its flank flares. */
@@ -46,8 +55,13 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
     const inHa = R.mul(float(1).sub(U.uWrbThick.max(0.02).min(0.9))).toVar();
     const inOiii = rOiii.mul(float(1).sub(U.uWrbThickO.max(0.02).min(0.9))).toVar();
 
-    const profH = shellChord(rp, R, inHa).toVar();
-    const profO = shellChord(rp, rOiii, inOiii).toVar();
+    /* A bubble is clear through the middle and busy at the rim; the bare chord
+       leaves the disk milky, so the exponent thins the interior while the limb,
+       normalized to 1, keeps its brightness. Floored at 1 because a smaller
+       exponent would raise the pow's epsilon guard to a visible level. */
+    const limbK = U.uWrbLimbK.max(1.0).toVar();
+    const profH = shellChord(rp, R, inHa).max(1e-4).pow(limbK).toVar();
+    const profO = shellChord(rp, rOiii, inOiii).max(1e-4).pow(limbK).toVar();
 
     /* Angular extent from the direction dot product, not atan: no branch cut,
        and cos is monotone on [0,PI] so the smoothstep edges stay ascending. */
@@ -155,6 +169,7 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
    fractions of R; starAt is an offset in units of R. */
 export const WRBUBBLE_DEFAULTS = {
   center: [0.46, 0.52], radius: 0.28, expand: 0.000034, axis: 0.35,
+  lump: 0.22, lumpFreq: 1.4, limbK: 2.6,
   bow: 0.55, wing: 0.3,
   ratio: 0.9, thick: 0.2, thickO: 0.38,
   comp: 0.8, compSoft: 0.5, gapPhase: 2.4, compO: 0.4,

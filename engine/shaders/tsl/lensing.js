@@ -23,7 +23,9 @@ export const LENS_DEFAULTS = {
   smear: 0.5,
   ringGain: 0.05,
   ringWidth: 0.02,
-  chroma: 0.35,
+  /* 0.12 ≈ the look of the old 0.35 default, whose double-applied uLensChroma
+     made the slider quadratic; the response is linear now. */
+  chroma: 0.12,
 };
 
 export const LENS_MAX_HALOS = 3;
@@ -31,7 +33,7 @@ export const LENS_MAX_HALOS = 3;
 const HALO_UNIFORMS = ['uLensH0', 'uLensH1', 'uLensH2'];
 
 /* |det A| passes through zero on the critical curve, so its reciprocal has to
-   be capped before it multiplies the sampled scene. */
+   be capped (softly, C¹) before it multiplies the sampled scene. */
 const MAG_CAP = 6.0;
 
 /* The band, in screen uv, over which the warp relaxes before its sample would
@@ -152,46 +154,61 @@ export function lensWarp(screen, U, { halos = 0 } = {}) {
      flips, because the sky frame this was computed in runs downward. */
   const beta = screen.add(vec2(ax.div(U.uAspect).negate(), ay)).toVar();
 
-  /* The sampled point's radius about the lens center, in screen uv: the
-     dispersion axis, and the tangential axis is its perpendicular. */
+  /* The sampled point's source-plane radius, in screen uv: the dispersion axis.
+     β passes through zero on the critical curve, so the smear axis is built from
+     the image-plane radius instead, which vanishes only at the lens center. */
   const rad = vec2(d.x.sub(ax).div(U.uAspect), d.y.sub(ay).negate()).toVar();
-  const vis = vec2(rad.x.mul(U.uAspect), rad.y).toVar();
+  const vis = vec2(d.x, d.y.negate()).toVar();
   const visLen = length(vis).max(1e-5).toVar();
   /* Perpendicular taken in aspect-corrected space, then returned to uv, or the
      smear would shear off the arc on any non-square frame. */
   const tang = vec2(vis.y.negate().div(visLen).div(U.uAspect), vis.x.div(visLen)).toVar();
 
-  const smear0 = arc.mul(U.uLensSmear).mul(U.uLensThetaE).mul(0.06).toVar();
-  const disp0 = arc.mul(U.uLensChroma).mul(0.04).toVar();
+  /* The uv cap keeps the θ_E × smear product from spreading the three taps over
+     uncorrelated sky at the schema maxima, which reads as a triple image. */
+  const smear0 = arc.mul(U.uLensSmear).mul(U.uLensThetaE).mul(0.06).min(0.004).toVar();
+  const disp0 = arc.mul(0.04).toVar();
 
   /* A sample that walked off the frame hits the uv clamp and replicates the
      border pixel into a streak, so the displacement fades on where the probe
-     would land, not on how far β overshot. Guard covers the side taps too. */
+     would land, not on how far β overshot. */
   const guard = float(EDGE_FADE).add(smear0).add(length(rad).mul(disp0)).toVar();
   /* Slack caps at the pixel's own inset, so a sample that barely moves is never
      penalized: only travel toward the border costs strength. */
   const slack = max(min(guard, inset(screen)), 1e-4).toVar();
   const keep = smoothstep(0.0, slack, inset(beta)).toVar();
+  /* The ± taps budget against the landed sample's own remaining inset, not the
+     source pixel's: a border pixel whose β stayed inbounds gets keep = 1, and
+     without this its taps would still walk off the RT and streak. */
+  const atv = mix(screen, beta, keep).clamp(0.0, 1.0).toVar();
+  const room = inset(atv).max(0.0).toVar();
 
   /* soft = √(rc² + r²), so soft = θ_E is exactly r = √(θ_E² − rc²): the effective
      ring radius, elliptical for free, without a second sqrt. Modulated by the
      magnification so it breaks into arcs instead of reading as a drawn hoop. */
+  const rEff = sqrt(U.uLensThetaE.mul(U.uLensThetaE)
+    .sub(U.uLensCore.mul(U.uLensCore)).max(0.0)).toVar();
+  /* rEff gate: once rc ≥ θ_E there is no ring, and without it a θ_E → 0 lens
+     leaves a filled teal disc of radius uLensRingW glowing on dead-flat sky. */
   const ring = smoothstep(0.0, U.uLensRingW, main.soft.sub(U.uLensThetaE).abs())
-    .oneMinus().mul(arc.mul(0.7).add(0.3)).toVar();
+    .oneMinus().mul(arc.mul(0.7).add(0.3))
+    .mul(smoothstep(0.0, U.uLensRingW, rEff)).toVar();
   /* One term serves the ring and the soft outer glow: the wide low skirt is what
      makes a small-θ_E lens legible at all. */
   const skirt = smoothstep(0.0, U.uLensThetaE.mul(2.0).max(1e-3), main.soft)
     .oneMinus().toVar();
 
   return {
-    at: mix(screen, beta, keep).clamp(0.0, 1.0).toVar(),
+    at: atv,
     gain: mix(float(1.0), mix(float(1.0), mag, U.uLensMag), keep).toVar(),
     tang,
-    smear: smear0.mul(keep).toVar(),
-    disp: rad.mul(disp0.mul(keep)).toVar(),
+    smear: min(smear0.mul(keep), room).toVar(),
+    disp: rad.mul(disp0.mul(keep))
+      .mul(min(float(1.0), room.div(length(rad).mul(disp0).max(1e-5)))).toVar(),
     chroma: arc.mul(U.uLensChroma).mul(0.7).mul(keep).toVar(),
-    /* OIII-dominant because real lensed arcs are blue star-forming galaxies, and
-       it enters as line channels so the palette grades it like any emission. */
+    /* Drawn emission, not sampled scene: skipping `keep` on ring and skirt is
+       deliberate. OIII-dominant because real lensed arcs are blue star-forming
+       galaxies; as line channels the palette grades it like any emission. */
     ring: vec3(0.6, 1.0, 0.35).mul(U.uLensRingGain).mul(ring.add(skirt.mul(0.08))).toVar(),
   };
 }

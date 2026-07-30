@@ -13,6 +13,7 @@ import { echoTau } from './echo.js';
 import { shadowFanTau } from './shadowfan.js';
 import { searchlightTau } from './searchlight.js';
 import { shapeTauAndRim } from './shape.js';
+import { riftTau } from './starcloud.js';
 import { lensWarp } from './lensing.js';
 
 /* Interstellar reddening lives in dust.js (one constant, one law). That
@@ -101,6 +102,12 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
     }
     for (const bag of layers.searchlight ?? []) {
       tau = tau.add(searchlightTau(skyAt(bag.uDepthBeam), bag));
+    }
+    /* Same depth uniform the band's continuum was pre-shifted to, or the Great
+       Rift would parallax off the glow it splits. Depth only sets parallax: one
+       exp over the summed tau dims every layer alike, so amplitude is the lever. */
+    for (const bag of layers.starcloud ?? []) {
+      tau = tau.add(riftTau(skyAt(bag.uDepthSC), bag));
     }
     for (const s of shapes) tau = tau.add(s.tau);
     const T3 = exp(tau.negate().mul(SIGMA));
