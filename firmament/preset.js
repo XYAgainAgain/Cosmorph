@@ -84,6 +84,10 @@ function lensingFrom(grading) {
     haloStrength: grading.lensHaloStr,
     haloSpread: grading.lensHaloSpread,
     magBoost: grading.lensMag,
+    smear: grading.lensSmear,
+    ringGain: grading.lensRingGain,
+    ringWidth: grading.lensRingW,
+    chroma: grading.lensChroma,
   };
 }
 

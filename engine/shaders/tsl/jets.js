@@ -3,16 +3,17 @@
    a drifting knot chain, offset shock strands. Line channels only, never RGB. */
 
 import {
-  Fn, float, vec3, cos, exp, floor, fract, mix, sin, smoothstep, step,
+  Fn, float, vec3, cos, dot, exp, floor, fract, mix, sin, smoothstep, step,
 } from 'three/tsl';
-import { fbm3o2, hash1, FBM2_NORM } from './noise.js';
-import { rot2 } from './sdf.js';
+import { fbm3o2, ridged2, hash1, FBM2_NORM } from './noise.js';
+import { remapCombine, rot2 } from './sdf.js';
 
 const TAU = Math.PI * 2;
 
 /* Independent slices of the noise domain, same trick as reflection.js */
 const SHOCK_DOMAIN = /*@__PURE__*/ vec3(3.9, 17.1, 8.3);
 const BEAM_DOMAIN = /*@__PURE__*/ vec3(23.7, 6.1, 12.9);
+const STREAK_DOMAIN = /*@__PURE__*/ vec3(41.3, 9.7, 28.1);
 
 /* 1D value noise: valueNoise3 would pay for eight lattice corners to
    interpolate along one axis, and the knot jitter only ever needs the one. */
@@ -25,17 +26,18 @@ const noise1 = /*@__PURE__*/ Fn(([x, off]) => {
   return mix(a, b, t);
 });
 
-/* Shell coverage from a signed distance, remapped through the ambient mottle:
-   the envelope lowers the threshold the noise must clear (remap doctrine). */
+/* Shell coverage from a signed distance. The envelope lowers the bar the ambient
+   mottle has to clear (remap doctrine, sdf.js), so the mottle carves the shell. */
 function shellDens(dx, invT, span, mottle, U) {
-  const env = float(1).sub(smoothstep(0.0, 1.0, dx.mul(invT).abs())).mul(span);
+  const env = float(1).sub(smoothstep(0.0, 1.0, dx.mul(invT).abs())).mul(span).toVar();
   const th = mix(float(1.0), U.uJetBowTh, env);
-  return smoothstep(th, th.add(U.uJetSoft.max(1e-3)), mottle);
+  const ero = smoothstep(th, th.add(U.uJetSoft.max(1e-3)), mottle);
+  return remapCombine(mottle, ero, env, U.uJetTexAmt);
 }
 
 /* Paraboloid cap opening back toward the source, apex leading at `stand` along
    the arm. Two strands at ±sep are one shock front, not two objects. */
-function bowStrands(along, ty, stand, mottle, U) {
+function bowStrands(along, ty, stand, mottle, tEvo, U) {
   const at = U.uJetBowCurv.mul(ty).toVar();
   const f = stand.sub(along).sub(at.mul(ty)).toVar();
 
@@ -50,9 +52,19 @@ function bowStrands(along, ty, stand, mottle, U) {
   const span = float(1).sub(smoothstep(outer.mul(0.7), outer, ty.abs())).toVar();
   const facing = gk.max(1e-4).pow(U.uJetBowFace.max(0.0)).toVar();
 
+  /* Aniso on the across-front axis, so a shell a hundredth of a sky unit thick
+     still resolves nested sub-arcs instead of one painted parenthesis. */
+  const sp = vec3(
+    dn.mul(U.uJetStreakFreq).mul(U.uJetStreakAniso),
+    ty.mul(U.uJetStreakFreq),
+    tEvo,
+  ).add(U.uJetOff).add(STREAK_DOMAIN);
+  const streak = ridged2(sp, U.uJetStreakSharp).toVar();
+  const comb = mix(float(1).sub(U.uJetStreak), float(1.0), streak).toVar();
+
   return {
-    lead: shellDens(dn.add(U.uJetBowSep), invT, span, mottle, U).mul(facing),
-    trail: shellDens(dn.sub(U.uJetBowSep), invT, span, mottle, U).mul(facing),
+    lead: shellDens(dn.add(U.uJetBowSep), invT, span, mottle, U).mul(facing).mul(comb),
+    trail: shellDens(dn.sub(U.uJetBowSep), invT, span, mottle, U).mul(facing).mul(comb),
   };
 }
 
@@ -64,6 +76,16 @@ function addCap(cap, acc, U) {
   acc.ha.addAssign(lead.add(trail.mul(U.uJetTrailHa)));
   acc.oiii.addAssign(lead.mul(U.uJetLeadOiii));
   acc.sii.addAssign(trail);
+}
+
+/* Source star: same Moffat-plus-clamp shape as echo.js's, present in both looks */
+function sourceStar(sky, U) {
+  const dPx = sky.sub(U.uJetSrc).mul(U.uPxPerUnit).toVar();
+  const aTrue = U.uJetStarR.mul(U.uPxPerUnit).toVar();
+  const aC = aTrue.max(0.7).toVar();
+  const energy = aTrue.mul(aTrue).div(aC.mul(aC)).toVar();
+  const x = float(1).div(dot(dPx, dPx).div(aC.mul(aC)).add(1.0)).toVar();
+  return x.mul(x).add(x.mul(U.uJetStarHalo)).mul(energy).mul(U.uJetStarLum).toVar();
 }
 
 export function buildJetNodes(skyU, U, opts = {}) {
@@ -111,8 +133,13 @@ export function buildJetNodes(skyU, U, opts = {}) {
       const armL = U.uJetLen.mul(armK).max(1e-4).toVar();
       const w = U.uJetWidth.mul(float(1).add(s.div(armL).mul(U.uJetFlare)))
         .max(1e-4).toVar();
-      const rr = ty.div(w).toVar();
-      const core = exp(rr.mul(rr).negate()).toVar();
+
+      /* Flux-preserving clamp (catalogue 3.7): never render the beam narrower
+         than ~0.7 px, dim it instead, or a pencil-thin jet aliases into nothing. */
+      const wPx = w.mul(U.uPxPerUnit).toVar();
+      const wUse = wPx.max(0.7).div(U.uPxPerUnit).toVar();
+      const rr = ty.div(wUse).toVar();
+      const core = exp(rr.mul(rr).negate()).mul(w.div(wUse)).toVar();
 
       /* Taper fraction capped below 1 so the two smoothstep edges cannot meet */
       const taper = float(1).sub(smoothstep(armL.mul(U.uJetTaper.min(0.98)), armL, s)).toVar();
@@ -127,24 +154,26 @@ export function buildJetNodes(skyU, U, opts = {}) {
       const kph = ku.add(jit).sub(fract(tEvo.mul(U.uJetDrift))).mul(TAU).toVar();
       const lobe = cos(kph).mul(0.5).add(0.5).max(1e-4).pow(U.uJetKnotSharp.max(0.0)).toVar();
 
-      /* Knots and the length fade go into the envelope, not the output: the
-         texture erodes far knots away instead of just dimming a continuous tube. */
       const fade = mix(float(1.0), U.uJetKnotFade, s.div(armL).min(1.0));
       const env = core.mul(taper).mul(birth).mul(fade)
         .mul(mix(U.uJetKnotFloor.max(0.0).min(1.0), float(1.0), lobe)).toVar();
-      const th = mix(float(1.0), U.uJetTh, env);
-      const dens = smoothstep(th, th.add(U.uJetSoft.max(1e-3)), tex).toVar();
 
-      const amp = dens.mul(U.uJetBeamGain).toVar();
+      /* The envelope lowers the threshold the texture has to clear (remap
+         doctrine, sdf.js), so the noise carves the beam rather than tinting it. */
+      const th = mix(float(1.0), U.uJetTh, env);
+      const ero = smoothstep(th, th.add(U.uJetSoft.max(1e-3)), tex).toVar();
+      const amp = remapCombine(tex, ero, env, U.uJetTexAmt).mul(U.uJetBeamGain).toVar();
+
       acc.ha.addAssign(amp);
+      acc.oiii.addAssign(amp.mul(U.uJetBeamOiii));
       acc.sii.addAssign(amp.mul(U.uJetBeamSii));
     }
 
     if (bow) {
-      addCap(bowStrands(q.x, ty, U.uJetBowStand, mottle, U), acc, U);
+      addCap(bowStrands(q.x, ty, U.uJetBowStand, mottle, tEvo, U), acc, U);
       if (counter) {
         const back = U.uJetBowStand.mul(asym).toVar();
-        addCap(bowStrands(q.x.negate(), ty, back, mottle, U), acc, U);
+        addCap(bowStrands(q.x.negate(), ty, back, mottle, tEvo, U), acc, U);
       }
     }
 
@@ -158,8 +187,18 @@ export function buildJetNodes(skyU, U, opts = {}) {
       const env = exp(rr.mul(rr).negate())
         .mul(float(1).sub(smoothstep(float(0), wLen, wq)))
         .mul(smoothstep(float(0), U.uJetGap.max(1e-4), wq)).toVar();
+      /* Streamers along the wake, same trick as the cap: a smooth trail reads
+         as an airbrushed smear at any gain that makes it visible. */
+      const streak = ridged2(vec3(
+        wq.mul(U.uJetStreakFreq).mul(0.45),
+        ty.mul(U.uJetStreakFreq).mul(U.uJetStreakAniso.mul(0.3)),
+        tEvo,
+      ).add(U.uJetOff).add(STREAK_DOMAIN), U.uJetStreakSharp).toVar();
+
       const th = mix(float(1.0), U.uJetTh, env);
-      const amp = smoothstep(th, th.add(U.uJetSoft.max(1e-3)), mottle)
+      const ero = smoothstep(th, th.add(U.uJetSoft.max(1e-3)), mottle).toVar();
+      const amp = remapCombine(mottle, ero, env, U.uJetTexAmt)
+        .mul(mix(float(1).sub(U.uJetStreak), float(1.0), streak))
         .mul(U.uJetWakeGain).toVar();
       acc.ha.addAssign(amp);
       acc.sii.addAssign(amp.mul(U.uJetBeamSii));
@@ -168,7 +207,11 @@ export function buildJetNodes(skyU, U, opts = {}) {
     return vec3(acc.ha.mul(U.uJetHa), acc.oiii.mul(U.uJetOiii), acc.sii.mul(U.uJetSii));
   })();
 
-  return { line };
+  /* The source is a star, so it is continuum, not a line species. Both looks
+     build it; muting is the star-brightness param, not the graph. */
+  const continuum = Fn(() => U.uJetStarCol.mul(sourceStar(skyU, U)))();
+
+  return { line, continuum };
 }
 
 /* Bipolar HH jet, the default look. Positions in sky units, vectors as arrays.
@@ -176,17 +219,19 @@ export function buildJetNodes(skyU, U, opts = {}) {
    the runaway bow shock is { beam: false, counter: false, wake: true }. */
 export const JET_DEFAULTS = {
   look: { beam: true, bow: true, counter: true, wake: false },
-  src: [0.58, 0.40], angle: 0.62, len: 0.36, asym: 0.82,
-  width: 0.008, flare: 1.6, taper: 0.7, gap: 0.022,
+  src: [0.58, 0.40], angle: 0.62, len: 0.4, asym: 0.82,
+  width: 0.0045, flare: 1.6, taper: 0.7, gap: 0.018,
   precess: 0.012, precFreq: 7.0, precRate: 0.35,
-  knotFreq: 14.0, knotSharp: 6.0, knotJit: 0.35, knotFloor: 0.45,
-  knotFade: 0.45, drift: 3.0,
-  texFreq: 20.0, texAniso: 0.25, threshold: 0.30, softness: 0.30,
-  beamGain: 0.36, beamSii: 0.25,
-  shockFreq: 16.0,
-  bowStand: 0.37, bowCurv: 7.0, bowThick: 0.014, bowSep: 0.011,
-  bowSpan: 0.14, bowFace: 1.4, bowTh: 0.22, bowGain: 0.4,
-  leadOiii: 0.45, trailHa: 0.55,
-  wakeGain: 0.12, wakeLen: 0.5, wakeW: 0.05, wakeFlare: 2.5,
+  knotFreq: 26.0, knotSharp: 4.0, knotJit: 0.35, knotFloor: 0.3,
+  knotFade: 0.6, drift: 3.0,
+  texFreq: 20.0, texAniso: 0.25, threshold: 0.2, softness: 0.45, texAmt: 0.6,
+  beamGain: 1.1, beamOiii: 0.55, beamSii: 0.25,
+  starLum: 1.1, starR: 0.005, starHalo: 0.05, starCol: [1.0, 0.82, 0.66],
+  shockFreq: 26.0,
+  streak: 0.7, streakFreq: 26.0, streakAniso: 8.0, streakSharp: 2.4,
+  bowStand: 0.42, bowCurv: 11.0, bowThick: 0.016, bowSep: 0.011,
+  bowSpan: 0.12, bowFace: 1.4, bowTh: 0.22, bowGain: 0.7,
+  leadOiii: 0.55, trailHa: 0.55,
+  wakeGain: 0.3, wakeLen: 0.55, wakeW: 0.04, wakeFlare: 1.6,
   ha: 0.95, oiii: 1.0, sii: 0.7, morphRate: 0.12,
 };

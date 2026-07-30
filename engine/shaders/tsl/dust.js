@@ -2,16 +2,33 @@
    Wisps output optical depth, never dark paint — compose turns it into
    wavelength-dependent transmittance so thin edges redden before going black. */
 
-import { Fn, vec3, vec4, mix, smoothstep, abs } from 'three/tsl';
-import { fbm3o2, fbm3o4 } from './noise.js';
+import { Fn, float, vec2, vec3, vec4, cos, sin, exp, mix, smoothstep, abs } from 'three/tsl';
+import { fbm3o2, fbm3o4, FBM2_NORM, FBM2_MID, FBM4_NORM } from './noise.js';
+import { rot2 } from './sdf.js';
 import { faintStarLayer } from './stars.js';
+
+/* Blue is extinguished ~1.9× harder than red. Compose imports this to grade
+   the summed tau of every layer; one constant, one reddening law. */
+export const WISP_SIGMA = /*@__PURE__*/ vec3(1.0, 1.35, 1.9);
 
 /* Continuum pass: IFN wisps at a few percent of range (the dither QA target)
    plus the two faint star grid scales. */
 export function buildContinuumNodes(skyU, pxPerUnit, U) {
   return Fn(() => {
     const zSlow = U.uTev.mul(U.uIfnMorph);
-    const ifn = fbm3o2(vec3(skyU.mul(U.uIfnFreq), zSlow).add(U.uIfnOff));
+    /* Real IFN combs one axis: squashing y in a rotated frame stretches the
+       wisps along x, which an isotropic domain can never do. */
+    const qr = rot2(skyU, U.uIfnRot).toVar();
+    const q = vec2(qr.x, qr.y.mul(U.uIfnAniso)).toVar();
+    /* One warp tap tears the fbm into sheets; unwarped it is round blobs, and
+       the reference's wisps are sheared and filamentary at every scale. */
+    const warp = fbm3o2(vec3(q.mul(U.uIfnFreq.mul(0.45)), zSlow).add(U.uIfnOff.mul(3.0)))
+      .sub(FBM2_MID).mul(U.uIfnWarp).toVar();
+    /* Four octaves for the torn-cotton scales, then a gamma rather than a
+       threshold: it crushes the low end into dark voids and keeps edges soft. */
+    const n = fbm3o4(vec3(q.mul(U.uIfnFreq).add(warp), zSlow).add(U.uIfnOff))
+      .mul(FBM4_NORM).toVar();
+    const ifn = n.max(1e-4).pow(U.uIfnGamma);
     const ifnCol = vec3(0.16, 0.14, 0.12).mul(ifn.mul(U.uIfnAmp));
 
     /* Galactic-plane gradient + fbm clumping; uniform scatter is the tell */
@@ -30,10 +47,37 @@ export function buildContinuumNodes(skyU, pxPerUnit, U) {
 
 /* Optical depth of the dark wisp layer, evaluated where compose asks */
 export function wispTau(skyW, U) {
-  const pw = vec3(skyW.x.mul(0.75), skyW.y.mul(1.5), U.uTev.mul(U.uWispMorph))
+  /* Rotate first, then stretch along the rotated x: a lane is long, sinuous,
+     and tapering, and an isotropic threshold gives round amoebas instead. */
+  const ca = cos(U.uWispAngle);
+  const sa = sin(U.uWispAngle);
+  const rx = skyW.x.mul(ca).sub(skyW.y.mul(sa));
+  const ry = skyW.y.mul(ca).add(skyW.x.mul(sa));
+  const zEvo = U.uTev.mul(U.uWispMorph);
+
+  /* Warping before the squash makes the lane snake; after it, the lane would
+     just get wider. */
+  const wp = vec3(vec2(rx, ry).mul(U.uWispFreq.mul(0.4)), zEvo.mul(0.5))
+    .add(U.uWispOff.mul(1.7));
+  const meander = fbm3o2(wp).sub(FBM2_MID).mul(U.uWispWarp);
+
+  /* No domain bias needed: even at freq 12 the fbm-scaled lattice stays inside
+     hash1's +1024 window, and a 65536 bias paints visible float32 cell seams. */
+  const pw = vec3(rx.div(U.uWispAniso), ry.add(meander), zEvo)
     .mul(vec3(U.uWispFreq, U.uWispFreq, 1.0)).add(U.uWispOff);
-  const n = fbm3o4(pw);
-  const detail = fbm3o2(pw.mul(3.1));
-  const carved = n.add(detail.sub(0.5).mul(0.45));
-  return smoothstep(U.uWispTh, U.uWispTh.add(U.uWispSoft), carved).mul(U.uWispTau);
+  const n = fbm3o4(pw).mul(FBM4_NORM);
+  const detail = fbm3o2(pw.mul(3.1)).mul(FBM2_NORM);
+  /* Remap, never multiply: a multiplied detail mask reads as painted */
+  const carved = n.add(detail.sub(0.5).mul(U.uWispDetail));
+
+  const core = smoothstep(U.uWispTh, U.uWispTh.add(U.uWispSoft), carved);
+  /* Reddening needs low-but-nonzero tau; inside an opaque silhouette nothing is
+     left to redden, so the warm band lives on this faint skirt outside the core. */
+  const skirt = smoothstep(U.uWispTh.sub(U.uWispFringe), U.uWispTh.add(U.uWispSoft), carved);
+  return U.uWispTau.mul(mix(skirt.mul(U.uWispSkirt), float(1.0), core));
+}
+
+/* Wisp-only transmittance for the opt-in break with additive-last */
+export function wispTransmittance(skyW, U) {
+  return exp(wispTau(skyW, U).negate().mul(WISP_SIGMA));
 }

@@ -62,18 +62,25 @@ export const faintStarLayer = /*@__PURE__*/ Fn(([skyU, pxPerUnit, cells, density
   return acc;
 });
 
-/* Bright tier. Instance layout: iA = sky xy, brightness, depth;
-   iB = rgb, twinkle phase; iC = alpha px, spike len px, quad half px, beta */
-export function buildBrightStarNodes(U) {
+/* Bright tier. iA = sky xy, brightness, depth; iB = rgb, twinkle phase;
+   iC = alpha px, spike len px, quad half px, beta; iD = spike angle jitter,
+   arm ratio, halo amp, halo radius. `occlude` maps a star's sky position to a
+   dust transmittance — an opt-in, deliberate break with additive-last. */
+export function buildBrightStarNodes(U, { occlude = null } = {}) {
   const iA = attribute('iA', 'vec4');
   const iB = attribute('iB', 'vec4');
   const iC = attribute('iC', 'vec4');
+  const iD = attribute('iD', 'vec4');
 
   const vLocal = varyingProperty('vec2', 'vLocal');
   const vCorner = varyingProperty('vec2', 'vCorner');
   const vColor = varyingProperty('vec3', 'vColor');
   const vMisc = varyingProperty('vec4', 'vMisc'); // L, phase, alphaPx, beta
-  const vSpike = varyingProperty('float', 'vSpike');
+  const vSpike = varyingProperty('vec4', 'vSpike'); // len px, angle, arm ratio, halo amp
+  const vHaloR = varyingProperty('float', 'vHaloR');
+  /* Only declared when the gate is on, so an unoccluded build emits the exact
+     shader it always did */
+  const vTrans = occlude ? varyingProperty('vec3', 'vTrans') : null;
 
   const positionNode = Fn(() => {
     const corner = positionLocal.xy;
@@ -81,7 +88,11 @@ export function buildBrightStarNodes(U) {
     vLocal.assign(corner.mul(iC.z));
     vColor.assign(iB.xyz);
     vMisc.assign(vec4(iA.z, iB.w, iC.x, iC.w));
-    vSpike.assign(iC.y);
+    vSpike.assign(vec4(iC.y, U.uSpikeAngle.add(iD.x.mul(U.uSpikeJitter)), iD.y, iD.z));
+    vHaloR.assign(iD.w);
+    /* Per star, not per fragment: a lane is far wider than one PSF, and the
+       vertex path costs four samples instead of a hundred thousand. */
+    if (vTrans) vTrans.assign(occlude(iA.xy));
 
     /* Instance positions are absolute sky coords; the camera subtracts here so
        a pan needs no buffer rewrite until the tile block itself moves. */
@@ -109,40 +120,48 @@ export function buildBrightStarNodes(U) {
     const a2 = alphaPx.mul(alphaPx);
     const r2 = dot(q, q);
     const core = pow(r2.div(a2).add(1.0), beta.negate());
-    /* The 8–10% wide halo term is what separates photographic from dot */
+    /* Two taps at geometric scales, not one: a single Moffat visibly terminates,
+       and the sum approximates the power-law scatter tail that reads as glow. */
     const halo = pow(r2.div(a2.mul(22.0)).add(1.0), -2.2).mul(0.1);
-    const coreI = L.mul(core.add(halo));
+    const wideGate = smoothstep(0.10, 0.42, L0);
+    const wide = pow(r2.div(a2.mul(vHaloR).mul(140.0)).add(1.0), -1.35)
+      .mul(vSpike.w).mul(0.06).mul(wideGate);
+    const coreI = L.mul(core.add(halo).add(wide));
 
-    /* Spike angle is global: it is an optic, not a star property.
-       Per-channel coordinate scale fringes the tips red. */
-    const ca = cos(U.uSpikeAngle);
-    const sa = sin(U.uSpikeAngle);
+    /* Angle, arm ratio, and beta are all per-star: one shared cross stamped on
+       every star is the tell the eye catches once a dozen are on screen. */
+    const ca = cos(vSpike.y);
+    const sa = sin(vSpike.y);
     const qr = vec2(ca.mul(q.x).sub(sa.mul(q.y)), sa.mul(q.x).add(ca.mul(q.y)));
-    const len = vSpike.mul(0.30);
+    const len = vSpike.x.mul(0.30);
+    const lenA = len.mul(vSpike.z);
+    const lenB = len.div(vSpike.z);
     const w2 = float(2.4);
 
     const spikeCh = (scale) => {
       const qc = qr.mul(scale);
-      const bar1 = exp(abs(qc.x).negate().div(len)).mul(exp(qc.y.mul(qc.y).negate().div(w2)));
-      const bar2 = exp(abs(qc.y).negate().div(len)).mul(exp(qc.x.mul(qc.x).negate().div(w2)));
+      const bar1 = exp(abs(qc.x).negate().div(lenA)).mul(exp(qc.y.mul(qc.y).negate().div(w2)));
+      const bar2 = exp(abs(qc.y).negate().div(lenB)).mul(exp(qc.x.mul(qc.x).negate().div(w2)));
       const bead = cos(abs(qc.x).add(abs(qc.y)).mul(0.22)).mul(0.22).add(0.78);
       return bar1.add(bar2).mul(bead);
     };
     const spike = vec3(spikeCh(1.0), spikeCh(1.08), spikeCh(1.15));
 
-    /* Diffraction redistributes light; only saturated cores show spikes */
-    const spikeAmp = clamp(L0.sub(U.uSpikeThreshold).mul(3.0), 0.0, 1.0);
+    /* Diffraction redistributes light; only saturated cores show spikes, and
+       the steep gate is what keeps that to the top of the flux distribution */
+    const spikeAmp = clamp(L0.sub(U.uSpikeThreshold).mul(4.5), 0.0, 1.0);
     const spikeTint = mix(vColor, vec3(0.88, 0.92, 1.0), 0.6);
     const spikeRGB = spike.mul(spikeTint).mul(spikeAmp).mul(L).mul(0.85);
 
     /* Clipped-core effect: white center, spectral color in the wings */
-    const colC = mix(vColor, vec3(1.0), smoothstep(0.35, 0.9, coreI));
+    const colC = mix(vColor, vec3(1.0), smoothstep(0.16, 0.62, coreI));
 
     /* Soft window, no Discard: discard defeats tile-GPU optimization.
        Edges ascend; reversed smoothstep edges are undefined per spec. */
     const edge = float(1).sub(smoothstep(0.86, 1.0, max(abs(vCorner.x), abs(vCorner.y))));
 
-    return vec4(colC.mul(coreI).add(spikeRGB).mul(edge).mul(U.uStarGain), 1.0);
+    const lit = colC.mul(coreI).add(spikeRGB).mul(edge).mul(U.uStarGain);
+    return vec4(vTrans ? lit.mul(vTrans) : lit, 1.0);
   })();
 
   return { positionNode, fragmentNode };

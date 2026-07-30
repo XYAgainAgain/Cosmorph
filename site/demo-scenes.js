@@ -43,9 +43,9 @@ const SCENES = {
       seed: deriveSeed(seed, 2),
       depth: 0.3,
       lock: false,
-      params: { gain: 1.0, covLo: 0.3, covHi: 0.5, oiii: 0.45 },
+      params: { covLo: 0.3, covHi: 0.5 },
     },
-    { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 1.2 } },
+    { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: {} },
     {
       type: 'globules',
       seed: deriveSeed(seed, 5),
@@ -60,7 +60,7 @@ const SCENES = {
     const r = jitter(seed, 8);
     return base(seed, [
       { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
-      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 1.0 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: {} },
       {
         type: 'reflection',
         seed: deriveSeed(seed, 6),
@@ -177,7 +177,7 @@ const SCENES = {
     const r = jitter(seed, 23);
     return base(seed, [
       { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
-      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.6 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: {} },
       {
         type: 'planetary',
         seed: deriveSeed(seed, 33),
@@ -197,7 +197,7 @@ const SCENES = {
     const r = jitter(seed, 24);
     return base(seed, [
       { type: 'emission', seed: deriveSeed(seed, 2), depth: 0.3, lock: false, params: { gain: 0 } },
-      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: { tau: 0.6 } },
+      { type: 'darkDust', seed: deriveSeed(seed, 4), depth: 0.55, lock: false, params: {} },
       {
         type: 'jets',
         seed: deriveSeed(seed, 34),
@@ -284,6 +284,9 @@ const SCENES = {
           center,
           scale: frameScale(aspect, center, 0.07, 1.9) + r.next() * 0.3,
           rot: (r.next() - 0.5) * 0.5,
+          /* Pinned: test-blob's suggested tau (13.6) saturates the blob into
+             the black-sticker look this demo disproves. */
+          tau: 3.4,
         },
       },
     ]);

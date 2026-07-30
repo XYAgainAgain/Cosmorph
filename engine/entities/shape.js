@@ -9,6 +9,12 @@ const TEXEL_BYTES = 8; // four float16 channels
    '/assets/...' misses under file:// and on any non-root host. */
 const ASSET_ROOT = new URL('../../', import.meta.url);
 
+/* Pre-densityMode bakes never wrote the key, and there the two always agreed */
+function densityMode(meta) {
+  if (meta.densityMode === 'emission' || meta.densityMode === 'extinction') return meta.densityMode;
+  return meta.polarity === 'bright' ? 'emission' : 'extinction';
+}
+
 /* Format v2, all in frame UV: R = signed distance / spread, G = normalized column
    density, B duplicates R (reserved morph target), A = 0. */
 export async function loadShapeAsset(src) {
@@ -67,6 +73,9 @@ export async function loadShapeAsset(src) {
     suggestedTau: Number.isFinite(st) && st > 0 ? st : 0,
     name: meta.name ?? 'shape',
     polarity: meta.polarity === 'bright' ? 'bright' : 'dark',
+    /* What the G channel measured, which is not the silhouette's polarity: a dark
+       crag can carry an emission column (opaque core, glowing skin). */
+    densityMode: densityMode(meta),
     maxInscribedRadius: Number(meta.maxInscribedRadius) || 0,
     credit: meta.credit ?? null,
     /* The attribution the license actually requires, alongside the statement of

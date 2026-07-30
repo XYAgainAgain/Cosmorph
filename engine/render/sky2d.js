@@ -8,7 +8,7 @@ import { createRng, deriveSeed } from '../core/rng.js';
 import { generateBrightStars } from '../entities/stars.js';
 import { buildBrightStarNodes } from '../shaders/tsl/stars.js';
 import { buildEmissionNodes } from '../shaders/tsl/nebula.js';
-import { buildContinuumNodes } from '../shaders/tsl/dust.js';
+import { buildContinuumNodes, wispTransmittance } from '../shaders/tsl/dust.js';
 import { buildReflectionNodes, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
 import { buildFilamentNodes, FILAMENT_DEFAULTS } from '../shaders/tsl/filaments.js';
 import { buildEchoNodes, ECHO_DEFAULTS } from '../shaders/tsl/echo.js';
@@ -36,23 +36,33 @@ export const PALETTES = {
 const DEFAULTS = {
   emission: {
     freq: 1.35, warp: 1.3, mottle: 1.3,
-    stria: 0.35, striaFreq: 9.0, striaAniso: 30.0,
-    ionSrc: [1.05, 0.8], ionRadius: 0.75, hotLo: 0.55, hotHi: 0.9,
-    oiii: 0.55, sii: 0.12, morphRate: 0.35,
-    covLo: 0.3, covHi: 0.48, contrast: 1.2, gain: 1.2,
+    stria: 0.22, striaFreq: 34.0, striaAniso: 30.0, striaAngle: 0.6,
+    ionSrc: [0.74, 0.66], ionRadius: 0.62, hotLo: 0.66, hotHi: 0.98,
+    frontAt: 0.3, frontWidth: 0.012, frontGain: 1.1, frontWobble: 5.0, frontOiii: 0.35,
+    limb: 8.0, limbK: 1.6,
+    oiii: 0.9, sii: 0.12, hotHaCut: 0.45, morphRate: 0.35,
+    covLo: 0.3, covHi: 0.48, covIon: 0.35, contrast: 1.2, gain: 0.42,
   },
-  ifn: { freq: 1.3, amp: 0.16, morphRate: 0.08 },
+  ifn: {
+    freq: 5.0, amp: 0.62, aniso: 2.0, rot: 0.7, gamma: 1.9, warp: 2.4,
+    morphRate: 0.08,
+  },
   stars: {
     density: 0.75, bandY: 0.32, bandTilt: -0.28, bandGain: 0.45, bandWidth: 0.55,
     count: 84, twinkleDepth: 0.3, twinkleRate: 1800, spikeAngle: 0.35,
-    spikeThreshold: 0.5, gain: 1.0,
+    spikeJitter: 0.6, spikeThreshold: 0.82, gain: 1.0,
   },
-  darkDust: { freq: 3.2, threshold: 0.55, softness: 0.12, tau: 2.8, morphRate: 0.18 },
+  darkDust: {
+    freq: 4.6, angle: 0.62, aniso: 6.0, warp: 0.3, detail: 0.45,
+    threshold: 0.62, softness: 0.22, fringe: 0.16, skirt: 0.3,
+    tau: 3.6, morphRate: 0.18, occlude: false,
+  },
   globules: {
-    freq: 3.2, radius: 0.34, fill: 0.6, core: 0.45, elong: 2.4, taper: 0.9,
+    freq: 2.0, radius: 0.3, fill: 0.62, core: 0.24, elong: 3.4, taper: 0.45,
+    prof: 1.3, cluster: 0.55, clustFreq: 0.34, tailOp: 0.7,
     cometary: true, detail: 2.4, morphRate: 0.1,
     eroFreq: 5.0, eroFall: 0.6, erode: 0.3,
-    threshold: 0.28, softness: 0.1, tau: 3.2,
+    threshold: 0.16, softness: 0.42, tau: 3.2,
     ionSrc: [1.05, 0.2], ionRadius: 0.9, hotLo: 0.5, hotHi: 0.85,
     rimEps: 0.006, rimFacing: 6.0, rimAt: 0.35, rimW: 0.22, rimHalo: 0.25,
     rimKnotFreq: 12.0, rimKnot: 0.6, rimGain: 1.2, rimOiii: 0.5, rimSii: 0.15,
@@ -62,7 +72,6 @@ const DEFAULTS = {
   reflection: {
     ...REFLECTION_DEFAULTS,
     radius: [0.14, 0.17, 0.22], falloff: [2.6, 2.3, 1.9],
-    filFreq: 14.0, filAniso: 2.5, filAmp: 0.35,
   },
   filaments: { ...FILAMENT_DEFAULTS },
   echo: { ...ECHO_DEFAULTS },
@@ -80,24 +89,26 @@ const DEFAULTS = {
    at exactly the generation span, so a mismatch would show a seam under pan. */
 const BRIGHT_OVERSCAN = 0.06;
 
-/* WebGPU aligns every readback row to 256 bytes, so any width whose stride
-   misses that alignment comes back padded and has to be repacked. WebGL2
-   returns tight rows and falls through. */
-function repackRows(raw, width, height) {
+/* Normalizes a readback to tight, top-down rows, which is what ImageData and
+   every encoder expect. WebGPU pads each row to 256 bytes; WebGL2 hands back
+   tight rows bottom-up, so an unflipped capture saves upside down. */
+function normalizeRows(raw, width, height, flipY) {
   const tight = width * 4;
-  if (raw.byteLength === tight * height) {
+  const padded = raw.byteLength !== tight * height;
+  if (!padded && !flipY) {
     return new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.byteLength);
   }
   /* The trailing row carries no padding, so the buffer is one stride short of
      stride × height and the length alone cannot tell you the stride. */
-  const stride = Math.ceil(tight / 256) * 256;
-  if (raw.byteLength < (height - 1) * stride + tight) {
+  const stride = padded ? Math.ceil(tight / 256) * 256 : tight;
+  if (padded && raw.byteLength < (height - 1) * stride + tight) {
     throw new Error(`readback returned ${raw.byteLength} bytes for ${width}×${height}.`);
   }
   const src = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
   const out = new Uint8ClampedArray(tight * height);
   for (let y = 0; y < height; y++) {
-    out.set(src.subarray(y * stride, y * stride + tight), y * tight);
+    const row = flipY ? height - 1 - y : y;
+    out.set(src.subarray(row * stride, row * stride + tight), y * tight);
   }
   return out;
 }
@@ -117,6 +128,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   renderer.toneMapping = THREE.NoToneMapping;
   renderer.setClearColor(0x000000, 1);
   await renderer.init();
+  const isWebGPU = renderer.backend?.isWebGPUBackend === true;
 
   /* Base layers write fixed shader slots, so they stay one-per-type. Feature
      entities may repeat: each instance gets its own uniform bag, and its nodes
@@ -145,7 +157,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const shapeAssets = new Map();
   /* Instance index captured before the drop: it feeds instanceSeed, so closing
      the gap left by a failed asset would re-roll every survivor's noise. */
-  let shapeIdx = featureEnts.shape.map((e, k) => k);
+  let shapeIdx = featureEnts.shape.map((_, k) => k);
   if (featureEnts.shape.length > 0) {
     const urls = [...new Set(featureEnts.shape.map(shapeUrl))];
     const loaded = await Promise.all(urls.map((u) => loadShapeAsset(u).catch((err) => {
@@ -215,21 +227,38 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uStria: uniform(P.emission.stria),
     uStriaFreq: uniform(striaFx),
     uStriaFreqY: uniform(striaFy),
+    uStriaAngle: uniform(P.emission.striaAngle),
     uIonSrc: uniform(new THREE.Vector2(0, 0)),
     uIonR2: uniform(Math.max(P.emission.ionRadius ** 2, 1e-4)),
     uHotLo: uniform(P.emission.hotLo),
     uHotHi: uniform(Math.max(P.emission.hotHi, P.emission.hotLo + 0.001)),
+    uFrontAt: uniform(P.emission.frontAt),
+    /* This is the front's half-width and the ridge's Gaussian sigma at once;
+       at zero the smoothstep collapses and the exp divides by zero. */
+    uFrontW: uniform(Math.max(P.emission.frontWidth, 1e-3)),
+    uFrontGain: uniform(Math.max(P.emission.frontGain, 0)),
+    uFrontWob: uniform(P.emission.frontWobble),
+    uFrontOiii: uniform(Math.max(P.emission.frontOiii, 0)),
+    uLimb: uniform(Math.max(P.emission.limb, 0)),
+    uLimbK: uniform(Math.max(P.emission.limbK, 0.01)),
     uOiii: uniform(P.emission.oiii),
+    uHotHaCut: uniform(clamp01(P.emission.hotHaCut)),
     uSii: uniform(P.emission.sii),
     uMorphRate: uniform(P.emission.morphRate),
     uCovLo: uniform(P.emission.covLo),
     uCovHi: uniform(Math.max(P.emission.covHi, P.emission.covLo + 0.001)),
+    uCovIon: uniform(P.emission.covIon),
     uNebContrast: uniform(P.emission.contrast),
     uNebGain: uniform(P.emission.gain),
     uNebOff: uniform(offsetFrom(byType.emission?.seed ?? config.seed, 11)),
 
     uIfnFreq: uniform(P.ifn.freq),
     uIfnAmp: uniform(P.ifn.amp),
+    /* At 1 the domain is isotropic again, so the combing has an honest off */
+    uIfnAniso: uniform(Math.max(P.ifn.aniso, 1)),
+    uIfnRot: uniform(P.ifn.rot),
+    uIfnGamma: uniform(Math.max(P.ifn.gamma, 0.05)),
+    uIfnWarp: uniform(Math.max(P.ifn.warp, 0)),
     uIfnMorph: uniform(P.ifn.morphRate),
     uIfnOff: uniform(offsetFrom(byType.ifn?.seed ?? config.seed, 23)),
 
@@ -244,11 +273,20 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uTwinkleDepth: uniform(P.stars.twinkleDepth),
     uTwinklePhase: uniform(0),
     uSpikeAngle: uniform(P.stars.spikeAngle),
+    uSpikeJitter: uniform(P.stars.spikeJitter),
     uSpikeThreshold: uniform(P.stars.spikeThreshold),
     uStarGain: uniform(P.stars.gain),
     uWispFreq: uniform(P.darkDust.freq),
+    uWispAngle: uniform(P.darkDust.angle),
+    /* Below 1 the lane axis flips from x to y mid-slider; the stretch is
+       one-directional by construction. */
+    uWispAniso: uniform(Math.max(P.darkDust.aniso, 1)),
+    uWispWarp: uniform(P.darkDust.warp),
+    uWispDetail: uniform(P.darkDust.detail),
     uWispTh: uniform(P.darkDust.threshold),
     uWispSoft: uniform(Math.max(P.darkDust.softness, 0.001)),
+    uWispFringe: uniform(Math.max(P.darkDust.fringe, 0)),
+    uWispSkirt: uniform(clamp01(P.darkDust.skirt)),
     uWispTau: uniform(P.darkDust.tau),
     uWispMorph: uniform(P.darkDust.morphRate),
     uWispOff: uniform(offsetFrom(byType.darkDust?.seed ?? config.seed, 43)),
@@ -279,6 +317,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uLensHaloStr: uniform(Math.max(L.haloStrength, 0)),
     uLensHaloSpread: uniform(Math.max(L.haloSpread, 0)),
     uLensMag: uniform(clamp01(L.magBoost)),
+    uLensSmear: uniform(clamp01(L.smear)),
+    uLensRingGain: uniform(Math.max(L.ringGain, 0)),
+    /* Zero width collapses the ring band's smoothstep onto equal edges */
+    uLensRingW: uniform(Math.max(L.ringWidth, 1e-4)),
+    uLensChroma: uniform(clamp01(L.chroma)),
     uLensH0: uniform(lensHaloAt[0]),
     uLensH1: uniform(lensHaloAt[1]),
     uLensH2: uniform(lensHaloAt[2]),
@@ -307,9 +350,15 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uGlobRadius: uniform(Math.min(g.radius, 0.6)),
       uGlobFill: uniform(g.fill),
       uGlobCore: uniform(g.core),
-      /* radius × elong above 1 pushes the tail outside the 3×3 cell search and
-         truncates it; per-clump jitter reaches 1.45× radius, hence the factor */
-      uGlobElong: uniform(Math.min(g.elong, 1 / Math.max(g.radius * 1.45, 1e-3))),
+      uGlobProf: uniform(Math.max(g.prof, 0.05)),
+      uGlobCluster: uniform(clamp01(g.cluster)),
+      uGlobClustFreq: uniform(Math.max(g.clustFreq, 1e-3)),
+      uGlobTailOp: uniform(clamp01(g.tailOp)),
+      /* radius × elong past ~1.5 cells pushes the tail outside the 3×3 search and
+         truncates it; jitter reaches 1.45× radius and clustering another 1+cluster */
+      uGlobElong: uniform(Math.min(
+        g.elong, 1.5 / Math.max(g.radius * 1.45 * (1 + clamp01(g.cluster)), 1e-3),
+      )),
       uGlobTaper: uniform(g.taper),
       uGlobDetail: uniform(g.detail),
       uGlobMorph: uniform(g.morphRate),
@@ -351,14 +400,26 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uReflWarm: uniform(new THREE.Vector3(...r.warm)),
       uReflWarmR: uniform(Math.max(r.warmR, 0.001)),
       uReflWarmAmt: uniform(r.warmAmt),
+      uReflAmbient: uniform(Math.max(r.ambient, 0)),
       uReflFreq: uniform(r.freq),
       uReflMorph: uniform(r.morph),
       uReflDustLo: uniform(r.dustLo),
       uReflDustHi: uniform(Math.max(r.dustHi, r.dustLo + 0.001)),
       uReflCarve: uniform(r.carve),
       uReflFloor: uniform(r.floor),
+      uReflAsym: uniform(Math.min(Math.max(r.asym, 0), 1)),
+      uReflAsymFreq: uniform(r.asymFreq),
+      uReflAsymAngle: uniform(r.asymAngle),
+      uReflAsymBite: uniform(Math.max(r.asymBite, 0)),
+      uReflLane: uniform(Math.max(r.lane, 0)),
+      uReflLaneFreq: uniform(r.laneFreq),
+      uReflLaneAngle: uniform(r.laneAngle),
+      uReflLaneTh: uniform(Math.min(r.laneTh, 0.999)),
+      uReflLaneSharp: uniform(Math.max(r.laneSharp, 0)),
+      uReflStriae: uniform(Math.max(r.striae, 0)),
       uReflFilFreq: uniform(r.filFreq),
-      uReflFilAniso: uniform(r.filAniso),
+      uReflFilAniso: uniform(Math.max(r.filAniso, 1e-3)),
+      uReflFilAngle: uniform(r.filAngle),
       uReflFilIn: uniform(Math.max(r.filIn, 0.001)),
       uReflFilOut: uniform(Math.max(r.filOut, Math.max(r.filIn, 0.001) + 0.001)),
       uReflFilSharp: uniform(Math.max(r.filSharp, 0)),
@@ -392,10 +453,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uFilBraid: uniform(Math.min(Math.max(f.braid, 0), 1)),
       uFilTh: uniform(f.threshold),
       uFilSoft: uniform(Math.max(f.softness, 0.001)),
+      uFilFray: uniform(Math.max(f.fray, 0)),
+      uFilFrayF: uniform(Math.max(f.frayF, 0.01)),
       uFilPatch: uniform(Math.min(Math.max(f.patch, 0), 1)),
       uFilHaze: uniform(Math.max(f.haze, 0)),
       uFilHazeW: uniform(Math.max(f.hazeW, 1)),
       uFilLace: uniform(f.lace),
+      uFilLaceF: uniform(Math.max(f.laceF, 0.01)),
       uFilGain: uniform(f.gain),
       uFilHa: uniform(f.ha),
       uFilOiii: uniform(f.oiii),
@@ -431,6 +495,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uEchoFadeOut: uniform(c.fadeOut),
       uEchoShellR: uniform(Math.max(c.shellR, 0)),
       uEchoShellW: uniform(c.shellW),
+      uEchoShell2: uniform(clamp01(c.shell2)),
+      uEchoShell2Off: uniform(Math.max(c.shell2Off, 0)),
       /* Relative to the source, so aspect-scaling it would shear the ring
          asymmetry as the canvas widens */
       uEchoDustXY: uniform(new THREE.Vector2(...c.dustXY)),
@@ -441,6 +507,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uEchoFreq: uniform(c.freq),
       uEchoZSquash: uniform(c.zSquash),
       uEchoCarve: uniform(c.carve),
+      uEchoFil: uniform(Math.max(c.fil, 0)),
+      uEchoFilFreq: uniform(Math.max(c.filFreq, 0.1)),
+      uEchoFilSharp: uniform(Math.max(c.filSharp, 0)),
       uEchoTh: uniform(c.th),
       uEchoSoft: uniform(c.soft),
       uEchoRefR: uniform(c.refR),
@@ -448,7 +517,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uEchoAttenMax: uniform(c.attenMax),
       uEchoSlab: uniform(clamp01(c.slab)),
       uEchoSlabMax: uniform(c.slabMax),
+      uEchoSweep: uniform(clamp01(c.sweep)),
+      uEchoSweepW: uniform(Math.max(c.sweepW, 1e-3)),
       uEchoLum: uniform(Math.max(c.lum, 0)),
+      uEchoStarLum: uniform(Math.max(c.starLum, 0)),
+      uEchoStarR: uniform(Math.max(c.starR, 1e-4)),
+      uEchoStarHalo: uniform(Math.max(c.starHalo, 0)),
+      uEchoStarCol: uniform(new THREE.Vector3(...c.starCol)),
       uEchoCool: uniform(new THREE.Vector3(...c.cool)),
       uEchoWarm: uniform(new THREE.Vector3(...c.warm)),
       uEchoRose: uniform(new THREE.Vector3(...c.rose)),
@@ -478,12 +553,23 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uFanFade: uniform(f.fade),
       uFanLitR: uniform(f.litR),
       uFanFalloff: uniform(f.falloff),
+      uFanCurl: uniform(f.curl),
+      uFanBulge: uniform(Math.max(f.bulge, 0)),
+      uFanWobble: uniform(Math.max(f.wobble, 0)),
+      uFanWobFreq: uniform(Math.max(f.wobFreq, 0.1)),
       uFanLum: uniform(Math.max(f.lum, 0)),
       uFanTint: uniform(new THREE.Vector3(...f.tint)),
       uFanWarm: uniform(new THREE.Vector3(...f.warm)),
       uFanWarmR: uniform(f.warmR),
       uFanWarmAmt: uniform(f.warmAmt),
       uFanLimb: uniform(f.limb),
+      uFanLobe: uniform(Math.max(f.lobe, 0)),
+      uFanLobeAt: uniform(Math.max(f.lobeAt, 0)),
+      uFanLobeW: uniform(Math.max(f.lobeW, 1e-3)),
+      uFanStarLum: uniform(Math.max(f.starLum, 0)),
+      uFanStarR: uniform(Math.max(f.starR, 1e-4)),
+      uFanStarHalo: uniform(Math.max(f.starHalo, 0)),
+      uFanStarCol: uniform(new THREE.Vector3(...f.starCol)),
       uFanFreq: uniform(f.freq),
       uFanAniso: uniform(f.aniso),
       uFanTh: uniform(f.threshold),
@@ -500,6 +586,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uFanPenGrow: uniform(f.penGrow),
       uFanSpread: uniform(f.spread),
       uFanRot: uniform(f.rotRate),
+      uFanBandCurl: uniform(f.bandCurl),
+      uFanBandWob: uniform(f.bandWob),
+      uFanBandWobFreq: uniform(f.bandWobFreq),
       uFanTau: uniform(f.tau),
       uFanOff: uniform(offsetFrom(instanceSeed(e, 89, k), 89)),
       uDepthFan: uniform(e.depth ?? 0.42),
@@ -575,6 +664,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uPnAspect: uniform(p.aspect),
       uPnWaist: uniform(Math.min(Math.max(p.waist, 0), 0.95)),
       uPnPinch: uniform(p.pinch),
+      uPnFlare: uniform(Math.max(p.flare, 0)),
+      uPnTip: uniform(Math.max(p.tip, 0.05)),
+      /* A multiplier on the tip radius, so it must clear 1 or the fade inverts */
+      uPnTipW: uniform(Math.max(p.tipW, 1.01)),
+      uPnCavity: uniform(Math.max(p.cavity, 0)),
       uPnRadius: uniform(p.radius),
       uPnExpand: uniform(p.expand),
       uPnThick: uniform(p.thick),
@@ -588,6 +682,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uPnRingFreq: uniform(p.ringFreq),
       uPnRingPhase: uniform(p.ringPhase),
       uPnRingFade: uniform(p.ringFade),
+      uPnRingSharp: uniform(Math.max(p.ringSharp, 0)),
+      uPnRingR: uniform(Math.max(p.ringR, 1)),
       uPnStriaFreq: uniform(p.striaFreq),
       uPnStriaAniso: uniform(p.striaAniso),
       uPnStriaSharp: uniform(p.striaSharp),
@@ -643,9 +739,19 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uJetTexAniso: uniform(j.texAniso),
       uJetTh: uniform(j.threshold),
       uJetSoft: uniform(j.softness),
+      uJetTexAmt: uniform(clamp01(j.texAmt)),
       uJetBeamGain: uniform(Math.max(j.beamGain, 0)),
+      uJetBeamOiii: uniform(Math.max(j.beamOiii, 0)),
       uJetBeamSii: uniform(Math.max(j.beamSii, 0)),
+      uJetStarLum: uniform(Math.max(j.starLum, 0)),
+      uJetStarR: uniform(Math.max(j.starR, 1e-4)),
+      uJetStarHalo: uniform(Math.max(j.starHalo, 0)),
+      uJetStarCol: uniform(new THREE.Vector3(...j.starCol)),
       uJetShockFreq: uniform(j.shockFreq),
+      uJetStreak: uniform(clamp01(j.streak)),
+      uJetStreakFreq: uniform(j.streakFreq),
+      uJetStreakAniso: uniform(Math.max(j.streakAniso, 1e-3)),
+      uJetStreakSharp: uniform(Math.max(j.streakSharp, 0)),
       uJetBowStand: uniform(j.bowStand),
       uJetBowCurv: uniform(j.bowCurv),
       uJetBowThick: uniform(j.bowThick),
@@ -697,6 +803,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uWrbSoft: uniform(w.softness),
       uWrbPatch: uniform(clamp01(w.patch)),
       uWrbBleed: uniform(Math.max(w.bleed, 0)),
+      uWrbShell: uniform(Math.max(w.shell, 0)),
+      uWrbGrain: uniform(clamp01(w.grain)),
       uWrbGain: uniform(Math.max(w.gain, 0)),
       uWrbHa: uniform(Math.max(w.ha, 0)),
       uWrbOiii: uniform(Math.max(w.oiii, 0)),
@@ -892,12 +1000,15 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     const asset = shapeAssets.get(shapeUrl(e));
     /* Polarity is the asset's own call, so it seeds the gains before the
        entity's params get the final word. */
-    const pol = asset.polarity === 'bright' ? { tau: 0.4, glow: 0.9, rimGain: 0.5 } : {};
-    /* The baker's render suggestion seeds the default (its honest measured scale
-       reads ghost-thin); polarity and the entity's params still get the last word. */
+    const pol = asset.polarity === 'bright' ? { tau: 0.4, rimGain: 0.5 } : {};
+    /* Glow follows what the column measured, not the silhouette: an emission bake
+       lights its body even when the traced shape is the dark one. */
+    const lit = asset.densityMode === 'emission' ? { glow: 0.9 } : {};
+    /* The baker's suggestion is 4× its honest measured scale, which alone reads
+       ghost-thin, so a bake predating the suggestion needs the same factor. */
     const ds = asset.suggestedTau > 0 ? { tau: asset.suggestedTau }
-      : asset.densityScale > 0 ? { tau: asset.densityScale } : {};
-    const s = { ...DEFAULTS.shape, ...ds, ...pol, ...e.params };
+      : asset.densityScale > 0 ? { tau: asset.densityScale * 4 } : {};
+    const s = { ...DEFAULTS.shape, ...ds, ...lit, ...pol, ...e.params };
     const bag = makeBag(k, {
       uShpCenter: uniform(new THREE.Vector2(0, 0)),
       uShpScale: uniform(Math.max(s.scale, 1e-3)),
@@ -1048,6 +1159,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   for (const bag of echoInst) {
     contNode = contNode.add(vec4(buildEchoNodes(skyAtDepth(bag.uDepthEcho, U.uDepthCont), bag, bag.echoOpts).continuum, 0.0));
   }
+  /* Only the source star: the shocks themselves are line species */
+  for (const bag of jetInst) {
+    contNode = contNode.add(vec4(buildJetNodes(skyAtDepth(bag.uDepthJet, U.uDepthCont), bag, bag.jetOpts).continuum, 0.0));
+  }
   for (const bag of fanInst) {
     contNode = contNode.add(vec4(buildShadowFanNodes(skyAtDepth(bag.uDepthFan, U.uDepthCont), bag, bag.fanOpts).continuum, 0.0));
   }
@@ -1082,7 +1197,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   /* Bright tier: instanced quads, rebuilt on resize because sizes are in
      device pixels and positions span the current aspect */
   const brightScene = new THREE.Scene();
-  const brightNodes = buildBrightStarNodes(U);
+  /* Doctrine says the star tier composites additively last, over everything.
+     This gate is the sanctioned exception: it lets the wisp layer punch a
+     Barnard 68 hole in the field, and it is off unless the user asks. */
+  const starOcclude = P.darkDust.occlude === true
+    ? (skyAt) => wispTransmittance(skyAt, U)
+    : null;
+  const brightNodes = buildBrightStarNodes(U, { occlude: starOcclude });
   const brightMat = new THREE.MeshBasicNodeMaterial();
   brightMat.positionNode = brightNodes.positionNode;
   brightMat.fragmentNode = brightNodes.fragmentNode;
@@ -1131,6 +1252,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     const iA = new Float32Array(total * 4);
     const iB = new Float32Array(total * 4);
     const iC = new Float32Array(total * 4);
+    const iD = new Float32Array(total * 4);
 
     let n = 0;
     for (const [i, j] of tiles) {
@@ -1150,6 +1272,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
         iC[d + 1] = data.iC[s + 1] * pixelRatio;
         iC[d + 2] = data.iC[s + 2] * pixelRatio;
         iC[d + 3] = data.iC[s + 3];
+        /* Unitless PSF jitter, so unlike iC it never scales with the DPR */
+        iD[d] = data.iD[s];
+        iD[d + 1] = data.iD[s + 1];
+        iD[d + 2] = data.iD[s + 2];
+        iD[d + 3] = data.iD[s + 3];
       }
       n += per;
     }
@@ -1162,6 +1289,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     geo.setAttribute('iA', new THREE.InstancedBufferAttribute(iA, 4));
     geo.setAttribute('iB', new THREE.InstancedBufferAttribute(iB, 4));
     geo.setAttribute('iC', new THREE.InstancedBufferAttribute(iC, 4));
+    geo.setAttribute('iD', new THREE.InstancedBufferAttribute(iD, 4));
     geo.instanceCount = total;
     return geo;
   }
@@ -1206,7 +1334,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     U.uResolution.value.set(w, h);
     U.uAspect.value = aspect;
     U.uMarginScale.value.set(1 + (2 * margin) / w, 1 + (2 * margin) / h);
-    U.uPxPerUnit.value = h / U.uMarginScale.value.y;
+    U.uPxPerUnit.value = Math.max(h, 1) / U.uMarginScale.value.y;
     U.uIonSrc.value.set(P.emission.ionSrc[0] * aspect, P.emission.ionSrc[1]);
     /* Sky x spans [0, aspect], so framed positions scale or they slide toward
        the left edge as the canvas widens */
@@ -1252,7 +1380,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       onResize?.();
       renderTo(rt, tev, 0, 0);
       const pixels = await renderer.readRenderTargetPixelsAsync(rt, 0, 0, width, height);
-      return repackRows(pixels, width, height);
+      return normalizeRows(pixels, width, height, !isWebGPU);
     } finally {
       rt.dispose();
       resize(prev.w, prev.h, prev.r);
@@ -1270,7 +1398,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     renderer.dispose();
   }
 
-  const backend = renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2';
+  const backend = isWebGPU ? 'webgpu' : 'webgl2';
   /* `uniforms` is the editor hook: Firmament pokes values live instead of
      rebuilding the graph for every slider drag. resize() re-seats the framed
      positions from the build-time params, so a live editor re-applies after it. */

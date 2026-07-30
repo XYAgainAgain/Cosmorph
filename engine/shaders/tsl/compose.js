@@ -6,7 +6,7 @@ import {
   Fn, float, vec2, vec3, vec4, texture, uv, exp, mix, min, max,
 } from 'three/tsl';
 import { ign, asinh3 } from './noise.js';
-import { wispTau } from './dust.js';
+import { wispTau, WISP_SIGMA } from './dust.js';
 import { globuleTauAndRim } from './globules.js';
 import { reflectionTau } from './reflection.js';
 import { echoTau } from './echo.js';
@@ -15,9 +15,9 @@ import { searchlightTau } from './searchlight.js';
 import { shapeTauAndRim } from './shape.js';
 import { lensWarp } from './lensing.js';
 
-/* Interstellar reddening: blue is extinguished ~1.9× harder than red. That
+/* Interstellar reddening lives in dust.js (one constant, one law). That
    reflection self-extinguishes under its own summed tau is deliberate. */
-const SIGMA = vec3(1.0, 1.35, 1.9);
+const SIGMA = WISP_SIGMA;
 
 export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {}, lens = null }) {
   return Fn(() => {
@@ -38,9 +38,36 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
        keeps its own untouched RT because foreground stars are not lensed, and
        that asymmetry — spikes straight, background smeared — is the whole read. */
     const warp = lens ? lensWarp(screen, U, lens) : null;
-    const lineRaw = texture(lineTex, sampleAt(U.uDepthLine, warp?.at)).rgb;
-    const contRaw = texture(contTex, sampleAt(U.uDepthCont, warp?.at)).rgb;
-    const line = warp ? lineRaw.mul(warp.gain) : lineRaw;
+
+    /* Tangential 3-tap, weights 2:1:1. A lens magnifies along the arc, so
+       averaging that way is the blur that removes a thin arc's hatching. */
+    const off = warp ? warp.tang.mul(warp.smear).toVar() : null;
+    const smear3 = (tex, depth) => {
+      return texture(tex, sampleAt(depth, warp.at)).rgb.mul(2.0)
+        .add(texture(tex, sampleAt(depth, warp.at.add(off).clamp(0.0, 1.0))).rgb)
+        .add(texture(tex, sampleAt(depth, warp.at.sub(off).clamp(0.0, 1.0))).rgb)
+        .mul(0.25);
+    };
+
+    const lineRaw = warp
+      ? smear3(lineTex, U.uDepthLine)
+      : texture(lineTex, sampleAt(U.uDepthLine)).rgb;
+    let contRaw = warp
+      ? smear3(contTex, U.uDepthCont)
+      : texture(contTex, sampleAt(U.uDepthCont)).rgb;
+
+    /* Dispersion is continuum-only: the line RT's channels are Hα/OIII/SII, where
+       an R-out/B-in split would throw two adjacent red lines opposite ways. */
+    if (warp) {
+      const disp = contRaw.toVar();
+      const rOut = texture(contTex, sampleAt(U.uDepthCont, warp.at.add(warp.disp).clamp(0.0, 1.0))).r;
+      const bIn = texture(contTex, sampleAt(U.uDepthCont, warp.at.sub(warp.disp).clamp(0.0, 1.0))).b;
+      disp.r.assign(mix(disp.r, rOut, warp.chroma));
+      disp.b.assign(mix(disp.b, bIn, warp.chroma));
+      contRaw = disp;
+    }
+
+    const line = warp ? lineRaw.mul(warp.gain).add(warp.ring) : lineRaw;
     const cont = warp ? contRaw.mul(warp.gain) : contRaw;
     const bright = texture(brightTex, screen).rgb;
 

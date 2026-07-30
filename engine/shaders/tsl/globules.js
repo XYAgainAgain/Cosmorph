@@ -9,6 +9,9 @@ import {
 import { hash1, hash3, fbm3o2, fbm3o4, CELL_BIAS } from './noise.js';
 import { remapCombine, sdfSlope } from './sdf.js';
 
+/* Independent slice of the noise domain for the clustering lattice */
+const CLUST_DOMAIN = /*@__PURE__*/ vec3(29.0, 61.0, 13.0);
+
 /* Worley F1 in cell units over a 3x3 neighborhood. Seeded by integer cell
    offsets, never a fractional domain shift, so the lattice stays aligned. */
 export const worleyF1 = /*@__PURE__*/ Fn(([p, off]) => {
@@ -42,52 +45,65 @@ const dirTo = /*@__PURE__*/ Fn(([from, to]) => {
   return d.div(dot(d, d).max(1e-8).sqrt());
 });
 
-/* One clump: xy = offset from the jittered center in cell units, z = jittered
-   radius, w = 1 when the cell is occupied. hash1 costs a third of a pcg3d. */
-const clumpCell = /*@__PURE__*/ Fn(([f, g, cell, off, radius, fill]) => {
-  const c = cell.add(g).add(off.xy).toVar();
-  const h = hash3(vec3(c, off.z).add(CELL_BIAS));
-  const rj = hash1(vec3(c, off.z.add(97.0)).add(CELL_BIAS));
-  const rr = radius.mul(mix(0.55, 1.45, rj)).max(1e-3);
-  return vec4(f.sub(g).sub(h.xy), rr, step(h.z, fill));
-});
+/* One clump: xy = offset from the jittered center, z = radius, w = occupancy.
+   All of it keys off the integer cell, so nothing can pop mid-blob. */
+function clumpCell(f, g, cell, U) {
+  const c = cell.add(g).add(U.uGlobOff.xy).toVar();
+  const h = hash3(vec3(c, U.uGlobOff.z).add(CELL_BIAS)).toVar();
+  const rj = hash1(vec3(c, U.uGlobOff.z.add(97.0)).add(CELL_BIAS)).toVar();
+
+  /* One coarse-lattice hash drives both occupancy and size, so clumps knot up
+     with empty sky between. Seed added after the scale, or the slider pans. */
+  const cl = hash1(floor(vec3(cell.add(g), 0.0).mul(U.uGlobClustFreq))
+    .add(U.uGlobOff).add(CLUST_DOMAIN).add(CELL_BIAS)).toVar();
+  const knot = mix(float(1).sub(U.uGlobCluster), float(1).add(U.uGlobCluster), cl).toVar();
+
+  const rr = U.uGlobRadius.mul(mix(0.55, 1.45, rj)).mul(knot).max(1e-3);
+  return vec4(f.sub(g).sub(h.xy), rr, step(h.z, U.uGlobFill.mul(knot)));
+}
+
+/* Radial profile in [0,1]: flat opaque core out to `core`, then a power-law
+   feathered skirt; a plateau with a hard edge reads as a cutout. */
+function clumpProfile(q, rr, U) {
+  const k0 = clamp(U.uGlobCore, 0.0, 0.95).toVar();
+  const t = float(1).sub(q.div(rr).sub(k0).div(float(1).sub(k0).max(1e-3)).clamp(0.0, 1.0));
+  /* max(0), not an epsilon: a floored base leaves 0.63 coverage everywhere at
+     the smallest exponent, and pow(0, y>0) is defined on both backends. */
+  return t.max(0.0).pow(U.uGlobProf.max(0.05));
+}
 
 /* Bok field: compact round clumps, unioned by max so overlaps do not stack
    into a slab. Returns coverage in [0,1], not optical depth. */
-export const bokClumps = /*@__PURE__*/ Fn(([p, off, radius, fill, core]) => {
+function bokClumps(p, U) {
   const cell = floor(p);
   const f = fract(p);
-  /* Below 1 so the blob's smoothstep edges stay ascending */
-  const k0 = clamp(core, 0.0, 0.95).toVar();
   const cov = float(0).toVar();
 
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
-      const k = clumpCell(f, vec2(dx, dy), cell, off, radius, fill).toVar();
-      const blob = float(1).sub(smoothstep(k.z.mul(k0), k.z, length(k.xy)));
-      cov.assign(max(cov, blob.mul(k.w)));
+      const k = clumpCell(f, vec2(dx, dy), cell, U).toVar();
+      cov.assign(max(cov, clumpProfile(length(k.xy), k.z, U).mul(k.w)));
     }
   }
   return cov;
-});
+}
 
 /* Cometary field: the same clumps under a distorted distance metric, blunt
    head toward the source and a tapering tail downstream. */
-export const cometaryClumps = /*@__PURE__*/ Fn(([p, off, srcP, radius, fill, elong, taper, core]) => {
+function cometaryClumps(p, srcP, U) {
   const cell = floor(p);
   const f = fract(p);
   /* One axis for the whole neighborhood: the source is far compared to a cell,
      which saves eight normalizes per sample. */
   const L = dirTo(p, srcP).toVar();
-  /* Invariant uGlobRadius * uGlobElong <= 1: a tail longer than one cell is
-     truncated by the 3x3 search. The param schema enforces it host-side. */
-  const invTail = float(1).div(elong.max(1e-3)).toVar();
-  const k0 = clamp(core, 0.0, 0.95).toVar();
+  /* The jittered, clustered tail reach may hit ~1.5 cells; past that the 3×3
+     search truncates it. The param schema enforces the bound host-side. */
+  const invTail = float(1).div(U.uGlobElong.max(1e-3)).toVar();
   const cov = float(0).toVar();
 
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
-      const k = clumpCell(f, vec2(dx, dy), cell, off, radius, fill).toVar();
+      const k = clumpCell(f, vec2(dx, dy), cell, U).toVar();
       const rr = k.z.toVar();
       const axis = dot(k.xy, L).toVar();
       const perp = length(k.xy.sub(L.mul(axis)));
@@ -95,24 +111,26 @@ export const cometaryClumps = /*@__PURE__*/ Fn(([p, off, srcP, radius, fill, elo
       /* Compressing the anti-source axis extends the clump into a tail;
          widening the perpendicular downstream tapers it to a point. */
       const along = mix(invTail, float(1.0), smoothstep(rr.negate(), rr, axis));
-      const narrow = float(1).add(taper.mul(max(axis.negate(), 0.0)).div(rr));
+      const narrow = float(1).add(U.uGlobTaper.mul(max(axis.negate(), 0.0)).div(rr));
       const d = length(vec2(axis.mul(along), perp.mul(narrow)));
 
-      const blob = float(1).sub(smoothstep(rr.mul(k0), rr, d));
-      cov.assign(max(cov, blob.mul(k.w)));
+      /* The tail is a thinner column than the head, so it has to read
+         translucent rather than carrying the head's opacity out with it. */
+      const thin = mix(float(1.0), U.uGlobTailOp,
+        smoothstep(float(0), rr, axis.negate()));
+      cov.assign(max(cov, clumpProfile(d, rr, U).mul(thin).mul(k.w)));
     }
   }
   return cov;
-});
+}
 
 /* Coverage field in [0,1]: fbm remapped through the clump silhouette, then
    chewed at the edges by high-frequency inverted Voronoi. */
 export function globuleCoverage(sky, U, cometary = true) {
   const p = sky.mul(U.uGlobFreq).toVar();
   const shape = cometary
-    ? cometaryClumps(p, U.uGlobOff, U.uGlobIonSrc.mul(U.uGlobFreq), U.uGlobRadius,
-      U.uGlobFill, U.uGlobElong, U.uGlobTaper, U.uGlobCore)
-    : bokClumps(p, U.uGlobOff, U.uGlobRadius, U.uGlobFill, U.uGlobCore);
+    ? cometaryClumps(p, U.uGlobIonSrc.mul(U.uGlobFreq), U)
+    : bokClumps(p, U);
   const cov = shape.toVar();
 
   const zEvo = U.uTev.mul(U.uGlobMorph);
@@ -121,8 +139,8 @@ export function globuleCoverage(sky, U, cometary = true) {
   return remapCombine(n, ero, cov, U.uGlobErode);
 }
 
-/* Opacity fraction in [0,1]. Sharp because the interior must saturate: a field
-   sitting at tau 0.3-1.5 across the whole silhouette reads as fog. */
+/* Opacity fraction in [0,1]. A wide softness is deliberate: a hard edge here
+   is what made every clump a flat cutout at uniform opacity. */
 export function globuleDensity(sky, U, cometary = true) {
   const th = U.uGlobTh;
   return smoothstep(th, th.add(U.uGlobSoft.max(1e-3)), globuleCoverage(sky, U, cometary));

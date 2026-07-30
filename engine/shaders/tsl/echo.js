@@ -3,9 +3,12 @@
    Scattered starlight, so the output is continuum RGB; the Hα whisper is opt-in. */
 
 import { Fn, float, floor, vec3, dot, mix, smoothstep } from 'three/tsl';
-import { fbm3o2, fbm3o4, FBM2_MID, FBM2_NORM, FBM4_NORM } from './noise.js';
+import { fbm3o2, fbm3o4, ridged2, FBM2_MID, FBM2_NORM, FBM4_NORM } from './noise.js';
 
 const WRAP_H = 4096.0;
+
+/* Independent slice of the noise domain for the filament ridges */
+const FIL_DOMAIN = /*@__PURE__*/ vec3(13.7, 41.3, 5.9);
 
 /* Isodelay geometry. |r| - z = ct solves to z = (rho² - ct²)/(2ct), one z per
    screen point, which is the whole reason this needs no march. */
@@ -43,20 +46,31 @@ function echoCloud(g, U) {
   const x = rd.sub(U.uEchoShellR).div(U.uEchoShellW.max(1e-3)).toVar();
   const shell = float(1).sub(smoothstep(0.0, 1.0, x.mul(x))).toVar();
 
+  /* A second dust shell further out. V838 shows three or four nested arcs at
+     once, and one shell can only ever light a single band. */
+  const x2 = rd.sub(U.uEchoShellR.add(U.uEchoShell2Off)).div(U.uEchoShellW.max(1e-3)).toVar();
+  const shell2 = float(1).sub(smoothstep(0.0, 1.0, x2.mul(x2))).mul(U.uEchoShell2).toVar();
+
   /* Past this bound z runs away with rho² and the sliced noise aliases: the
      cutoff is the one thing keeping the sampled domain finite. */
   const outR = U.uEchoOuter.max(1e-3).toVar();
   const halo = float(1).sub(smoothstep(outR.mul(0.6), outR, rd)).mul(U.uEchoHalo);
-  return shell.add(halo).min(1.0).toVar();
+  return shell.max(shell2).add(halo).min(1.0).toVar();
 }
 
-/* Static per seed with no time in the domain, which makes it the catalog's
+/* Static per seed with no time in the domain, which makes it the catalogue's
    P8 bake candidate; until that lands it spends 6 live octaves per fragment. */
 function echoDensity(g, env, U) {
   const p = vec3(g.d.mul(U.uEchoFreq), g.zEcho.mul(U.uEchoFreq).mul(U.uEchoZSquash))
     .add(U.uEchoOff);
   const base = fbm3o4(p).mul(FBM4_NORM).toVar();
-  const carved = base.add(fbm3o2(p.mul(3.1)).sub(FBM2_MID).mul(U.uEchoCarve))
+  /* Centered on the ridge's own mean, 1/(sharp+1), not 0.5: a sharpened ridge
+     sits well below mid-level, and subtracting 0.5 would net out as density loss. */
+  const fil = ridged2(p.mul(U.uEchoFilFreq).add(FIL_DOMAIN), U.uEchoFilSharp)
+    .sub(float(1).div(U.uEchoFilSharp.add(1.0))).toVar();
+  const carved = base
+    .add(fbm3o2(p.mul(3.1)).sub(FBM2_MID).mul(U.uEchoCarve))
+    .add(fil.mul(U.uEchoFil))
     .clamp(0.0, 1.0).toVar();
 
   /* Envelope lowers the threshold the noise must clear (remap doctrine, sdf.js).
@@ -72,7 +86,25 @@ function echoIllum(g, U) {
   const atten = g.rr.div(U.uEchoRefR.max(1e-4)).pow(U.uEchoFall.max(0.0).negate())
     .min(U.uEchoAttenMax.max(1.0)).toVar();
   const slab = g.rr.div(g.ct).min(U.uEchoSlabMax.max(1.0));
-  return atten.mul(mix(float(1.0), slab, U.uEchoSlab)).toVar();
+
+  /* rho/ct crosses 1 exactly on the source plane and moves outward with the
+     front, so weighting across it gives the annulus a direction of travel. */
+  const w = U.uEchoSweepW.max(1e-3).toVar();
+  const lead = smoothstep(float(1).sub(w), float(1).add(w), g.rho2.sqrt().div(g.ct)).toVar();
+  const sweep = mix(float(1).sub(U.uEchoSweep), float(1).add(U.uEchoSweep), lead);
+
+  return atten.mul(mix(float(1.0), slab, U.uEchoSlab)).mul(sweep).toVar();
+}
+
+/* The flash source itself. Moffat core plus a wide skirt, with the sub-pixel
+   flux clamp from catalogue 3.7 so a small core stays bright instead of aliasing. */
+function echoStar(sky, U) {
+  const dPx = sky.sub(U.uEchoSrc).mul(U.uPxPerUnit).toVar();
+  const aTrue = U.uEchoStarR.mul(U.uPxPerUnit).toVar();
+  const aC = aTrue.max(0.7).toVar();
+  const energy = aTrue.mul(aTrue).div(aC.mul(aC)).toVar();
+  const x = float(1).div(dot(dPx, dPx).div(aC.mul(aC)).add(1.0)).toVar();
+  return x.mul(x).add(x.mul(U.uEchoStarHalo)).mul(energy).mul(U.uEchoStarLum).toVar();
 }
 
 /* Extinction from the same cloud, read off one static slice at tauZ. An honest
@@ -106,7 +138,10 @@ export function buildEchoNodes(skyU, U, opts = {}) {
     const hueHi = U.uEchoHueHi.max(U.uEchoHueLo.add(1e-3));
     const t = smoothstep(U.uEchoHueLo, hueHi, base);
     const tint = mix(mix(U.uEchoCool, U.uEchoWarm, t), U.uEchoRose, dens.mul(U.uEchoRoseAmt));
-    return tint.mul(bright);
+
+    /* The star is not gated by the flash cycle: V838 is the brightest thing in
+       every frame of the reference sequence, before and after the echo. */
+    return tint.mul(bright).add(U.uEchoStarCol.mul(echoStar(skyU, U)));
   })();
 
   const out = { continuum, tauAt: (sky) => echoTau(sky, U) };
@@ -137,22 +172,33 @@ export const ECHO_DEFAULTS = {
   fadeIn: 0.18,
   fadeOut: 0.24,
   shellR: 0.34,
-  shellW: 0.17,
+  shellW: 0.15,
+  shell2: 0.5,
+  shell2Off: 0.24,
   dustXY: [0.09, -0.06],
   dustZ: 0.1,
   outer: 0.9,
-  halo: 0.22,
-  freq: 5.5,
+  halo: 0.1,
+  freq: 10.0,
   zSquash: 0.55,
-  carve: 0.35,
-  th: 0.52,
-  soft: 0.22,
+  carve: 0.45,
+  fil: 0.3,
+  filFreq: 2.4,
+  filSharp: 2.6,
+  th: 0.48,
+  soft: 0.2,
   refR: 0.34,
   fall: 2.0,
   attenMax: 2.5,
   slab: 0.5,
   slabMax: 3.0,
-  lum: 0.4,
+  sweep: 0.45,
+  sweepW: 0.35,
+  lum: 0.5,
+  starLum: 3.0,
+  starR: 0.005,
+  starHalo: 0.2,
+  starCol: [1.0, 0.46, 0.3],
   cool: [0.52, 0.66, 0.92],
   warm: [1.0, 0.86, 0.66],
   rose: [1.0, 0.7, 0.72],

@@ -52,16 +52,6 @@ function shapeSample(sky, U, map) {
   };
 }
 
-/* How far past its baked frame the shape can still change a pixel. The column
-   feathers to zero inside the frame, so only the rim's tail escapes — and the
-   rim rides the distance, which trails the box-exit distance by up to a full
-   saturated spread when a silhouette runs to the frame edge. */
-function shapeReach(U, halo) {
-  return U.uShpRimAt.max(0.0).add(U.uShpRimJit)
-    .add(U.uShpRimW.mul(halo ? 10.0 : 4.0))
-    .add(U.uShpSpread.mul(U.uShpScale));
-}
-
 /* One field evaluation feeding both outputs. The polygon is a scaffold, not the
    silhouette: the baked column already carries the head, the translucent mane,
    and the bank it rises out of. */
@@ -103,7 +93,11 @@ export function shapeTauAndRim(sky, U, map, { glow = false, rimHalo = false } = 
   const tau = float(0).toVar();
   const rim = vec3(0.0).toVar();
 
-  If(s.outer.lessThan(shapeReach(U, rimHalo)), () => {
+  /* The shape ends at its frame. Outside it the clamped sampler lies: a
+     silhouette crossing the border drags its negative distance outward, and the
+     rim traces phantom box-exit iso-lines (the pillars bars). edgeFade feathers
+     the approach; past the box there is nothing honest left to draw. */
+  If(s.outer.lessThan(1e-5), () => {
     const f = shapeField(sky, U, s);
     /* Optical depth tracks the baked column, so thin mane edges and the bank
        transmit the wall behind them while the skull core stays opaque. */
@@ -149,7 +143,9 @@ export function shapeTauAndRim(sky, U, map, { glow = false, rimHalo = false } = 
       oiii = oiii.add(body.mul(U.uShpOiii));
       sii = sii.add(body.mul(U.uShpSii));
     }
-    rim.assign(vec3(ha, oiii, sii).mul(U.uShpGain));
+    /* fade rides the whole rim too, or the feed step (×0.3 at zero column)
+       draws the frame as a ghost rectangle through border-crossing bakes. */
+    rim.assign(vec3(ha, oiii, sii).mul(U.uShpGain).mul(s.fade));
   });
 
   return { tau, rim };

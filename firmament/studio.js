@@ -473,6 +473,43 @@ function depthBounds(entity) {
   return { min, max: Math.max(Math.min(ceiling, max), min) };
 }
 
+/* Asset-intrinsic seeds (tau, glow) follow an asset pick, but only while the
+   user has not touched them: tuned sliders survive a swap. */
+const shapeSeeds = new WeakMap();
+
+async function reseedShapeAsset(entity) {
+  const spec = TYPE_BY_ID.shape;
+  /* Sidecars resolve against the repo root, matching the engine loader */
+  const url = new URL(`../${entity.params.asset}`, import.meta.url);
+  let meta;
+  try { meta = await (await fetch(url)).json(); } catch { return; }
+  const tauP = findParam(spec, 'tau');
+  const glowP = findParam(spec, 'glow');
+  const mode = meta.densityMode === 'emission' || meta.densityMode === 'extinction'
+    ? meta.densityMode
+    : (meta.polarity === 'bright' ? 'emission' : 'extinction');
+  const rawTau = Number(meta.suggestedTau) > 0 ? Number(meta.suggestedTau)
+    : Number(meta.densityScale) > 0 ? Number(meta.densityScale) * 4 : tauP.def;
+  const seeds = {
+    tau: Math.min(Math.max(Math.round(rawTau / tauP.step) * tauP.step, tauP.min), tauP.max),
+    glow: mode === 'emission' ? 0.9 : 0,
+  };
+  const prev = shapeSeeds.get(entity) ?? { tau: tauP.def, glow: glowP.def };
+  let changed = false;
+  for (const [key, seed] of Object.entries(seeds)) {
+    if (getPath(entity.params, key) !== prev[key]) continue;
+    if (seed === prev[key]) continue;
+    setPath(entity.params, key, seed);
+    changed = true;
+  }
+  shapeSeeds.set(entity, seeds);
+  if (!changed) return;
+  /* glow is build-gated, and the pick's own rebuild may already have run */
+  scheduleRebuild();
+  renderEntityDetail();
+  markDirty();
+}
+
 /* Returns false when nothing moved, so a component that echoes its own value
    back on upgrade cannot loop through the rebuild-and-repaint path. */
 function commitParam(entity, param, value, live = false) {
@@ -503,6 +540,7 @@ function commitParam(entity, param, value, live = false) {
     if (!live) scheduleRebuild();
     if (getPath(entity.params, param.key) === value) return false;
     setPath(entity.params, param.key, value);
+    if (entity.type === 'shape' && param.key === 'asset') reseedShapeAsset(entity);
     return true;
   }
   setPath(entity.params, param.key, value);
@@ -587,7 +625,7 @@ function rerollGroup(entity, group) {
      expresses (including an all-off invisible entity). */
   const owner = spec.params.find((p) => p.group === group && p.derived && p.options);
   for (const param of spec.params) {
-    if (param.group !== group || param.derived) continue;
+    if (param.group !== group || param.derived || param.noRoll) continue;
     if (owner && param.key.startsWith(`${owner.key}.`)) continue;
     const value = rollValue(param);
     setPath(entity.params, param.key, value);

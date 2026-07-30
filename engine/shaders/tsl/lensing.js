@@ -3,7 +3,7 @@
    ring at r = θ_E are the lens equation solving itself, not shapes anyone drew. */
 
 import {
-  cos, float, min, mix, sin, smoothstep, sqrt, vec2,
+  cos, float, length, max, min, mix, sin, smoothstep, sqrt, vec2, vec3,
 } from 'three/tsl';
 
 export const LENS_DEFAULTS = {
@@ -20,6 +20,10 @@ export const LENS_DEFAULTS = {
   haloStrength: 0.35,
   haloSpread: 0.25,
   magBoost: 0.35,
+  smear: 0.5,
+  ringGain: 0.05,
+  ringWidth: 0.02,
+  chroma: 0.35,
 };
 
 export const LENS_MAX_HALOS = 3;
@@ -33,6 +37,9 @@ const MAG_CAP = 6.0;
 /* The band, in screen uv, over which the warp relaxes before its sample would
    leave the frame. */
 const EDGE_FADE = 0.05;
+
+/* Distance from a uv to the nearest frame border, negative once outside */
+const inset = (p) => min(min(p.x, p.x.oneMinus()), min(p.y, p.y.oneMinus()));
 
 /* One softened halo's deflection and its potential's Hessian, in whatever frame
    `d` arrives in; `p`/`q` are the elliptical potential's axis weights (omit for a
@@ -59,11 +66,13 @@ function haloTerm(d, b, rc, pointMix, p = null, q = null) {
     hxx: k.mul(sx).mul(sx).add(p ? diag.mul(p) : diag).toVar(),
     hyy: k.mul(sy).mul(sy).add(q ? diag.mul(q) : diag).toVar(),
     hxy: k.mul(sx).mul(sy).toVar(),
+    soft,
   };
 }
 
-/* Screen uv → warped sample uv plus the magnification gain. `halos` is a
-   build-time count: the sub-halo terms are unrolled, never looped. */
+/* Screen uv → warped sample uv, magnification gain, the tangential smear axis,
+   the dispersion offset, and the ring's line emission. `halos` is a build-time
+   count: the sub-halo terms are unrolled, never looped. */
 export function lensWarp(screen, U, { halos = 0 } = {}) {
   /* Sky y runs down and x spans the aspect, the same frame every entity's
      framed position lives in, so the lens center is one of those positions. */
@@ -130,19 +139,59 @@ export function lensWarp(screen, U, { halos = 0 } = {}) {
   /* A = ∂β/∂θ = I − H. Surface brightness is already conserved by the warp, so
      this gain is an aesthetic tell: it is what makes a thin arc clear the dither. */
   const detA = float(1.0).sub(hxx).mul(float(1.0).sub(hyy)).sub(hxy.mul(hxy));
-  const mag = min(float(1.0).div(detA.abs().max(1e-3)), MAG_CAP);
+  const mu = float(1.0).div(detA.abs().max(1e-3)).toVar();
+  const over = mu.sub(1.0).max(0.0).toVar();
+  /* The roll-off rides the excess over 1, not μ itself: a hard min leaves a
+     flat plateau, and softening μ would dim the whole μ ≈ 1 field along with it. */
+  const mag = min(mu, 1.0).add(over.div(over.div(MAG_CAP - 1.0).add(1.0))).toVar();
+  /* Same excess on a 0–1 scale. It drives smear and dispersion so both live
+     where the arcs are, and are absent on flat sky. */
+  const arc = over.div(over.add(MAG_CAP - 1.0)).toVar();
 
   /* β = θ − α, carried back into screen uv: x un-scales by the aspect and y
      flips, because the sky frame this was computed in runs downward. */
   const beta = screen.add(vec2(ax.div(U.uAspect).negate(), ay)).toVar();
 
-  /* Clamping a sample that walked off the frame replicates the border pixel into
-     a streak, so the warp relaxes to identity just outside it. Keyed on how far
-     β is out, never how close, or the blend would rewrite good pixels inside. */
-  const past = beta.sub(0.5).abs().sub(0.5).max(0.0).toVar();
-  const fade = smoothstep(0.0, EDGE_FADE, past.x.max(past.y)).toVar();
+  /* The sampled point's radius about the lens center, in screen uv: the
+     dispersion axis, and the tangential axis is its perpendicular. */
+  const rad = vec2(d.x.sub(ax).div(U.uAspect), d.y.sub(ay).negate()).toVar();
+  const vis = vec2(rad.x.mul(U.uAspect), rad.y).toVar();
+  const visLen = length(vis).max(1e-5).toVar();
+  /* Perpendicular taken in aspect-corrected space, then returned to uv, or the
+     smear would shear off the arc on any non-square frame. */
+  const tang = vec2(vis.y.negate().div(visLen).div(U.uAspect), vis.x.div(visLen)).toVar();
+
+  const smear0 = arc.mul(U.uLensSmear).mul(U.uLensThetaE).mul(0.06).toVar();
+  const disp0 = arc.mul(U.uLensChroma).mul(0.04).toVar();
+
+  /* A sample that walked off the frame hits the uv clamp and replicates the
+     border pixel into a streak, so the displacement fades on where the probe
+     would land, not on how far β overshot. Guard covers the side taps too. */
+  const guard = float(EDGE_FADE).add(smear0).add(length(rad).mul(disp0)).toVar();
+  /* Slack caps at the pixel's own inset, so a sample that barely moves is never
+     penalized: only travel toward the border costs strength. */
+  const slack = max(min(guard, inset(screen)), 1e-4).toVar();
+  const keep = smoothstep(0.0, slack, inset(beta)).toVar();
+
+  /* soft = √(rc² + r²), so soft = θ_E is exactly r = √(θ_E² − rc²): the effective
+     ring radius, elliptical for free, without a second sqrt. Modulated by the
+     magnification so it breaks into arcs instead of reading as a drawn hoop. */
+  const ring = smoothstep(0.0, U.uLensRingW, main.soft.sub(U.uLensThetaE).abs())
+    .oneMinus().mul(arc.mul(0.7).add(0.3)).toVar();
+  /* One term serves the ring and the soft outer glow: the wide low skirt is what
+     makes a small-θ_E lens legible at all. */
+  const skirt = smoothstep(0.0, U.uLensThetaE.mul(2.0).max(1e-3), main.soft)
+    .oneMinus().toVar();
+
   return {
-    at: mix(beta, screen, fade).clamp(0.0, 1.0).toVar(),
-    gain: mix(mix(float(1.0), mag, U.uLensMag), float(1.0), fade).toVar(),
+    at: mix(screen, beta, keep).clamp(0.0, 1.0).toVar(),
+    gain: mix(float(1.0), mix(float(1.0), mag, U.uLensMag), keep).toVar(),
+    tang,
+    smear: smear0.mul(keep).toVar(),
+    disp: rad.mul(disp0.mul(keep)).toVar(),
+    chroma: arc.mul(U.uLensChroma).mul(0.7).mul(keep).toVar(),
+    /* OIII-dominant because real lensed arcs are blue star-forming galaxies, and
+       it enters as line channels so the palette grades it like any emission. */
+    ring: vec3(0.6, 1.0, 0.35).mul(U.uLensRingGain).mul(ring.add(skirt.mul(0.08))).toVar(),
   };
 }

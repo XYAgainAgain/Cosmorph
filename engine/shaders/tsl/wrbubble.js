@@ -3,7 +3,7 @@
    optional Thor's-Helmet horns. Line channels only, never RGB. */
 
 import {
-  Fn, float, vec2, vec3, cos, sin, dot, length, mix, pow, smoothstep,
+  Fn, float, vec2, vec3, cos, sin, dot, length, max, mix, pow, smoothstep,
 } from 'three/tsl';
 import { fbm3o2, ridged2, FBM2_NORM, FBM2_MID } from './noise.js';
 import { rot2, sdSegment, sdfEnvelope, shellChord } from './sdf.js';
@@ -13,6 +13,7 @@ import { rot2, sdSegment, sdfEnvelope, shellChord } from './sdf.js';
 const WARP_A = /*@__PURE__*/ vec3(13.7, 5.1, 29.3);
 const WARP_B = /*@__PURE__*/ vec3(41.9, 23.7, 7.9);
 const WARP_C = /*@__PURE__*/ vec3(3.1, 47.3, 17.7);
+const WARP_D = /*@__PURE__*/ vec3(27.3, 11.9, 43.1);
 
 /* Fixed shear direction for the fine warp; arbitrary, only needs to be oblique */
 const KINK_DIR = /*@__PURE__*/ vec3(0.7, -0.5, 0.9);
@@ -75,8 +76,12 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
     /* Fine level is one eval sheared along a fixed direction rather than a full
        gradient: it kinks fibers along their length, which is all it must do. */
     const nC = fbm3o2(q1.mul(2.1).add(WARP_C)).sub(FBM2_MID).toVar();
-    const fib = ridged2(q1.add(KINK_DIR.mul(nC.mul(U.uWrbWarp2))), U.uWrbFibSharp)
-      .toVar();
+    const qk = q1.add(KINK_DIR.mul(nC.mul(U.uWrbWarp2))).toVar();
+    /* One ridge scale draws closed iso-contours, which read as a topographic map.
+       A second non-harmonic scale combined by max makes the crests branch and
+       vary in width, which is what turns contour lines into a tangle of hairs. */
+    const fib = max(ridged2(qk, U.uWrbFibSharp),
+      ridged2(qk.mul(1.87).add(WARP_D), U.uWrbFibSharp)).toVar();
 
     const soft = U.uWrbSoft.max(1e-3).toVar();
     const envH = profH.mul(ext).toVar();
@@ -87,8 +92,12 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
     /* Envelope lowers the threshold the fiber must clear (remap doctrine, sdf.js) */
     const thH = mix(float(1.0), U.uWrbTh, envH);
     const thO = mix(float(1.0), U.uWrbTh, envO);
-    const densH = smoothstep(thH, thH.add(soft), fib).toVar();
-    const densO = smoothstep(thO, thO.add(soft), fib).toVar();
+    /* Same iso-contour problem as above: the fine warp slice as along-fiber
+       gain breaks the crests into veins of varying brightness for free. */
+    const grain = mix(float(1).sub(U.uWrbGrain.clamp(0.0, 1.0)), float(1.0),
+      nC.add(FBM2_MID).mul(FBM2_NORM)).toVar();
+    const densH = smoothstep(thH, thH.add(soft), fib).mul(grain).toVar();
+    const densO = smoothstep(thO, thO.add(soft), fib).mul(grain).toVar();
 
     /* Brightness wanders around the shell; an evenly lit ring reads as drawn.
        Reuses the coarse field, so the patchiness costs no extra noise. */
@@ -96,10 +105,17 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
       smoothstep(0.25, 0.75, nA.mul(FBM2_NORM))).toVar();
     const gain = U.uWrbGain.mul(mottle).toVar();
 
+    /* Fibers alone leave the gaps at zero, which reads as a wireframe doodle.
+       The bare chord under them is the gas sheet the veins ride on (Sh2-308). */
+    const sheetH = densH.add(envH.mul(U.uWrbShell).mul(mix(float(0.5), float(1.0), fib)))
+      .min(1.0).toVar();
+    const sheetO = densO.add(envO.mul(U.uWrbShell).mul(mix(float(0.5), float(1.0), fib)))
+      .min(1.0).toVar();
+
     /* Stratification is strong but never absolute; the bleed keeps each shell
        from reading as a flat single-species ring. */
-    const ha = densH.mul(gain).add(densO.mul(gain).mul(U.uWrbBleed)).toVar();
-    const oiii = densO.mul(gain).add(densH.mul(gain).mul(U.uWrbBleed)).toVar();
+    const ha = sheetH.mul(gain).add(sheetO.mul(gain).mul(U.uWrbBleed)).toVar();
+    const oiii = sheetO.mul(gain).add(sheetH.mul(gain).mul(U.uWrbBleed)).toVar();
 
     if (horns) {
       /* Folding |y| evaluates both horns from one capsule */
@@ -140,10 +156,11 @@ export function buildWrBubbleNodes(skyU, U, { horns = false } = {}) {
 export const WRBUBBLE_DEFAULTS = {
   center: [0.46, 0.52], radius: 0.28, expand: 0.000034, axis: 0.35,
   bow: 0.55, wing: 0.3,
-  ratio: 0.7, thick: 0.17, thickO: 0.22,
+  ratio: 0.9, thick: 0.2, thickO: 0.38,
   comp: 0.8, compSoft: 0.5, gapPhase: 2.4, compO: 0.4,
-  fibFreq: 28.0, fibAniso: 0.55, fibSharp: 2.0, warp: 0.85, warp2: 0.45,
-  threshold: 0.7, softness: 0.26, patch: 0.55, bleed: 0.18,
+  fibFreq: 44.0, fibAniso: 0.55, fibSharp: 2.8, warp: 0.85, warp2: 0.9,
+  threshold: 0.6, softness: 0.18, patch: 0.55, bleed: 0.32, shell: 0.5,
+  grain: 0.75,
   gain: 0.3, ha: 0.85, oiii: 1.0, sii: 0.1, morphRate: 0.06,
   horns: false,
   hornPhi: 0.95, hornTilt: 0.55, hornLen: 0.85, hornW: 0.055,

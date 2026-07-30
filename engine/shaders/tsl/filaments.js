@@ -54,9 +54,10 @@ export function buildFilamentNodes(skyU, U) {
     const kR = U.uFilFreq.mul(U.uFilAniso);
     const ring = dirHat.mul(R.mul(kT)).toVar();
 
-    /* One slow field along the shell drives both the haze amplitude and which
-       species leads, so color and glow stay in step around the arc. */
-    const sheet = fbm3o2(vec3(ring.mul(0.13), zEvo.mul(0.4)).add(U.uFilOff.mul(5.0)))
+    /* One field along the shell drives both the haze amplitude and which species
+       leads, so color and glow stay in step around the arc. Its scale is dialed
+       rather than fixed: too slow and the whole visible arc is one species. */
+    const sheet = fbm3o2(vec3(ring.mul(U.uFilLaceF), zEvo.mul(0.4)).add(U.uFilOff.mul(5.0)))
       .mul(FBM2_NORM).toVar();
 
     /* Warp radially only: strands weaving in and out across the shell is what
@@ -83,9 +84,17 @@ export function buildFilamentNodes(skyU, U) {
     const envO = float(1).sub(smoothstep(0.0, 1.0, drO.mul(invT).abs())).mul(ext).toVar();
     const envH = float(1).sub(smoothstep(0.0, 1.0, drH.mul(invT).abs())).mul(ext).toVar();
 
+    /* Strand ends must fray, not stop where the mask stops: lifts the threshold
+       only where the envelope fades. Own radial scale, or kR's top speckles it. */
+    const fray = fbm3o2(vec3(ring.mul(U.uFilFrayF),
+      dr.mul(U.uFilFrayF.mul(8.0)).add(zEvo.mul(0.7)))
+      .add(U.uFilOff.mul(17.0))).mul(FBM2_NORM).mul(U.uFilFray).toVar();
+    const eO = float(1).sub(envO).toVar();
+    const eH = float(1).sub(envH).toVar();
+
     /* Envelope lowers the threshold the ridge must clear (remap doctrine, sdf.js) */
-    const thO = mix(float(1.0), U.uFilTh, envO);
-    const thH = mix(float(1.0), U.uFilTh, envH);
+    const thO = mix(float(1.0), U.uFilTh, envO).add(fray.mul(eO).mul(eO).mul(eO));
+    const thH = mix(float(1.0), U.uFilTh, envH).add(fray.mul(eH).mul(eH).mul(eH));
     const densO = smoothstep(thO, thO.add(U.uFilSoft.max(1e-3)), fO).toVar();
     const densH = smoothstep(thH, thH.add(U.uFilSoft.max(1e-3)), fH).toVar();
 
@@ -101,8 +110,8 @@ export function buildFilamentNodes(skyU, U) {
     const haze = envHz.mul(envHz).mul(ext.sqrt())
       .mul(mix(float(0.25), float(1.0), sheet)).mul(U.uFilHaze).toVar();
 
-    /* Which species dominates wanders slowly along the shell; that patchwork
-       is what makes the red-and-teal lacework read as chemistry, not tinting. */
+    /* Which species dominates alternates along the shell; that patchwork is what
+       makes the red-and-teal lacework read as chemistry rather than tinting. */
     const lace = smoothstep(0.35, 0.65, sheet).toVar();
     const wO = mix(float(1.0), lace, U.uFilLace);
     const wH = mix(float(1.0), float(1).sub(lace), U.uFilLace);
@@ -122,8 +131,9 @@ export function buildFilamentNodes(skyU, U) {
 export const FILAMENT_DEFAULTS = {
   center: [0.5, 0.45], rot: 0.35, squash: 0.92, radius: 0.85, expand: 0.00015,
   thick: 0.075, phase: 0.6, half: 1.0, soft: 0.9,
-  freq: 9.0, aniso: 5.0, warp: 1.7, kink: 0.85, sep: 0.006,
-  sharp: 5.0, braid: 0.75, threshold: 0.66, softness: 0.24,
-  patch: 0.7, haze: 0.07, hazeW: 4.0, lace: 0.4,
-  gain: 0.26, ha: 0.78, oiii: 1.0, sii: 0.12, morphRate: 0.05,
+  freq: 14.0, aniso: 12.0, warp: 2.2, kink: 1.1, sep: 0.002,
+  sharp: 3.0, braid: 0.55, threshold: 0.5, softness: 0.16,
+  fray: 0.9, frayF: 2.8,
+  patch: 0.45, haze: 0.025, hazeW: 2.6, lace: 0.72, laceF: 1.8,
+  gain: 0.26, ha: 1.0, oiii: 1.0, sii: 0.12, morphRate: 0.05,
 };
