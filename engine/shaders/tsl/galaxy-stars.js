@@ -50,7 +50,12 @@ export function buildGalaxyStarNodes(U, { linked = true } = {}) {
       U.uGxsSpin.mul(U.uTev).div(pow(semi.max(core), U.uGxsRotExp)),
     ).toVar();
     const ex = semi.mul(cos(psi)).toVar();
-    const ey = semi.mul(U.uGxsAxis).mul(sin(psi)).toVar();
+    /* Axis ratio eases to round at both ends: a real bulge is a spheroid, and
+       the outskirts relax into halo instead of ending on an elliptical edge. */
+    const qw = smoothstep(core.mul(0.5), core.mul(1.5), semi)
+      .mul(float(1).sub(smoothstep(U.uGxCutIn, U.uGxCutOut.max(U.uGxCutIn.add(1e-3)), semi)))
+      .toVar();
+    const ey = semi.mul(mix(float(1.0), U.uGxsAxis, qw)).mul(sin(psi)).toVar();
     const ct = cos(tilt).toVar();
     const st = sin(tilt).toVar();
     const pn = vec2(ct.mul(ex).sub(st.mul(ey)), st.mul(ex).add(ct.mul(ey))).toVar();
