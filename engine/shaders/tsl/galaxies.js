@@ -218,6 +218,20 @@ export const GALAXY_DEFAULTS = {
      dimmed the default spiral, and this is the compensating scale. */
   gain: 0.17,
 
+  /* Resolved-star tier, off by default: a sprite field is a second geometry
+     pass, and every shipped scene predates it. */
+  starsN: 0,
+  starsLink: 1,
+  starsGain: 0.42,
+  starsSize: 1.1,
+  starsWind: 2.0,
+  starsAxis: 0.68,
+  starsBulgeFrac: 0.22,
+  starsZH: 0.035,
+  starsSpin: 0.02,
+  starsRotExp: 1.0,
+  starsLaneTau: 1.2,
+
   hii: 0.3,
   hiiFreq: 24.0,
   hiiTh: 0.62,

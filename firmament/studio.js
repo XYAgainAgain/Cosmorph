@@ -265,6 +265,14 @@ function readoutText(param, value) {
 
 function sliderRow(param, value, keyAttr) {
   const id = `p-${keyAttr}-${param.key}`.replace(/[^\w-]/g, '_');
+  if (param.kind === 'link') {
+    return `<div class="param param--bool param--link" data-param="${param.key}">
+      <span class="param__label">${param.label}</span>
+      <button class="icon-btn link-btn" type="button" data-role="param" data-key="${param.key}"
+        aria-pressed="${value ? 'true' : 'false'}" aria-label="${param.label}"
+        title="${param.label}">${value ? CHAIN_ON : CHAIN_OFF}</button>
+    </div>`;
+  }
   if (param.kind === 'bool') {
     return `<div class="param param--bool" data-param="${param.key}">
       <span class="param__label">${param.label}</span>
@@ -556,6 +564,8 @@ const TRASH = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><pa
 const GRIP = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><g fill="currentColor"><circle cx="6" cy="3.4" r="1.25"/><circle cx="10" cy="3.4" r="1.25"/><circle cx="6" cy="8" r="1.25"/><circle cx="10" cy="8" r="1.25"/><circle cx="6" cy="12.6" r="1.25"/><circle cx="10" cy="12.6" r="1.25"/></g></svg>';
 const PIN = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M9.7 1.3 14.7 6.3l-1.3 1.3-1.1-.3-2.6 2.6.4 1.8-1.2 1.2-2.9-2.9-3.5 3.5-.8-.8 3.5-3.5-2.9-2.9L3.3 5.1l1.8.4L7.7 2.9l-.3-1.1z"/></svg>';
 const LOCK = '<svg viewBox="0 0 16 16" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.7" d="M5.15 7.5V5.1a2.85 2.85 0 0 1 5.7 0v2.4"/><rect x="2.7" y="7.4" width="10.6" height="7.1" rx="1.7" fill="currentColor"/><circle cx="8" cy="10.9" r="1.2" fill="#000"/></svg>';
+const CHAIN_ON = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M6.3 9.7 9.7 6.3M5.2 7.4 3.7 8.9a2.6 2.6 0 0 0 3.7 3.7l1.5-1.5M10.8 8.6l1.5-1.5a2.6 2.6 0 0 0-3.7-3.7L7.1 4.9"/></svg>';
+const CHAIN_OFF = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M4.6 8 3.1 9.5a2.6 2.6 0 0 0 3.7 3.7l1.5-1.5M11.4 8l1.5-1.5a2.6 2.6 0 0 0-3.7-3.7L7.7 4.3M6.9 11.6l-.6 1.9M9.1 4.4l.6-1.9"/></svg>';
 
 /* Column header, not a row: the checkboxes carry no visible label of their own,
    and the caption is what names the scope the padlock exempts a row from */
@@ -662,6 +672,7 @@ function commitParam(entity, param, value, live = false) {
 }
 
 function readControl(node, param) {
+  if (param.kind === 'link') return node.getAttribute('aria-pressed') === 'true' ? 1 : 0;
   if (param.kind === 'bool') return node.hasAttribute('checked') ? 1 : 0;
   if (param.kind === 'enum') return node.value || node.getAttribute('value') || param.options[0].id;
   const n = Number(node.value);
@@ -1274,6 +1285,16 @@ function wire() {
   dom.detail.addEventListener('change', onParamEvent);
 
   dom.detail.addEventListener('click', (event) => {
+    /* The chain toggle is a button, so its state flip happens here and the
+       commit rides the same change path every other control uses. */
+    const link = event.target.closest('button.link-btn[data-role="param"]');
+    if (link) {
+      const on = link.getAttribute('aria-pressed') !== 'true';
+      link.setAttribute('aria-pressed', on ? 'true' : 'false');
+      link.innerHTML = on ? CHAIN_ON : CHAIN_OFF;
+      link.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
     const button = event.target.closest('button[data-act]');
     if (!button) return;
     const entity = scene.entities.find((e) => e.type === ui.selected);

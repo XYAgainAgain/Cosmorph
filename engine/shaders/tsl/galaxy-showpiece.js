@@ -20,7 +20,7 @@ export const ARM_MAX = 6;
 /* cos/sin of m*theta for a continuous arm count, built by the Chebyshev ladder
    c(n+1) = 2*cos(t)*c(n) - c(n-1). No atan, so the spiral phase still has no
    branch cut to tear along. */
-const armHarmonic = /*@__PURE__*/ Fn(([dir, count]) => {
+export const armHarmonic = /*@__PURE__*/ Fn(([dir, count]) => {
   const cs = [dir.x.toVar()];
   const sn = [dir.y.toVar()];
   const twice = dir.x.mul(2.0).toVar();
@@ -43,7 +43,7 @@ const armHarmonic = /*@__PURE__*/ Fn(([dir, count]) => {
 
 /* Exponential wings never reach zero; without a cut a disk leaves a faint box
    across the frame. Taken per radius so a polar ring is not clipped by the host. */
-function extentCut(U, r) {
+export function extentCut(U, r) {
   return float(1).sub(smoothstep(U.uGxCutIn, U.uGxCutOut.max(U.uGxCutIn.add(1e-3)), r));
 }
 

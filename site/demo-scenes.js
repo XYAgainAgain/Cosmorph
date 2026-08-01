@@ -749,6 +749,42 @@ const SCENES = {
     ]);
   },
 
+  /* M51 with the arms resolving: the spiral showpiece plus the density-wave
+     sprite tier, stars strung along the arms and dimming behind the lane */
+  resolved: (seed) => {
+    const r = jitter(seed, 49);
+    const scene = SCENES.spiralgal(seed);
+    const gx = scene.entities.find((e) => e.type === 'galaxies');
+    Object.assign(gx.params, {
+      center: [0.44 + r.next() * 0.12, 0.42 + r.next() * 0.16],
+      size: 0.32,
+      /* M51 is nearly face-on, and face-on is where ellipse crowding reads as
+         arms; the far-side extinction still gets enough tip to bite */
+      cosI: 0.78 + r.next() * 0.1,
+      armCount: 2,
+      armAsym: 0.12 + r.next() * 0.15,
+      barAmt: 0,
+      wind: 3.4 + r.next() * 0.8,
+      gain: 1.1,
+      laneDepth: 0.3,
+      hii: 0.45,
+      flowerGain: 1.1,
+      starsN: 12000,
+      /* Under the tier default: the glow's gold bulge must stay the brightest
+         thing in the frame, with the sprites reading as its resolved skin */
+      starsGain: 0.34,
+      /* Slimmer ellipses than the dial default: the demo's whole job is making
+         the crowding caustics unmistakable. Pitch itself rides the link. */
+      starsAxis: 0.58,
+      starsBulgeFrac: 0.16,
+      starsLaneTau: 1.6,
+    });
+    /* Thinned like the starcloud demo: full-amplitude IFN buries the disk */
+    const ifn = scene.entities.find((e) => e.type === 'ifn');
+    if (ifn) ifn.params = { amp: 0.3 };
+    return scene;
+  },
+
   /* NGC 3923/NGC 474: an r^1/4 elliptical wearing nested merger shells that
      fall on alternating sides as the shell index climbs */
   shellgal: (seed) => {

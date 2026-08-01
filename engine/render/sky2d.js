@@ -23,6 +23,8 @@ import {
   buildGalaxyNodes, GALAXY_DEFAULTS, devNormFor, GX_FAMILIES, ARM_COUNT_TABLE,
 } from '../shaders/tsl/galaxies.js';
 import { ARM_MAX } from '../shaders/tsl/galaxy-showpiece.js';
+import { generateGalaxyStars } from '../entities/galaxy-stars.js';
+import { buildGalaxyStarNodes } from '../shaders/tsl/galaxy-stars.js';
 import { buildIonCloudNodes, ION_CLOUD_DEFAULTS } from '../shaders/tsl/ionization-cloud.js';
 import { SHAPE_DEFAULTS } from '../shaders/tsl/shape.js';
 import { loadShapeAsset } from '../entities/shape.js';
@@ -1087,6 +1089,20 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uGxPolarW: uniform(Math.max(g.polarW, 1e-4)),
       uGxOff: uniform(offsetFrom(instanceSeed(e, 120, k), 121)),
       uDepthGx: uniform(e.depth ?? 0.13),
+
+      uGxsWind: uniform(g.starsWind),
+      /* A circular orbit set has no arms to crowd into; 1 is the honest off */
+      uGxsAxis: uniform(Math.min(Math.max(g.starsAxis, 0.05), 1)),
+      uGxsSpin: uniform(g.starsSpin),
+      /* Negative would speed the outside up and unwind the pattern backwards */
+      uGxsRotExp: uniform(Math.max(g.starsRotExp, 0)),
+      uGxsZH: uniform(Math.max(g.starsZH, 1e-4)),
+      uGxsSize: uniform(Math.max(g.starsSize, 0.05)),
+      uGxsGain: uniform(Math.max(g.starsGain, 0)),
+      uGxsLaneTau: uniform(Math.max(g.starsLaneTau, 0)),
+      /* Sprite sizes are device pixels, so this is what resize pokes instead of
+         rebuilding every instance buffer the way the bright tier has to. */
+      uGxsDpr: uniform(1),
     }, (b, aspect) => {
       b.uGxCenter.value.set(g.center[0] * aspect, g.center[1]);
       b.uGxfAt.value.set(g.clusterAt[0] * aspect, g.clusterAt[1]);
@@ -1098,6 +1114,20 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       showpiece: g.showpiece !== false,
       look: { ...look, bar: g.barAmt > 0 },
     };
+    /* Sprite tier follows the spiral gates: nested ellipses describe a disk,
+       not a shell or a detached ring. */
+    const spiral = bag.gxOpts.showpiece && !look.ring && !look.shell;
+    bag.gxsCount = spiral ? Math.max(0, Math.round(g.starsN) || 0) : 0;
+    /* Linked sprite arms take pitch, phase, and rotation from the glow's
+       pattern uniforms; a build gate, since it swaps the tilt chain. */
+    bag.gxsOpts = { linked: !(g.starsLink === false || g.starsLink === 0) };
+    /* Own-property null, or a k>0 bag would inherit instance 0's star field
+       through the Object.create(U) prototype chain. */
+    bag.gxsData = bag.gxsCount > 0
+      ? generateGalaxyStars(deriveSeed(instanceSeed(e, 120, k), 123), {
+        count: bag.gxsCount, bulgeFrac: clamp01(g.starsBulgeFrac),
+      })
+      : null;
     return bag;
   }
 
@@ -1345,6 +1375,36 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
 
   const lineScene = fullscreenPass(lineNode);
   const contScene = fullscreenPass(contNode);
+
+  /* Resolved galaxy stars: instanced sprites additively into the continuum
+     RT, so they parallax and lens with the glow they sit on. */
+  const gxStarMeshes = [];
+  for (const bag of gxInst) {
+    if (!bag.gxsCount) continue;
+    const nodes = buildGalaxyStarNodes(bag, bag.gxsOpts);
+    const mat = new THREE.MeshBasicNodeMaterial();
+    mat.positionNode = nodes.positionNode;
+    mat.fragmentNode = nodes.fragmentNode;
+    mat.transparent = true;
+    mat.blending = THREE.AdditiveBlending;
+    mat.depthTest = false;
+    mat.depthWrite = false;
+
+    const base = new THREE.PlaneGeometry(2, 2);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = base.index;
+    geo.setAttribute('position', base.getAttribute('position'));
+    geo.setAttribute('uv', base.getAttribute('uv'));
+    geo.setAttribute('iA', new THREE.InstancedBufferAttribute(bag.gxsData.iA, 4));
+    geo.setAttribute('iB', new THREE.InstancedBufferAttribute(bag.gxsData.iB, 4));
+    geo.instanceCount = bag.gxsData.count;
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 1;
+    contScene.add(mesh);
+    gxStarMeshes.push(mesh);
+  }
   const composeScene = fullscreenPass(buildComposeNodes({
     lineTex: lineRT.texture, contTex: contRT.texture, brightTex: brightRT.texture, U,
     layers: {
@@ -1504,6 +1564,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     /* Sky x spans [0, aspect], so framed positions scale or they slide toward
        the left edge as the canvas widens */
     for (const reseat of reseats) reseat(aspect);
+    for (const bag of gxInst) bag.uGxsDpr.value = dpr;
 
     rebuildBright();
   }
@@ -1560,6 +1621,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     /* Per unique asset, not per instance: two entities sharing one shape share
        one texture, and disposing it twice is a use-after-free on reroll. */
     for (const asset of shapeAssets.values()) asset.texture.dispose();
+    for (const mesh of gxStarMeshes) {
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
     renderer.dispose();
   }
 

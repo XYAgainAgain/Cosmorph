@@ -1093,11 +1093,11 @@ export const ENTITY_TYPES = [
     depth: 0.13,
     depthParam: { u: 'uDepthGx', max: 0.95 },
     addable: true,
-    mute: { gain: 0, fieldLum: 0, hii: 0, flowerGain: 0 },
+    mute: { gain: 0, fieldLum: 0, hii: 0, flowerGain: 0, starsGain: 0 },
     groups: [
       'Tiers', 'Deep Field', 'Clustering', 'Redshift', 'Showpiece', 'Spiral Arms',
-      'Bar', 'Granulation', 'Bulge', 'Dust Lane', 'HII Knots', 'Shells', 'Ring',
-      'Spokes', 'Polar Ring', 'Evolution', 'Depth',
+      'Bar', 'Granulation', 'Resolved Stars', 'Sprite Arms', 'Bulge', 'Dust Lane',
+      'HII Knots', 'Shells', 'Ring', 'Spokes', 'Polar Ring', 'Evolution', 'Depth',
     ],
     params: [
       p('field', 'Deep-field tier', 0, 1, 1, 1, 'Tiers', 1, { kind: 'bool', structural: true }),
@@ -1215,6 +1215,25 @@ export const ENTITY_TYPES = [
       p('granDark', 'Dust mottling', 0, 0.6, 0.01, 0.2, 'Granulation', 2, { u: 'uGxGranDark' }),
       p('granFreq', 'Grain frequency', 20, 400, 1, 200, 'Granulation', 2, { u: 'uGxGranFreq' }),
       p('granTh', 'Grain threshold', 0.05, 0.95, 0.01, 0.7, 'Granulation', 3, { u: 'uGxGranTh' }),
+      /* Count and the bulge split resample CPU-side, so they rebuild; noRoll
+         because the dice tune a population, they never switch the tier on. */
+      p('starsN', 'Star count', 0, 24000, 100, 0, 'Resolved Stars', 1, { structural: true, noRoll: true }),
+      p('starsGain', 'Star gain', 0, 3, 0.01, 0.42, 'Resolved Stars', 1, { u: 'uGxsGain' }),
+      /* Linked, the sprite arms derive pitch, phase, and rotation from the
+         glow's Spiral Arms dials; the group collapses to this one row. */
+      p('starsLink', 'Link to glow arms', 0, 1, 1, 1, 'Sprite Arms', 1,
+        { kind: 'link', structural: true, noRoll: true }),
+      /* Tilt per unit semi-major axis: this alone sets the arm pitch, because
+         the arms are only where the nested ellipses crowd. */
+      p('starsWind', 'Ellipse winding', 0, 12, 0.01, 2.0, 'Sprite Arms', 1, { u: 'uGxsWind' }),
+      p('starsBulgeFrac', 'Bulge fraction', 0, 1, 0.01, 0.22, 'Resolved Stars', 2, { structural: true }),
+      p('starsAxis', 'Ellipse axis ratio', 0.3, 1, 0.01, 0.68, 'Resolved Stars', 2, { u: 'uGxsAxis' }),
+      p('starsSize', 'Star size', 0.3, 4, 0.05, 1.1, 'Resolved Stars', 2, { u: 'uGxsSize' }),
+      p('starsZH', 'Scale height', 0.002, 0.3, 0.001, 0.035, 'Resolved Stars', 2, { u: 'uGxsZH' }),
+      p('starsLaneTau', 'Far-side extinction', 0, 4, 0.01, 1.2, 'Resolved Stars', 2, { u: 'uGxsLaneTau' }),
+      p('starsSpin', 'Orbital rate', 0, 0.05, 0.00001, 0.02, 'Resolved Stars', 2, { u: 'uGxsSpin' }),
+      /* 1 is a flat rotation curve; 0 makes the whole disk turn rigidly */
+      p('starsRotExp', 'Rotation curve', 0, 2, 0.01, 1.0, 'Resolved Stars', 3, { u: 'uGxsRotExp' }),
       p('bulgeAmt', 'Bulge weight', 0, 6, 0.01, 1.6, 'Bulge', 1, { u: 'uGxBulgeAmt' }),
       p('bulgeR', 'Bulge radius', 0.005, 1, 0.005, 0.16, 'Bulge', 1, { u: 'uGxBulgeR' }),
       p('bulgeBeta', 'Moffat beta', 0.5, 6, 0.01, 1.5, 'Bulge', 2, { u: 'uGxBulgeBeta' }),
@@ -1536,6 +1555,8 @@ export const GROUP_GATES = {
     'Spiral Arms': ['showpiece', '!look.ring', '!look.shell'],
     Bar: ['showpiece', '!look.ring', '!look.shell'],
     Granulation: ['showpiece', '!look.ring', '!look.shell'],
+    'Resolved Stars': ['showpiece', '!look.ring', '!look.shell'],
+    'Sprite Arms': ['showpiece', '!look.ring', '!look.shell', '!starsLink'],
     'Dust Lane': ['showpiece', '!look.ring', '!look.shell'],
     Shells: ['showpiece', '!look.ring', 'look.shell'],
     Ring: ['showpiece', 'look.ring'],
