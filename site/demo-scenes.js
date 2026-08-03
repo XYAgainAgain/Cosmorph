@@ -1145,6 +1145,55 @@ SCENES.all = (seed, aspect) => {
   return scene;
 };
 
+/* Marched Bok globules over an emission wall: the volumetric dust scaffold.
+   `march: true` routes darkDust to the shared slab march instead of the wisp. */
+SCENES.dust = (seed) => {
+  const r = jitter(seed, 50);
+  const ionSrc = [1.08, 0.16];
+  const cx = 0.4 + r.next() * 0.2;
+  const cy = 0.42 + r.next() * 0.16;
+  return base(seed, [
+    {
+      type: 'emission',
+      seed: deriveSeed(seed, 2),
+      depth: 0.3,
+      lock: false,
+      params: { ionSrc, ionRadius: 0.9, covLo: 0.24, covHi: 0.44, gain: 0.5 },
+    },
+    {
+      type: 'darkDust',
+      seed: deriveSeed(seed, 51),
+      depth: 0.58,
+      lock: false,
+      params: {
+        march: true,
+        ionSrc,
+        center: [cx, cy],
+        radius: 0.17,
+        squash: 0.72 + r.next() * 0.2,
+        rot: (r.next() - 0.5) * 1.4,
+        tau: 5.0,
+      },
+    },
+    {
+      type: 'darkDust',
+      seed: deriveSeed(seed, 52),
+      depth: 0.5,
+      lock: false,
+      params: {
+        march: true,
+        ionSrc,
+        center: [cx - 0.22 + r.next() * 0.08, cy + 0.18 + r.next() * 0.1],
+        radius: 0.09,
+        squash: 0.85,
+        rot: (r.next() - 0.5) * 1.4,
+        tau: 4.2,
+        feather: 0.07,
+      },
+    },
+  ]);
+};
+
 /* Two arcs and two lit clouds at once: the multi-instance proof. Each copy
    carries its own seed, params, and depth, so they part ways under parallax. */
 SCENES.multi = (seed, aspect) => {

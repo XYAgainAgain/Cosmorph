@@ -29,6 +29,8 @@ import { buildIonCloudNodes, ION_CLOUD_DEFAULTS } from '../shaders/tsl/ionizatio
 import { SHAPE_DEFAULTS } from '../shaders/tsl/shape.js';
 import { loadShapeAsset } from '../entities/shape.js';
 import { LENS_DEFAULTS, LENS_MAX_HALOS } from '../shaders/tsl/lensing.js';
+import { DUST_MARCH_DEFAULTS } from '../shaders/tsl/dustmarch.js';
+import { buildDustPass } from './dustpass.js';
 import { buildComposeNodes } from '../shaders/tsl/compose.js';
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
@@ -155,7 +157,14 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     echo: [], shadowFan: [], searchlight: [], planetary: [], jets: [], wrbubble: [],
     clusters: [], galaxies: [], ionCloud: [], shape: [],
   };
+  /* `march: true` routes a darkDust entity to the volumetric dust pass;
+     without it the type keeps its one flat-wisp slot, untouched. */
+  const dustEnts = [];
   for (const e of config.entities) {
+    if (e.type === 'darkDust' && e.params?.march === true) {
+      dustEnts.push(e);
+      continue;
+    }
     if (featureEnts[e.type]) {
       featureEnts[e.type].push(e);
       continue;
@@ -1251,6 +1260,79 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     return bag;
   }
 
+  function dustBag(e, k) {
+    const d = { ...DUST_MARCH_DEFAULTS, ...e.params };
+    const bag = makeBag(k, {
+      uDmCenter: uniform(new THREE.Vector2(0, 0)),
+      uDmRadius: uniform(new THREE.Vector2(
+        Math.max(d.radius, 1e-3),
+        Math.max(d.radius * Math.max(d.squash, 0.05), 1e-3),
+      )),
+      uDmRot: uniform(d.rot),
+      uDmFeather: uniform(Math.max(d.feather, 1e-3)),
+      uDmDens: uniform(Math.max(d.density, 0)),
+      uDmVeil: uniform(clamp01(d.veil)),
+      uDmFreq: uniform(d.freq),
+      uDmZFreq: uniform(Math.max(d.zDetail, 0)),
+      uDmMorph: uniform(d.morphRate),
+      uDmEroFreq: uniform(d.eroFreq),
+      uDmErode: uniform(clamp01(d.erode)),
+      uDmEroSharp: uniform(Math.max(d.eroSharp, 0.1)),
+      uDmTh: uniform(d.threshold),
+      uDmSoft: uniform(Math.max(d.softness, 1e-3)),
+      uDmTau: uniform(Math.max(d.tau, 0)),
+      uDmThick: uniform(Math.max(d.thickness, 1e-3)),
+      uDmThickMin: uniform(clamp01(d.thickFloor)),
+      uDmBias: uniform(Math.max(d.thickBias, 0)),
+      uDmIonSrc: uniform(new THREE.Vector2(0, 0)),
+      uDmIonR2: uniform(Math.max(d.ionRadius ** 2, 1e-4)),
+      uDmHotLo: uniform(d.hotLo),
+      uDmHotHi: uniform(Math.max(d.hotHi, d.hotLo + 0.001)),
+      uDmReach: uniform(Math.max(d.shadowReach, 1e-3)),
+      uDmShadowK: uniform(Math.max(d.shadowK, 0)),
+      uDmShadowSelf: uniform(Math.max(d.shadowSelf, 0)),
+      uDmFrontW: uniform(Math.max(d.frontWidth, 1e-3)),
+      uDmSkinGain: uniform(Math.max(d.skinGain, 0)),
+      uDmRimGain: uniform(Math.max(d.rimGain, 0)),
+      uDmRimOiii: uniform(Math.max(d.rimOiii, 0)),
+      uDmRimSii: uniform(Math.max(d.rimSii, 0)),
+      uDmKnotFreq: uniform(d.knotFreq),
+      uDmKnot: uniform(clamp01(d.knot)),
+      uDmScatter: uniform(Math.max(d.scatter, 0)),
+      uDmGain: uniform(Math.max(d.gain, 0)),
+      uDmEye: uniform(new THREE.Vector2(0, 0)),
+      uDmEyeZ: uniform(Math.max(d.eyeDepth, 1e-2)),
+      uDmOff: uniform(offsetFrom(instanceSeed(e, 137, k), 137)),
+      uDepthDm: uniform(e.depth ?? 0.55),
+    }, (b, aspect) => {
+      b.uDmCenter.value.set(d.center[0] * aspect, d.center[1]);
+      b.uDmIonSrc.value.set(d.ionSrc[0] * aspect, d.ionSrc[1]);
+      b.uDmEye.value.set(d.eye[0] * aspect, d.eye[1]);
+    });
+    /* Build gates ride the bag; octave counts change the emitted shader */
+    bag.dustOpts = {
+      octaves: d.octaves, eroOctaves: d.eroOctaves, shadow: d.shadow !== false,
+    };
+    warnTauDepth('darkDust', e.depth ?? 0.55);
+    return bag;
+  }
+
+  /* Pass-level march dials (one schedule for the whole batch); the first
+     marched entity's params win. Created only when the pass exists, so a
+     dust-less scene compiles the exact graph it always did. */
+  if (dustEnts.length > 0) {
+    const d0 = { ...DUST_MARCH_DEFAULTS, ...dustEnts[0].params };
+    const steps = Math.min(Math.max(Math.round(d0.steps) || 32, 4), 64);
+    Object.assign(U, {
+      uDmSteps: uniform(steps, 'int'),
+      uDmDu: uniform(2 / steps),
+      uDmTauCut: uniform(Math.max(d0.tauCutoff, 0.5)),
+      uDmFrontK: uniform(Math.max(d0.frontK, 0)),
+      uDmSkip: uniform(Math.max(d0.skipEps, 1e-5)),
+      uDepthDust: uniform(dustEnts[0].depth ?? 0.55),
+    });
+  }
+
   const globInst = featureEnts.globules.map((e, k) => globulesBag(e, k));
   const reflInst = featureEnts.reflection.map((e, k) => reflectionBag(e, k));
   const filInst = featureEnts.filaments.map((e, k) => filamentsBag(e, k));
@@ -1265,6 +1347,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const gxInst = featureEnts.galaxies.map((e, k) => galaxiesBag(e, k));
   const ionInst = featureEnts.ionCloud.map((e, k) => ionCloudBag(e, k));
   const shapeInst = featureEnts.shape.map((e, i) => shapeBag(e, shapeIdx[i]));
+  const dustInst = dustEnts.map((e, k) => dustBag(e, k));
 
   /* Layer passes render an overscanned domain so compose can offset without
      sampling past an RT edge */
@@ -1405,6 +1488,16 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     contScene.add(mesh);
     gxStarMeshes.push(mesh);
   }
+  /* The dust march renders its own MRT before compose; entities pre-shift to
+     the pass RT depth exactly the way the other shared-RT layers do. */
+  const dust = dustInst.length > 0
+    ? buildDustPass({
+      instances: dustInst,
+      U,
+      skyAt: (depthU) => skyAtDepth(depthU, U.uDepthDust),
+    })
+    : null;
+
   const composeScene = fullscreenPass(buildComposeNodes({
     lineTex: lineRT.texture, contTex: contRT.texture, brightTex: brightRT.texture, U,
     layers: {
@@ -1417,6 +1510,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       starcloud: scBag?.scOpts.rift ? [scBag] : [],
     },
     lens: lensOn ? { halos: lensHalos } : null,
+    dust: dust ? { lineTex: dust.lineTex, contTex: dust.contTex } : null,
   }));
 
   /* Bright tier: instanced quads, rebuilt on resize because sizes are in
@@ -1554,6 +1648,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     lineRT.setSize(w, h);
     contRT.setSize(w, h);
     brightRT.setSize(w, h);
+    if (dust) dust.setSize(w, h);
 
     const aspect = cssW / cssH;
     U.uResolution.value.set(w, h);
@@ -1581,6 +1676,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     renderer.render(contScene, camera);
     renderer.setRenderTarget(brightRT);
     renderer.render(brightScene, camera);
+    if (dust) {
+      renderer.setRenderTarget(dust.rt);
+      renderer.render(dust.scene, camera);
+    }
     renderer.setRenderTarget(target);
     renderer.render(composeScene, camera);
     if (target) renderer.setRenderTarget(null);
@@ -1618,6 +1717,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     lineRT.dispose();
     contRT.dispose();
     brightRT.dispose();
+    dust?.dispose();
     /* Per unique asset, not per instance: two entities sharing one shape share
        one texture, and disposing it twice is a use-after-free on reroll. */
     for (const asset of shapeAssets.values()) asset.texture.dispose();
@@ -1650,6 +1750,7 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       galaxies: gxInst.slice(),
       ionCloud: ionInst.slice(),
       shape: shapeInst.slice(),
+      dustMarch: dustInst.slice(),
     },
   };
 }

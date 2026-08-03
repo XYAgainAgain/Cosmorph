@@ -20,7 +20,7 @@ import { lensWarp } from './lensing.js';
    reflection self-extinguishes under its own summed tau is deliberate. */
 const SIGMA = WISP_SIGMA;
 
-export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {}, lens = null }) {
+export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {}, lens = null, dust = null }) {
   return Fn(() => {
     const screen = uv();
 
@@ -110,6 +110,10 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
       tau = tau.add(riftTau(skyAt(bag.uDepthSC), bag));
     }
     for (const s of shapes) tau = tau.add(s.tau);
+    /* Marched dust: attachment 0 carries line emission in RGB and summed tau
+       in A, attachment 1 carries continuum. Its tau joins the single sum. */
+    const dustLine = dust ? texture(dust.lineTex, sampleAt(U.uDepthDust)).toVar() : null;
+    if (dustLine) tau = tau.add(dustLine.a);
     const T3 = exp(tau.negate().mul(SIGMA));
 
     /* Line emission takes the palette matrix and SCNR wherever it enters, so
@@ -126,6 +130,12 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
     let lit = toRGB(line).add(cont).mul(T3);
     for (const g of globs) lit = lit.add(toRGB(g.rim));
     for (const s of shapes) lit = lit.add(toRGB(s.rim));
+    /* The march front-attenuated its emission internally, so it lands AFTER
+       the transmittance multiply, like the rims; a second T3 erases the front. */
+    if (dustLine) {
+      lit = lit.add(toRGB(dustLine.rgb))
+        .add(texture(dust.contTex, sampleAt(U.uDepthDust)).rgb);
+    }
 
     const scene = lit.add(bright).mul(U.uExposure);
 
