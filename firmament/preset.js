@@ -17,17 +17,29 @@ const MAX_SEED = 0x7FFFFFFF;
 
 export const randomSeed = () => Math.floor(Math.random() * MAX_SEED);
 
+/* How many of one type a scene may hold. Stars writes fixed shader slots and
+   carries no depth rank, so it is the one type the engine still takes once. */
+export const MAX_INSTANCES = 3;
+export const instanceCap = (type) => (TYPE_BY_ID[type].pinned ? 1 : MAX_INSTANCES);
+
+/* Instance 0 keeps the bare salt so an existing sky stays bit-identical; copies
+   climb the same ladder sky2d uses for an unseeded duplicate. */
+export function entitySeed(rootSeed, type, k = 0) {
+  const { salt } = TYPE_BY_ID[type];
+  return deriveSeed(rootSeed, k === 0 ? salt : salt * 1000 + k);
+}
+
 function gradingDefaults() {
   const out = {};
   for (const param of SCENE_PARAMS) out[param.key] = param.def;
   return out;
 }
 
-export function makeEntity(type, rootSeed, seed = null) {
+export function makeEntity(type, rootSeed, seed = null, k = 0) {
   const spec = TYPE_BY_ID[type];
   return {
     type,
-    seed: seed ?? deriveSeed(rootSeed, spec.salt),
+    seed: seed ?? entitySeed(rootSeed, type, k),
     depth: spec.depth ?? 0,
     order: spec.rank,
     lock: false,
@@ -93,7 +105,9 @@ function lensingFrom(grading) {
 
 export function buildEngineConfig(scene) {
   const listed = new Set(scene.entities.map((e) => e.type));
-  const entities = scene.entities.map((e) => ({
+  /* Emitted in list order: sky2d indexes each type's instance bags by their
+     position in this array, and that has to be the A/B/C the panel shows. */
+  const entities = sortEntities(scene.entities).map((e) => ({
     type: e.type,
     seed: e.seed,
     depth: e.depth,
@@ -136,7 +150,9 @@ export function serialize(scene, savedT = 0) {
     grading: { ...scene.grading },
     evolution: { rate: scene.evolutionRate, savedT },
     camera: { x: scene.camera.x, y: scene.camera.y },
-    entities: scene.entities.map((e) => ({
+    /* Written in list order so a file that loses its `order` fields still
+       reloads its copies as the same A/B/C */
+    entities: sortEntities(scene.entities).map((e) => ({
       type: e.type,
       seed: e.seed,
       depth: e.depth,
@@ -207,7 +223,7 @@ export function deserialize(raw) {
   }
 
   if (Array.isArray(raw.entities)) {
-    const seen = new Set();
+    const counts = new Map();
     const entities = [];
     for (const item of raw.entities) {
       const type = item?.type;
@@ -215,17 +231,17 @@ export function deserialize(raw) {
         if (type) warnings.push(`Unknown entity type "${type}" was skipped.`);
         continue;
       }
-      /* Firmament's entity list is type-keyed; the engine now multiplies
-         globules/reflection/filaments, so the studio is the constraint here. */
-      if (seen.has(type)) {
-        warnings.push(`Duplicate "${type}" entity was dropped (the studio edits one per type).`);
+      const k = counts.get(type) ?? 0;
+      const cap = instanceCap(type);
+      if (k >= cap) {
+        warnings.push(`"${type}" appeared more than ${cap} time${cap === 1 ? '' : 's'}; the extra entity was dropped.`);
         continue;
       }
-      seen.add(type);
+      counts.set(type, k + 1);
       const spec = TYPE_BY_ID[type];
       entities.push({
         type,
-        seed: Math.abs(Math.trunc(num(item.seed, deriveSeed(seed, spec.salt)))) % MAX_SEED,
+        seed: Math.abs(Math.trunc(num(item.seed, entitySeed(seed, type, k)))) % MAX_SEED,
         depth: clamp(num(item.depth, spec.depth ?? 0), 0, spec.depthParam?.max ?? 1),
         order: Math.trunc(num(item.order, spec.rank)),
         lock: item.lock === true,
@@ -251,10 +267,14 @@ export function deserialize(raw) {
    its stored order, because its tier has no depth uniform to rank. */
 export function sortEntities(entities) {
   const rank = (e) => (TYPE_BY_ID[e.type].pinned ? -1e9 : e.order);
-  return [...entities].sort((a, b) => {
-    const d = rank(a) - rank(b);
-    return d || TYPE_BY_ID[a.type].rank - TYPE_BY_ID[b.type].rank;
-  });
+  /* Array position is the last tie-break, so two copies of one type keep their
+     A/B/C letters across a load instead of trading places. */
+  const at = new Map(entities.map((e, i) => [e, i]));
+  return [...entities].sort((a, b) => (
+    rank(a) - rank(b)
+    || TYPE_BY_ID[a.type].rank - TYPE_BY_ID[b.type].rank
+    || at.get(a) - at.get(b)
+  ));
 }
 
 /* Smallest gap the Expert depth dial is allowed to leave between two ranks.
@@ -285,10 +305,10 @@ export function normalizeOrder(entities) {
 
 /* Drops one entity at a list index and re-derives depth. Returns false when the
    move is blocked or a no-op, so the caller can skip a pointless repaint. */
-export function placeEntity(entities, type, index) {
-  if (TYPE_BY_ID[type].pinned) return false;
+export function placeEntity(entities, entity, index) {
+  if (!entity || TYPE_BY_ID[entity.type].pinned) return false;
   const sorted = sortEntities(entities);
-  const from = sorted.findIndex((e) => e.type === type);
+  const from = sorted.indexOf(entity);
   if (from < 0) return false;
   /* Pinned rows hold the head of the list, so nothing may land above them */
   const first = sorted.findIndex((e) => !TYPE_BY_ID[e.type].pinned);
@@ -300,7 +320,7 @@ export function placeEntity(entities, type, index) {
   return true;
 }
 
-export function moveEntity(entities, type, delta) {
-  const at = sortEntities(entities).findIndex((e) => e.type === type);
-  return at >= 0 && placeEntity(entities, type, at + delta);
+export function moveEntity(entities, entity, delta) {
+  const at = sortEntities(entities).indexOf(entity);
+  return at >= 0 && placeEntity(entities, entity, at + delta);
 }

@@ -89,7 +89,11 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
 
     /* One exp over the summed optical depth: extinguishing layer by layer would
        double-count the reddening in every overlap */
-    let tau = wispTau(skyAt(U.uDepthWisp), U);
+    const wisps = layers.darkDust ?? [];
+    let tau = wisps.length > 0
+      ? wispTau(skyAt(wisps[0].uDepthWisp), wisps[0])
+      : float(0);
+    for (const bag of wisps.slice(1)) tau = tau.add(wispTau(skyAt(bag.uDepthWisp), bag));
     for (const g of globs) tau = tau.add(g.tau);
     for (const bag of layers.reflection ?? []) {
       tau = tau.add(reflectionTau(skyAt(bag.uDepthRefl), bag));

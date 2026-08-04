@@ -203,7 +203,7 @@
 
   .hero__line {
     margin-block-start: 1.5rem;
-    color: var(--muted);
+    color: var(--ink);
     font-size: var(--step-1);
     line-height: 1.55;
   }

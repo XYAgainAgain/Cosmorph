@@ -10,9 +10,8 @@ import {
 import {
   createScene, buildEngineConfig, serialize, deserialize, sortEntities,
   makeEntity, randomSeed, effectiveParams, normalizeOrder, placeEntity, moveEntity,
-  DEPTH_GAP, DEFAULT_SEED,
+  entitySeed, instanceCap, DEPTH_GAP, DEFAULT_SEED,
 } from './preset.js';
-import { deriveSeed } from '/engine/core/rng.js';
 
 const STORE_PRESET = 'cosmorph:firmament:preset';
 const STORE_UI = 'cosmorph:firmament:ui';
@@ -77,7 +76,10 @@ const ui = {
   /* null means "never touched": the themes' own glass defaults still apply */
   panelAlpha: null,
   collapsed: false,
-  selected: 'emission',
+  /* The selected entity object itself, so a reorder cannot slide the selection
+     onto a neighbor; `selectedRef` is its (type, k) mirror, for storage only. */
+  selected: null,
+  selectedRef: { type: 'emission', k: 0 },
   openGroups: new Set(),
   scrubMax: 168,
   scrubBusy: false,
@@ -93,11 +95,74 @@ let scene = createScene(Number.isFinite(urlSeed) ? urlSeed : DEFAULT_SEED);
 let paletteRows = null;
 let rebuildTimer = 0;
 let rebuildPending = false;
-let dragType = null;
+let dragEntity = null;
 
 const host = createSkyHost({ mount: dom.stack, forceGL });
 
+/* Instance identity
+
+   An entity is named by (type, k), where k counts same-type rows in list order.
+   That is the index sky2d gives its per-type uniform bags, and the letter the
+   row wears. buildEngineConfig emits in list order to keep the two agreed. */
+
+const LETTERS = 'ABC';
+
+function* instanceRows() {
+  const seen = new Map();
+  for (const entity of sortEntities(scene.entities)) {
+    const k = seen.get(entity.type) ?? 0;
+    seen.set(entity.type, k + 1);
+    yield { entity, k };
+  }
+}
+
+function instanceIndex(entity) {
+  for (const row of instanceRows()) if (row.entity === entity) return row.k;
+  return -1;
+}
+
+function entityAt(type, k) {
+  for (const row of instanceRows()) if (row.entity.type === type && row.k === k) return row.entity;
+  return null;
+}
+
+const typeCount = (type) => scene.entities.reduce((n, e) => n + (e.type === type ? 1 : 0), 0);
+
+/* Only a multiplied type earns a letter: a lone reflection nebula stays
+   "Reflection nebula", not "Reflection nebula A". */
+function labelFor(entity, k = instanceIndex(entity), count = typeCount(entity.type)) {
+  const { label } = TYPE_BY_ID[entity.type];
+  return count > 1 ? `${label} ${LETTERS[k] ?? k + 1}` : label;
+}
+
+const scopeKey = (entity) => `${entity.type}#${instanceIndex(entity)}`;
+
+const selectedEntity = () => (scene.entities.includes(ui.selected) ? ui.selected : null);
+
+function selectEntity(entity) {
+  ui.selected = entity ?? null;
+  ui.selectedRef = entity ? { type: entity.type, k: instanceIndex(entity) } : null;
+}
+
+/* Re-seats the selection after the scene is replaced or an entity leaves: the
+   stored (type, k) is the only way back once the object is gone. */
+function resolveSelection() {
+  if (selectedEntity()) return;
+  const ref = ui.selectedRef;
+  const found = ref ? entityAt(ref.type, ref.k) ?? entityAt(ref.type, 0) : null;
+  selectEntity(found ?? sortEntities(scene.entities)[0] ?? null);
+}
+
 /* State to uniforms */
+
+/* Instance 0's bag IS sky.uniforms, so a singleton type routes exactly as it
+   did before the engine started multiplying entities. */
+const bagFor = (sky, type, k) => sky.instances?.[type]?.[k] ?? sky.uniforms;
+
+function entityBag(entity) {
+  if (!host.uniforms) return null;
+  return host.instances?.[entity.type]?.[instanceIndex(entity)] ?? host.uniforms;
+}
 
 function uniformCtx(entity) {
   return {
@@ -124,27 +189,28 @@ function applyPalette(U) {
 
 /* Runs after every build and every resize: resize() re-seats aspect-scaled
    framed positions from the build-time params, which would drop live edits. */
-function applyAll(sky) {
+function applyAll(sky = { uniforms: host.uniforms, instances: host.instances }) {
   const U = sky?.uniforms;
   if (!U) return;
   applyPalette(U);
   for (const param of SCENE_PARAMS) applyParam(U, param, scene.grading[param.key], {});
-  for (const entity of scene.entities) {
+  for (const { entity, k } of instanceRows()) {
     const spec = TYPE_BY_ID[entity.type];
+    const bag = bagFor(sky, entity.type, k);
     /* A build still in flight when the scene gained an entity has no uniforms
        for it; the rebuild it queued behind will seat them. A permanent skip
        here means a typo'd depthParam.u, hence the warn. */
-    if (spec.depthParam && !U[spec.depthParam.u]) {
-      console.warn(`Firmament: no ${spec.depthParam.u} in this build; "${entity.type}" edits deferred to the rebuild.`);
+    if (spec.depthParam && !bag[spec.depthParam.u]) {
+      console.warn(`Firmament: no ${spec.depthParam.u} in this build; "${entity.type}"[${k}] edits deferred to the rebuild.`);
       continue;
     }
     const ctx = uniformCtx(entity);
     for (const param of spec.params) {
       if (param.derived) continue;
       const value = getPath(ctx.params, param.key);
-      if (value !== undefined) applyParam(U, param, value, ctx);
+      if (value !== undefined) applyParam(bag, param, value, ctx);
     }
-    if (spec.depthParam && U[spec.depthParam.u]) U[spec.depthParam.u].value = entity.depth;
+    if (spec.depthParam && bag[spec.depthParam.u]) bag[spec.depthParam.u].value = entity.depth;
   }
 }
 
@@ -197,7 +263,7 @@ const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 function saveUi() {
   try {
     localStorage.setItem(STORE_UI, JSON.stringify({
-      tier: ui.tier, theme: ui.theme, collapsed: ui.collapsed, selected: ui.selected,
+      tier: ui.tier, theme: ui.theme, collapsed: ui.collapsed, selected: ui.selectedRef,
       filingOpen: ui.filingOpen, shotSize: ui.shotSize, camOpen: ui.camOpen,
       creditsOpen: ui.creditsOpen, dock: ui.dock, panelAlpha: ui.panelAlpha,
     }));
@@ -210,7 +276,11 @@ function loadUi() {
     if (!raw) return;
     if (raw.tier === 1 || raw.tier === 2 || raw.tier === 3) ui.tier = raw.tier;
     if (UI_THEMES.some((t) => t.id === raw.theme)) ui.theme = raw.theme;
-    if (TYPE_BY_ID[raw.selected]) ui.selected = raw.selected;
+    /* Blobs written before entities could repeat store a bare type string */
+    const ref = typeof raw.selected === 'string' ? { type: raw.selected, k: 0 } : raw.selected;
+    if (ref && TYPE_BY_ID[ref.type]) {
+      ui.selectedRef = { type: ref.type, k: Math.max(0, Math.trunc(Number(ref.k)) || 0) };
+    }
     if (CAPTURE_SIZES.some((c) => c.id === raw.shotSize)) ui.shotSize = raw.shotSize;
     if (raw.dock === 'start' || raw.dock === 'end') ui.dock = raw.dock;
     if (Number.isFinite(raw.panelAlpha)) ui.panelAlpha = clampAlpha(raw.panelAlpha);
@@ -299,20 +369,22 @@ function sliderRow(param, value, keyAttr) {
   </div>`;
 }
 
-function groupKey(type, group) {
-  return `${type}:${group}`;
+/* Scope is "scene" or one entity's "type#k", so two copies of a type remember
+   their open groups apart. */
+function groupKey(scope, group) {
+  return `${scope}:${group}`;
 }
 
-function isGroupOpen(type, group, hasBasic) {
-  const key = groupKey(type, group);
+function isGroupOpen(scope, group, hasBasic) {
+  const key = groupKey(scope, group);
   if (ui.openGroups.has(`-${key}`)) return false;
   return ui.openGroups.has(key) || hasBasic;
 }
 
 /* Remembering which groups the user opened survives a tier switch */
-function rememberGroup(type, details) {
+function rememberGroup(scope, details) {
   if (!details.classList?.contains('group')) return;
-  const key = groupKey(type, details.dataset.group);
+  const key = groupKey(scope, details.dataset.group);
   ui.openGroups.delete(key);
   ui.openGroups.delete(`-${key}`);
   ui.openGroups.add(details.open ? key : `-${key}`);
@@ -414,56 +486,63 @@ function renderSceneParams() {
 }
 
 function renderEntityList() {
-  const ordered = sortEntities(scene.entities);
-  const rows = ordered.map((entity, index) => {
+  const listed = [...instanceRows()];
+  const counts = new Map();
+  for (const { entity } of listed) counts.set(entity.type, (counts.get(entity.type) ?? 0) + 1);
+
+  const rows = listed.map(({ entity, k }, index) => {
     const spec = TYPE_BY_ID[entity.type];
-    const current = entity.type === ui.selected;
+    const name = labelFor(entity, k, counts.get(entity.type));
+    const id = `data-type="${entity.type}" data-k="${k}"`;
+    const current = entity === ui.selected;
     const grip = spec.pinned
       ? `<span class="grip" aria-hidden="true" title="Stars always sit farthest away">${PIN}</span>`
       /* The handle carries `draggable` of its own: a button inside a draggable
          row swallows the gesture rather than starting the row's drag. */
-      : `<button class="grip" type="button" draggable="true" data-act="grip" data-type="${entity.type}"
-          aria-label="Reorder ${spec.label}, ${index + 1} of ${ordered.length} from farthest. Arrow up moves it farther, arrow down nearer.">${GRIP}</button>`;
+      : `<button class="grip" type="button" draggable="true" data-act="grip" ${id}
+          aria-label="Reorder ${name}, ${index + 1} of ${listed.length} from farthest. Arrow up moves it farther, arrow down nearer.">${GRIP}</button>`;
     return `<li class="entity ${current ? 'is-current' : ''} ${entity.hidden ? 'is-hidden' : ''} ${entity.lock ? 'is-locked' : ''}"
-      data-type="${entity.type}" data-index="${index}" ${spec.pinned ? '' : 'draggable="true"'}>
+      ${id} data-index="${index}" ${spec.pinned ? '' : 'draggable="true"'}>
       ${grip}
-      <button class="icon-btn" type="button" data-act="visible" data-type="${entity.type}"
-        aria-pressed="${!entity.hidden}" aria-label="${entity.hidden ? 'Show' : 'Hide'} ${spec.label}">
+      <button class="icon-btn" type="button" data-act="visible" ${id}
+        aria-pressed="${!entity.hidden}" aria-label="${entity.hidden ? 'Show' : 'Hide'} ${name}">
         ${entity.hidden ? EYE_OFF : EYE_ON}
       </button>
-      <button class="entity__pick" type="button" data-act="select" data-type="${entity.type}"
-        ${current ? 'aria-current="true"' : ''}>${spec.label}</button>
+      <button class="entity__pick" type="button" data-act="select" ${id}
+        ${current ? 'aria-current="true"' : ''}>${name}</button>
       <span class="seedcell">
         <span class="entity__lock" aria-hidden="true">${LOCK}</span>
         <span class="seed">#${entity.seed}</span>
       </span>
-      <jelly-checkbox size="small" data-act="lock" data-type="${entity.type}"
-        label="Lock ${spec.label}: keep this seed through Reroll Cosmos" ${entity.lock ? 'checked' : ''}></jelly-checkbox>
+      <jelly-checkbox size="small" data-act="lock" ${id}
+        label="Lock ${name}: keep this seed through Reroll Cosmos" ${entity.lock ? 'checked' : ''}></jelly-checkbox>
     </li>`;
   });
   keepScroll(() => { dom.list.innerHTML = HEAD_ROW + rows.join(''); });
 
-  const present = new Set(scene.entities.map((e) => e.type));
   dom.adders.innerHTML = ENTITY_TYPES
-    .filter((t) => !present.has(t.type))
+    .filter((t) => (counts.get(t.type) ?? 0) < instanceCap(t.type))
     .map((t) => `<button class="btn" type="button" data-act="add" data-type="${t.type}">+ ${t.label}</button>`)
     .join('');
 }
 
 function renderEntityDetail() {
-  const entity = scene.entities.find((e) => e.type === ui.selected);
+  const entity = selectedEntity();
   if (!entity) {
     dom.heading.textContent = 'Parameters';
     dom.detail.innerHTML = '<p class="hint">Select an entity to tune it, or add one from the list above.</p>';
     return;
   }
   const spec = TYPE_BY_ID[entity.type];
-  dom.heading.textContent = spec.label;
+  const k = instanceIndex(entity);
+  const name = labelFor(entity, k);
+  const scope = `${entity.type}#${k}`;
+  dom.heading.textContent = name;
 
   const head = `<div class="entity-head">
     <span class="entity-head__name">#${entity.seed}</span>
     <button class="icon-btn" type="button" data-act="reroll-entity" aria-label="Reroll this entity's seed">${DICE}</button>
-    <button class="icon-btn" type="button" data-act="remove" aria-label="Remove ${spec.label} from the scene">${TRASH}</button>
+    <button class="icon-btn" type="button" data-act="remove" aria-label="Remove ${name} from the scene">${TRASH}</button>
   </div>`;
 
   const byGroup = new Map(spec.groups.map((g) => [g, []]));
@@ -490,13 +569,13 @@ function renderEntityDetail() {
     const list = gated ? full.filter((p) => isGateRow(keys, p.key)) : full;
     if (!list.length) return '';
     const hasBasic = list.some((p) => p.tier === 1);
-    const open = isGroupOpen(entity.type, group, hasBasic);
+    const open = isGroupOpen(scope, group, hasBasic);
     const rows = list.map((param) => {
       let value;
       if (param.synthetic) value = entity.depth;
       else if (param.read) value = param.read(eff);
       else value = getPath(eff, param.key);
-      return sliderRow(param, value, entity.type);
+      return sliderRow(param, value, `${entity.type}-${k}`);
     }).join('');
     /* Depth holds one synthetic row and nothing the dice could roll, and a gated
        group has nothing on show but the gate itself */
@@ -643,7 +722,7 @@ function commitParam(entity, param, value, live = false) {
   if (param.synthetic) {
     const bound = depthBounds(entity);
     entity.depth = Math.min(Math.max(value, bound.min), bound.max);
-    const slot = host.uniforms?.[TYPE_BY_ID[entity.type].depthParam.u];
+    const slot = entityBag(entity)?.[TYPE_BY_ID[entity.type].depthParam.u];
     if (slot) slot.value = entity.depth;
     return true;
   }
@@ -671,8 +750,9 @@ function commitParam(entity, param, value, live = false) {
     return true;
   }
   setPath(entity.params, param.key, value);
-  if (host.uniforms && !entity.hidden) applyParam(host.uniforms, param, value, uniformCtx(entity));
-  else if (host.uniforms) applyAll({ uniforms: host.uniforms });
+  const bag = entityBag(entity);
+  if (bag && !entity.hidden) applyParam(bag, param, value, uniformCtx(entity));
+  else if (bag) applyAll();
   return true;
 }
 
@@ -701,7 +781,7 @@ function onParamEvent(event) {
      and every toggle reports the state it just left. Only change is truthful. */
   if (event.type === 'input' && node.localName === 'jelly-checkbox') return;
   const key = node.dataset.key;
-  const entity = scene.entities.find((e) => e.type === ui.selected);
+  const entity = selectedEntity();
 
   if (node.closest('#scene-params')) {
     const param = SCENE_PARAMS.find((p) => p.key === key);
@@ -775,7 +855,7 @@ function rerollGroup(entity, group) {
     owner.write(entity.params, owner.options[Math.floor(Math.random() * owner.options.length)].id);
     structural = true;
   }
-  if (host.uniforms) applyAll({ uniforms: host.uniforms });
+  applyAll();
   if (structural) scheduleRebuild();
   host.requestRender();
   renderEntityDetail();
@@ -839,16 +919,21 @@ function onPadKey(event) {
 /* Reorder */
 
 function applyDepths() {
-  const U = host.uniforms;
-  if (!U) return;
-  for (const entity of scene.entities) {
+  if (!host.uniforms) return;
+  const sky = { uniforms: host.uniforms, instances: host.instances };
+  for (const { entity, k } of instanceRows()) {
     const slot = TYPE_BY_ID[entity.type].depthParam?.u;
-    if (slot && U[slot]) U[slot].value = entity.depth;
+    const bag = bagFor(sky, entity.type, k);
+    if (slot && bag[slot]) bag[slot].value = entity.depth;
   }
   host.requestRender();
 }
 
-function afterReorder(message) {
+/* Dragging one copy past another of its own type permutes which engine bag
+   belongs to which row, and only a rebuild re-seats them. A cross-type move
+   cannot change any instance index, so it stays a live depth poke. */
+function afterReorder(message, swapped = false) {
+  if (swapped) scheduleRebuild();
   applyDepths();
   renderEntityList();
   markDirty();
@@ -889,9 +974,9 @@ async function rerollCosmos() {
     const seed = randomSeed();
     await veil(true);
     scene.seed = seed;
-    for (const entity of scene.entities) {
+    for (const { entity, k } of instanceRows()) {
       if (entity.lock) continue;
-      entity.seed = deriveSeed(seed, TYPE_BY_ID[entity.type].salt);
+      entity.seed = entitySeed(seed, entity.type, k);
     }
     syncSeedUrl();
     await rebuildNow();
@@ -966,6 +1051,8 @@ function syncSeedUrl() {
 async function adoptPreset(raw, source) {
   const { scene: next, savedT, warnings } = deserialize(raw);
   scene = next;
+  ui.selected = null;
+  resolveSelection();
   host.setTime(savedT);
   syncSeedUrl();
   await rebuildNow();
@@ -1255,9 +1342,9 @@ function wire() {
     const next = Number.parseInt(dom.seed.value, 10);
     if (!Number.isFinite(next) || next < 0) { dom.seed.value = String(scene.seed); return; }
     scene.seed = next;
-    for (const entity of scene.entities) {
+    for (const { entity, k } of instanceRows()) {
       if (entity.lock) continue;
-      entity.seed = deriveSeed(next, TYPE_BY_ID[entity.type].salt);
+      entity.seed = entitySeed(next, entity.type, k);
     }
     syncSeedUrl();
     await rebuildNow().catch(reportBootFailure);
@@ -1270,7 +1357,7 @@ function wire() {
     scene.palette = readSelect(dom.palette);
     /* sky2d forces SCNR 0.7 under SHO; mirror it so the dial tells the truth */
     if (scene.palette === 'sho' && scene.grading.scnr === 0) scene.grading.scnr = 0.7;
-    if (host.uniforms) { applyPalette(host.uniforms); applyAll({ uniforms: host.uniforms }); }
+    if (host.uniforms) { applyPalette(host.uniforms); applyAll(); }
     renderSceneParams();
     host.requestRender();
     markDirty();
@@ -1302,7 +1389,7 @@ function wire() {
     }
     const button = event.target.closest('button[data-act]');
     if (!button) return;
-    const entity = scene.entities.find((e) => e.type === ui.selected);
+    const entity = selectedEntity();
     if (!entity) return;
     /* The render replaces the button that was clicked, so the roll starts on
        its replacement rather than on the node about to be dropped. */
@@ -1321,17 +1408,22 @@ function wire() {
       renderEntityDetail();
       spinDice(dom.detail.querySelector('[data-act="reroll-entity"]'));
       markDirty();
-      say(`${TYPE_BY_ID[entity.type].label} reseeded.`);
+      say(`${labelFor(entity)} reseeded.`);
       return;
     }
     if (button.dataset.act === 'remove') {
-      scene.entities = scene.entities.filter((e) => e.type !== entity.type);
+      const name = labelFor(entity);
+      /* The row that slid up into the gap takes the selection, so removing a
+         middle copy does not throw the panel back to the top of the list. */
+      const at = sortEntities(scene.entities).indexOf(entity);
+      scene.entities = scene.entities.filter((e) => e !== entity);
       normalizeOrder(scene.entities);
-      ui.selected = sortEntities(scene.entities)[0]?.type ?? '';
+      const rest = sortEntities(scene.entities);
+      selectEntity(rest[Math.min(at, rest.length - 1)] ?? null);
       rebuildNow().catch(reportBootFailure);
       renderAll();
       markDirty();
-      say(`${TYPE_BY_ID[entity.type].label} removed.`);
+      say(`${name} removed.`);
     }
   });
 
@@ -1339,31 +1431,33 @@ function wire() {
     event.target.closest?.('.is-rolling')?.classList.remove('is-rolling');
   });
 
-  dom.detail.addEventListener('toggle', (e) => rememberGroup(ui.selected, e.target), true);
+  dom.detail.addEventListener('toggle', (e) => {
+    const entity = selectedEntity();
+    if (entity) rememberGroup(scopeKey(entity), e.target);
+  }, true);
   dom.sceneParams.addEventListener('toggle', (e) => rememberGroup('scene', e.target), true);
 
   dom.list.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-act]');
     if (!button) return;
-    const type = button.dataset.type;
+    const entity = entityAt(button.dataset.type, Number(button.dataset.k));
+    if (!entity) return;
     if (button.dataset.act === 'select') {
-      ui.selected = type;
+      selectEntity(entity);
       renderEntityList();
       renderEntityDetail();
       saveUi();
       return;
     }
     if (button.dataset.act === 'visible') {
-      const entity = scene.entities.find((e) => e.type === type);
-      if (!entity) return;
       entity.hidden = !entity.hidden;
-      if (host.uniforms) applyAll({ uniforms: host.uniforms });
+      applyAll();
       /* A structural mute key cannot be poked, so hiding the band would leave
          its rift extinction in the graph at full strength. Rebuild instead. */
-      if (mutesStructural(type)) scheduleRebuild();
+      if (mutesStructural(entity.type)) scheduleRebuild();
       host.requestRender();
       renderEntityList();
-      if (type === ui.selected) renderEntityDetail();
+      if (entity === ui.selected) renderEntityDetail();
       markDirty();
     }
   });
@@ -1388,10 +1482,14 @@ function wire() {
     const delta = { ArrowUp: -1, ArrowDown: 1 }[event.key] ?? 0;
     if (!delta) return;
     event.preventDefault();
-    const type = grip.dataset.type;
-    if (!moveEntity(scene.entities, type, delta)) return;
-    afterReorder(`${TYPE_BY_ID[type].label} moved ${delta < 0 ? 'farther' : 'nearer'}.`);
-    dom.list.querySelector(`[data-act="grip"][data-type="${type}"]`)?.focus();
+    const from = Number(grip.dataset.k);
+    const entity = entityAt(grip.dataset.type, from);
+    if (!moveEntity(scene.entities, entity, delta)) return;
+    /* The move can trade letters with the row it passed, so focus chases the
+       entity's new index rather than the one the grip was rendered with. */
+    const to = instanceIndex(entity);
+    afterReorder(`${labelFor(entity)} moved ${delta < 0 ? 'farther' : 'nearer'}.`, to !== from);
+    dom.list.querySelector(`[data-act="grip"][data-type="${entity.type}"][data-k="${to}"]`)?.focus();
   });
 
   /* Firefox can float a native drag ghost off a flung slider; only the entity
@@ -1403,16 +1501,17 @@ function wire() {
   dom.list.addEventListener('dragstart', (event) => {
     const row = event.target.closest?.('li.entity');
     if (!row || TYPE_BY_ID[row.dataset.type]?.pinned) { event.preventDefault(); return; }
-    dragType = row.dataset.type;
+    dragEntity = entityAt(row.dataset.type, Number(row.dataset.k));
+    if (!dragEntity) { event.preventDefault(); return; }
     /* Firefox will not start a drag without a payload on the transfer */
-    event.dataTransfer.setData('text/plain', dragType);
+    event.dataTransfer.setData('text/plain', dragEntity.type);
     event.dataTransfer.effectAllowed = 'move';
     row.classList.add('is-dragging');
   });
 
   dom.list.addEventListener('dragover', (event) => {
     const row = event.target.closest?.('li.entity');
-    if (!dragType || !row || TYPE_BY_ID[row.dataset.type]?.pinned) return;
+    if (!dragEntity || !row || TYPE_BY_ID[row.dataset.type]?.pinned) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     for (const node of dom.list.children) node.classList.toggle('is-over', node === row);
@@ -1420,13 +1519,14 @@ function wire() {
 
   dom.list.addEventListener('drop', (event) => {
     const row = event.target.closest?.('li.entity');
-    if (!dragType || !row) return;
+    if (!dragEntity || !row) return;
     event.preventDefault();
-    const type = dragType;
+    const entity = dragEntity;
     const index = Number(row.dataset.index);
-    dragType = null;
-    if (placeEntity(scene.entities, type, index)) {
-      afterReorder(`${TYPE_BY_ID[type].label} moved to position ${index + 1}.`);
+    const from = instanceIndex(entity);
+    dragEntity = null;
+    if (placeEntity(scene.entities, entity, index)) {
+      afterReorder(`${labelFor(entity)} moved to position ${index + 1}.`, instanceIndex(entity) !== from);
     } else {
       clearDragMarks();
     }
@@ -1434,14 +1534,14 @@ function wire() {
 
   /* Fires after drop, and on a canceled drag where drop never does */
   dom.list.addEventListener('dragend', () => {
-    dragType = null;
+    dragEntity = null;
     clearDragMarks();
   });
 
   dom.list.addEventListener('change', (event) => {
     const box = event.target.closest?.('[data-act="lock"]');
     if (!box) return;
-    const entity = scene.entities.find((e) => e.type === box.dataset.type);
+    const entity = entityAt(box.dataset.type, Number(box.dataset.k));
     if (!entity) return;
     entity.lock = box.hasAttribute('checked');
     /* Marked on the row rather than through a repaint, which would replace the
@@ -1454,14 +1554,17 @@ function wire() {
     const button = event.target.closest('button[data-act="add"]');
     if (!button) return;
     const type = button.dataset.type;
-    if (scene.entities.some((e) => e.type === type)) return;
-    scene.entities.push(makeEntity(type, scene.seed));
+    const k = typeCount(type);
+    if (k >= instanceCap(type)) return;
+    /* The copy's seed derives off its own index, so B never renders as A */
+    const entity = makeEntity(type, scene.seed, null, k);
+    scene.entities.push(entity);
     normalizeOrder(scene.entities);
-    ui.selected = type;
+    selectEntity(entity);
     rebuildNow().catch(reportBootFailure);
     renderAll();
     markDirty();
-    say(`${TYPE_BY_ID[type].label} added.`);
+    say(`${labelFor(entity)} added.`);
   });
 
   dom.scrub.addEventListener('input', () => {
@@ -1564,7 +1667,7 @@ async function boot() {
     dom.panelClose.setAttribute('aria-expanded', 'false');
     dom.panelOpen.setAttribute('aria-expanded', 'false');
   }
-  if (!scene.entities.some((e) => e.type === ui.selected)) ui.selected = scene.entities[0]?.type ?? '';
+  resolveSelection();
   renderAll();
 
   const sky2d = await import('/engine/render/sky2d.js');

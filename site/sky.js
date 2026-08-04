@@ -150,7 +150,15 @@ async function sceneFor(seed, useAuthored) {
       console.warn('Cosmorph: authored homepage failed to load, using the procedural hero.', err);
     }
   }
-  return { config: heroScene(seed), savedT: 0 };
+  /* Rerolls and shared ?seed links generate a whole new composition, still
+     seed-deterministic so the URL reproduces the exact sky. */
+  try {
+    const { rerollScene } = await import('/site/reroll-scene.js');
+    return { config: rerollScene(seed), savedT: 0 };
+  } catch (err) {
+    console.warn('Cosmorph: reroll generator failed, using the fixed hero.', err);
+    return { config: heroScene(seed), savedT: 0 };
+  }
 }
 
 async function startEngine(seed, forceGL, useAuthored = false) {

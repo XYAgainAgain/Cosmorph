@@ -14,7 +14,7 @@ export const WISP_SIGMA = /*@__PURE__*/ vec3(1.0, 1.35, 1.9);
 /* Continuum pass: IFN wisps at a few percent of range (the dither QA target)
    plus the two faint star grid scales. */
 export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
-  const { grain = false, swirl = false } = opts;
+  const { grain = false, swirl = false, faint = true } = opts;
   return Fn(() => {
     const zSlow = U.uTev.mul(U.uIfnMorph);
     /* Real IFN combs one axis: squashing y in a rotated frame stretches the
@@ -47,6 +47,10 @@ export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
        feathers out instead of ending on a contrast step. */
     const ifn = mix(carved.max(1e-4).pow(U.uIfnGamma), carved, U.uIfnSoft);
     const ifnCol = vec3(0.16, 0.14, 0.12).mul(ifn.mul(U.uIfnAmp));
+
+    /* The star grids belong to the stars entity and only ride here because they
+       share the RT, so a duplicate IFN must not stamp a second copy of them. */
+    if (!faint) return vec4(ifnCol, 1.0);
 
     /* Galactic-plane gradient + fbm clumping; uniform scatter is the tell */
     const bandD = abs(skyU.y.sub(skyU.x.mul(U.uBandTilt)).sub(U.uBandY));

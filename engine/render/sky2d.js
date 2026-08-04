@@ -3,12 +3,12 @@
    entity-array scene config; layer shaders never output RGB directly. */
 
 import * as THREE from 'three/webgpu';
-import { uniform, uv, vec2, vec4 } from 'three/tsl';
+import { exp, uniform, uv, vec2, vec4 } from 'three/tsl';
 import { createRng, deriveSeed } from '../core/rng.js';
 import { generateBrightStars } from '../entities/stars.js';
 import { buildBrightStarNodes } from '../shaders/tsl/stars.js';
 import { buildEmissionNodes } from '../shaders/tsl/nebula.js';
-import { buildContinuumNodes, wispTransmittance } from '../shaders/tsl/dust.js';
+import { buildContinuumNodes, wispTau, WISP_SIGMA } from '../shaders/tsl/dust.js';
 import { buildReflectionNodes, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
 import { buildFilamentNodes, FILAMENT_DEFAULTS } from '../shaders/tsl/filaments.js';
 import { buildEchoNodes, ECHO_DEFAULTS } from '../shaders/tsl/echo.js';
@@ -148,21 +148,30 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   await renderer.init();
   const isWebGPU = renderer.backend?.isWebGPUBackend === true;
 
-  /* Base layers write fixed shader slots, so they stay one-per-type. Feature
-     entities may repeat: each instance gets its own uniform bag, and its nodes
-     sum into the shared RTs like any other member of its cost class. */
+  /* Every entity type but `stars` may repeat: each instance gets its own uniform
+     bag, and its nodes sum into the shared RTs like any other member of its cost
+     class. The star field's density dial is what "more stars" means instead. */
   const byType = {};
+  /* Base layers render whether or not the scene lists them, so their instance 0
+     falls back to the type defaults; the feature types build only what is listed. */
+  const baseEnts = {
+    emission: [], ifn: [], darkDust: [], starcloud: [],
+  };
   const featureEnts = {
     globules: [], reflection: [], filaments: [],
     echo: [], shadowFan: [], searchlight: [], planetary: [], jets: [], wrbubble: [],
     clusters: [], galaxies: [], ionCloud: [], shape: [],
   };
   /* `march: true` routes a darkDust entity to the volumetric dust pass;
-     without it the type keeps its one flat-wisp slot, untouched. */
+     without it the entity joins the flat-wisp instances. */
   const dustEnts = [];
   for (const e of config.entities) {
     if (e.type === 'darkDust' && e.params?.march === true) {
       dustEnts.push(e);
+      continue;
+    }
+    if (baseEnts[e.type]) {
+      baseEnts[e.type].push(e);
       continue;
     }
     if (featureEnts[e.type]) {
@@ -195,12 +204,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     featureEnts.shape = featureEnts.shape.filter((_, i) => keep[i]);
   }
 
-  const P = {
-    emission: { ...DEFAULTS.emission, ...byType.emission?.params },
-    ifn: { ...DEFAULTS.ifn, ...byType.ifn?.params },
-    stars: { ...DEFAULTS.stars, ...byType.stars?.params },
-    darkDust: { ...DEFAULTS.darkDust, ...byType.darkDust?.params },
-  };
+  /* Only the singleton left: every other type resolves its params per instance */
+  const P = { stars: { ...DEFAULTS.stars, ...byType.stars?.params } };
 
   /* An unseeded duplicate still needs its own field, so instance 0 keeps the
      scene seed (bit-parity with the singleton era) and later ones derive. */
@@ -212,11 +217,6 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
      is the untouched state and must stay arithmetically inert. */
   let camX = config.camera?.x ?? 0;
   let camY = config.camera?.y ?? 0;
-
-  /* Divided host-side: 9/30 lands on the same float32 as the old literal 0.3,
-     where dividing in the shader costs an extra ulp and moves render hashes. */
-  const striaFx = Math.max(P.emission.striaFreq, 1e-3);
-  const striaFy = striaFx / Math.max(P.emission.striaAniso, 1);
 
   const paletteRows = PALETTES[config.palette] ?? PALETTES.hooNatural;
   const scnrDefault = config.palette === 'sho' ? 0.7 : (config.scnr ?? 0);
@@ -246,51 +246,6 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uCamera: uniform(new THREE.Vector2(camX, camY)),
     uTev: uniform(0),
 
-    uNebFreq: uniform(P.emission.freq),
-    uWarp: uniform(P.emission.warp),
-    uMottle: uniform(P.emission.mottle),
-    uStria: uniform(P.emission.stria),
-    uStriaFreq: uniform(striaFx),
-    uStriaFreqY: uniform(striaFy),
-    uStriaAngle: uniform(P.emission.striaAngle),
-    uNebIonSrc: uniform(new THREE.Vector2(0, 0)),
-    uNebIonR2: uniform(Math.max(P.emission.ionRadius ** 2, 1e-4)),
-    uHotLo: uniform(P.emission.hotLo),
-    uHotHi: uniform(Math.max(P.emission.hotHi, P.emission.hotLo + 0.001)),
-    uFrontAt: uniform(P.emission.frontAt),
-    /* This is the front's half-width and the ridge's Gaussian sigma at once;
-       at zero the smoothstep collapses and the exp divides by zero. */
-    uFrontW: uniform(Math.max(P.emission.frontWidth, 1e-3)),
-    uFrontGain: uniform(Math.max(P.emission.frontGain, 0)),
-    uFrontWob: uniform(P.emission.frontWobble),
-    uFrontOiii: uniform(Math.max(P.emission.frontOiii, 0)),
-    uLimb: uniform(Math.max(P.emission.limb, 0)),
-    uLimbK: uniform(Math.max(P.emission.limbK, 0.01)),
-    uOiii: uniform(P.emission.oiii),
-    uHotHaCut: uniform(clamp01(P.emission.hotHaCut)),
-    uSii: uniform(P.emission.sii),
-    uMorphRate: uniform(P.emission.morphRate),
-    uCovLo: uniform(P.emission.covLo),
-    uCovHi: uniform(Math.max(P.emission.covHi, P.emission.covLo + 0.001)),
-    uCovIon: uniform(P.emission.covIon),
-    uNebContrast: uniform(P.emission.contrast),
-    uNebGain: uniform(P.emission.gain),
-    uNebOff: uniform(offsetFrom(byType.emission?.seed ?? config.seed, 11)),
-
-    uIfnFreq: uniform(P.ifn.freq),
-    uIfnAmp: uniform(P.ifn.amp),
-    /* At 1 the domain is isotropic again, so the combing has an honest off */
-    uIfnAniso: uniform(Math.max(P.ifn.aniso, 1)),
-    uIfnRot: uniform(P.ifn.rot),
-    uIfnGamma: uniform(Math.max(P.ifn.gamma, 0.05)),
-    uIfnWarp: uniform(Math.max(P.ifn.warp, 0)),
-    uIfnSwirl: uniform(Math.max(P.ifn.swirl, 0)),
-    uIfnFeather: uniform(Math.max(P.ifn.feather, 0)),
-    uIfnGrain: uniform(Math.max(P.ifn.grain, 0)),
-    uIfnSoft: uniform(clamp01(P.ifn.soft)),
-    uIfnMorph: uniform(P.ifn.morphRate),
-    uIfnOff: uniform(offsetFrom(byType.ifn?.seed ?? config.seed, 23)),
-
     uStarDensity: uniform(P.stars.density),
     uBandY: uniform(P.stars.bandY),
     uBandTilt: uniform(P.stars.bandTilt),
@@ -305,20 +260,6 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uSpikeJitter: uniform(P.stars.spikeJitter),
     uSpikeThreshold: uniform(P.stars.spikeThreshold),
     uStarGain: uniform(P.stars.gain),
-    uWispFreq: uniform(P.darkDust.freq),
-    uWispAngle: uniform(P.darkDust.angle),
-    /* Below 1 the lane axis flips from x to y mid-slider; the stretch is
-       one-directional by construction. */
-    uWispAniso: uniform(Math.max(P.darkDust.aniso, 1)),
-    uWispWarp: uniform(P.darkDust.warp),
-    uWispDetail: uniform(P.darkDust.detail),
-    uWispTh: uniform(P.darkDust.threshold),
-    uWispSoft: uniform(Math.max(P.darkDust.softness, 0.001)),
-    uWispFringe: uniform(Math.max(P.darkDust.fringe, 0)),
-    uWispSkirt: uniform(clamp01(P.darkDust.skirt)),
-    uWispTau: uniform(P.darkDust.tau),
-    uWispMorph: uniform(P.darkDust.morphRate),
-    uWispOff: uniform(offsetFrom(byType.darkDust?.seed ?? config.seed, 43)),
 
     uPalette: uniform(new THREE.Matrix3().set(...paletteRows)),
     uScnr: uniform(scnrDefault),
@@ -327,9 +268,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     uStretchNorm: uniform(1 / Math.asinh(stretchK)),
     uBlack: uniform(0.015),
     uDither: uniform(1.5 / 255),
-    uDepthLine: uniform(byType.emission?.depth ?? 0.3),
-    uDepthCont: uniform(byType.ifn?.depth ?? 0.12),
-    uDepthWisp: uniform(byType.darkDust?.depth ?? 0.55),
+    /* The two shared RTs parallax at their first entity's depth; every later
+       instance pre-shifts off these, the way the feature layers already do. */
+    uDepthLine: uniform(baseEnts.emission[0]?.depth ?? 0.3),
+    uDepthCont: uniform(baseEnts.ifn[0]?.depth ?? 0.12),
 
     /* TSL emits a uniform only once the graph reaches it, so create them all */
     uLensAt: uniform(new THREE.Vector2(0, 0)),
@@ -368,6 +310,95 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     const bag = k === 0 ? U : Object.create(U);
     Object.assign(bag, uniforms);
     if (reseat) reseats.push((aspect) => reseat(bag, aspect));
+    return bag;
+  }
+
+  function emissionBag(e, k) {
+    const p = { ...DEFAULTS.emission, ...e.params };
+    /* Divided host-side: 9/30 lands on the same float32 as the old literal 0.3,
+       where dividing in the shader costs an extra ulp and moves render hashes. */
+    const striaFx = Math.max(p.striaFreq, 1e-3);
+    return makeBag(k, {
+      uNebFreq: uniform(p.freq),
+      uWarp: uniform(p.warp),
+      uMottle: uniform(p.mottle),
+      uStria: uniform(p.stria),
+      uStriaFreq: uniform(striaFx),
+      uStriaFreqY: uniform(striaFx / Math.max(p.striaAniso, 1)),
+      uStriaAngle: uniform(p.striaAngle),
+      uNebIonSrc: uniform(new THREE.Vector2(0, 0)),
+      uNebIonR2: uniform(Math.max(p.ionRadius ** 2, 1e-4)),
+      uHotLo: uniform(p.hotLo),
+      uHotHi: uniform(Math.max(p.hotHi, p.hotLo + 0.001)),
+      uFrontAt: uniform(p.frontAt),
+      /* This is the front's half-width and the ridge's Gaussian sigma at once;
+         at zero the smoothstep collapses and the exp divides by zero. */
+      uFrontW: uniform(Math.max(p.frontWidth, 1e-3)),
+      uFrontGain: uniform(Math.max(p.frontGain, 0)),
+      uFrontWob: uniform(p.frontWobble),
+      uFrontOiii: uniform(Math.max(p.frontOiii, 0)),
+      uLimb: uniform(Math.max(p.limb, 0)),
+      uLimbK: uniform(Math.max(p.limbK, 0.01)),
+      uOiii: uniform(p.oiii),
+      uHotHaCut: uniform(clamp01(p.hotHaCut)),
+      uSii: uniform(p.sii),
+      uMorphRate: uniform(p.morphRate),
+      uCovLo: uniform(p.covLo),
+      uCovHi: uniform(Math.max(p.covHi, p.covLo + 0.001)),
+      uCovIon: uniform(p.covIon),
+      uNebContrast: uniform(p.contrast),
+      uNebGain: uniform(p.gain),
+      uNebOff: uniform(offsetFrom(instanceSeed(e, 11, k), 11)),
+      /* Instance 0 IS the line RT's depth, and the studio pokes it as uDepthLine;
+         a later copy carries its own and pre-shifts against that one. */
+      uDepthNeb: k === 0 ? U.uDepthLine : uniform(e.depth ?? 0.3),
+    }, (b, aspect) => b.uNebIonSrc.value.set(p.ionSrc[0] * aspect, p.ionSrc[1]));
+  }
+
+  function ifnBag(e, k) {
+    const p = { ...DEFAULTS.ifn, ...e.params };
+    const bag = makeBag(k, {
+      uIfnFreq: uniform(p.freq),
+      uIfnAmp: uniform(p.amp),
+      /* At 1 the domain is isotropic again, so the combing has an honest off */
+      uIfnAniso: uniform(Math.max(p.aniso, 1)),
+      uIfnRot: uniform(p.rot),
+      uIfnGamma: uniform(Math.max(p.gamma, 0.05)),
+      uIfnWarp: uniform(Math.max(p.warp, 0)),
+      uIfnSwirl: uniform(Math.max(p.swirl, 0)),
+      uIfnFeather: uniform(Math.max(p.feather, 0)),
+      uIfnGrain: uniform(Math.max(p.grain, 0)),
+      uIfnSoft: uniform(clamp01(p.soft)),
+      uIfnMorph: uniform(p.morphRate),
+      uIfnOff: uniform(offsetFrom(instanceSeed(e, 23, k), 23)),
+      uDepthIfn: k === 0 ? U.uDepthCont : uniform(e.depth ?? 0.12),
+    });
+    /* The two faint star grids are the stars entity's, not the IFN's: they ride
+       this pass only because they share its RT, so only instance 0 stamps them. */
+    bag.ifnOpts = { grain: p.grain > 0, swirl: p.swirl > 0, faint: k === 0 };
+    return bag;
+  }
+
+  function wispBag(e, k) {
+    const d = { ...DEFAULTS.darkDust, ...e.params };
+    const bag = makeBag(k, {
+      uWispFreq: uniform(d.freq),
+      uWispAngle: uniform(d.angle),
+      /* Below 1 the lane axis flips from x to y mid-slider; the stretch is
+         one-directional by construction. */
+      uWispAniso: uniform(Math.max(d.aniso, 1)),
+      uWispWarp: uniform(d.warp),
+      uWispDetail: uniform(d.detail),
+      uWispTh: uniform(d.threshold),
+      uWispSoft: uniform(Math.max(d.softness, 0.001)),
+      uWispFringe: uniform(Math.max(d.fringe, 0)),
+      uWispSkirt: uniform(clamp01(d.skirt)),
+      uWispTau: uniform(d.tau),
+      uWispMorph: uniform(d.morphRate),
+      uWispOff: uniform(offsetFrom(instanceSeed(e, 43, k), 43)),
+      uDepthWisp: uniform(e.depth ?? 0.55),
+    });
+    bag.wispOcclude = d.occlude === true;
     return bag;
   }
 
@@ -911,12 +942,12 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     return bag;
   }
 
-  /* One per scene: the band is the galactic plane. It still gates like a feature
-     type, so a scene without it compiles with no uSC uniforms and no rift tau. */
-  function starcloudBag(e) {
+  /* Gates like a feature type: a scene without a band compiles with no uSC
+     uniforms and no rift tau at all. */
+  function starcloudBag(e, k) {
     const s = { ...DEFAULTS.starcloud, ...e.params };
-    const seed = e.seed ?? config.seed;
-    const bag = makeBag(0, {
+    const seed = instanceSeed(e, 71, k);
+    const bag = makeBag(k, {
       uSCWidth: uniform(s.width),
       uSCFalloff: uniform(s.falloff),
       uSCWing: uniform(s.wing),
@@ -1346,6 +1377,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     });
   }
 
+  /* An empty list still builds instance 0 off the type defaults: these three
+     layers rendered unconditionally when they were fixed slots, and still do. */
+  const orNone = (ents) => (ents.length > 0 ? ents : [{}]);
+  const emisInst = orNone(baseEnts.emission).map((e, k) => emissionBag(e, k));
+  const ifnInst = orNone(baseEnts.ifn).map((e, k) => ifnBag(e, k));
+  const wispInst = orNone(baseEnts.darkDust).map((e, k) => wispBag(e, k));
+  const scInst = baseEnts.starcloud.map((e, k) => starcloudBag(e, k));
   const globInst = featureEnts.globules.map((e, k) => globulesBag(e, k));
   const reflInst = featureEnts.reflection.map((e, k) => reflectionBag(e, k));
   const filInst = featureEnts.filaments.map((e, k) => filamentsBag(e, k));
@@ -1356,7 +1394,6 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const jetInst = featureEnts.jets.map((e, k) => jetsBag(e, k));
   const wrbInst = featureEnts.wrbubble.map((e, k) => wrbubbleBag(e, k));
   const cluInst = featureEnts.clusters.map((e, k) => clustersBag(e, k));
-  const scBag = byType.starcloud ? starcloudBag(byType.starcloud) : null;
   const gxInst = featureEnts.galaxies.map((e, k) => galaxiesBag(e, k));
   const ionInst = featureEnts.ionCloud.map((e, k) => ionCloudBag(e, k));
   const shapeInst = featureEnts.shape.map((e, i) => shapeBag(e, shapeIdx[i]));
@@ -1399,7 +1436,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
 
   /* The glow and its shock filaments are one object in two RTs, so each half
      pre-shifts to its own RT depth in order to land together on screen. */
-  let lineNode = buildEmissionNodes(skyU, U);
+  let lineNode = buildEmissionNodes(skyU, emisInst[0]);
+  for (const bag of emisInst.slice(1)) {
+    lineNode = lineNode.add(vec4(
+      buildEmissionNodes(skyAtDepth(bag.uDepthNeb, U.uDepthLine), bag).rgb, 0.0));
+  }
   for (const bag of reflInst) {
     lineNode = lineNode.add(vec4(buildReflectionNodes(skyAtDepth(bag.uDepthRefl, U.uDepthLine), bag).line, 0.0));
   }
@@ -1431,8 +1472,11 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     lineNode = lineNode.add(vec4(buildEchoNodes(skyAtDepth(bag.uDepthEcho, U.uDepthLine), bag, bag.echoOpts).line, 0.0));
   }
 
-  let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, U,
-    { grain: P.ifn.grain > 0, swirl: P.ifn.swirl > 0 });
+  let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, ifnInst[0], ifnInst[0].ifnOpts);
+  for (const bag of ifnInst.slice(1)) {
+    contNode = contNode.add(vec4(buildContinuumNodes(
+      skyAtDepth(bag.uDepthIfn, U.uDepthCont), U.uPxPerUnit, bag, bag.ifnOpts).rgb, 0.0));
+  }
   for (const bag of reflInst) {
     contNode = contNode.add(vec4(buildReflectionNodes(skyAtDepth(bag.uDepthRefl, U.uDepthCont), bag).continuum, 0.0));
   }
@@ -1464,9 +1508,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     contNode = contNode.add(vec4(buildClusterNodes(
       skyAtDepth(bag.uDepthClu, U.uDepthCont), U.uPxPerUnit, bag, bag.cluOpts).continuum, 0.0));
   }
-  if (scBag) {
+  for (const bag of scInst) {
     contNode = contNode.add(vec4(buildStarcloudNodes(
-      skyAtDepth(scBag.uDepthSC, U.uDepthCont), scBag, scBag.scOpts).continuum, 0.0));
+      skyAtDepth(bag.uDepthSC, U.uDepthCont), bag, bag.scOpts).continuum, 0.0));
   }
 
   const lineScene = fullscreenPass(lineNode);
@@ -1520,7 +1564,8 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       shadowFan: fanInst,
       searchlight: beamInst,
       shape: shapeInst,
-      starcloud: scBag?.scOpts.rift ? [scBag] : [],
+      starcloud: scInst.filter((bag) => bag.scOpts.rift),
+      darkDust: wispInst,
     },
     lens: lensOn ? { halos: lensHalos } : null,
     dust: dust ? { lineTex: dust.lineTex, contTex: dust.contTex } : null,
@@ -1532,8 +1577,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   /* Doctrine says the star tier composites additively last, over everything.
      This gate is the sanctioned exception: it lets the wisp layer punch a
      Barnard 68 hole in the field, and it is off unless the user asks. */
-  const starOcclude = P.darkDust.occlude === true
-    ? (skyAt) => wispTransmittance(skyAt, U)
+  const occluders = wispInst.filter((bag) => bag.wispOcclude);
+  const starOcclude = occluders.length > 0
+    ? (skyAt) => {
+      let tau = wispTau(skyAt, occluders[0]);
+      for (const bag of occluders.slice(1)) tau = tau.add(wispTau(skyAt, bag));
+      return exp(tau.negate().mul(WISP_SIGMA));
+    }
     : null;
   const brightNodes = buildBrightStarNodes(U, { occlude: starOcclude });
   const brightMat = new THREE.MeshBasicNodeMaterial();
@@ -1668,7 +1718,6 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     U.uAspect.value = aspect;
     U.uMarginScale.value.set(1 + (2 * margin) / w, 1 + (2 * margin) / h);
     U.uPxPerUnit.value = Math.max(h, 1) / U.uMarginScale.value.y;
-    U.uNebIonSrc.value.set(P.emission.ionSrc[0] * aspect, P.emission.ionSrc[1]);
     /* Sky x spans [0, aspect], so framed positions scale or they slide toward
        the left edge as the canvas widens */
     for (const reseat of reseats) reseat(aspect);
@@ -1746,10 +1795,15 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
      rebuilding the graph for every slider drag. resize() re-seats the framed
      positions from the build-time params, so a live editor re-applies after it. */
   /* `instances` exposes every duplicate's own bag; `uniforms` stays the
-     instance-0 view Firmament already binds to. */
+     instance-0 view Firmament already binds to. The three unconditional base
+     layers always list an instance 0, even when the scene named no entity. */
   return {
     render, resize, dispose, backend, capture, setCamera, uniforms: U,
     instances: {
+      emission: emisInst.slice(),
+      ifn: ifnInst.slice(),
+      darkDust: wispInst.slice(),
+      starcloud: scInst.slice(),
       globules: globInst.slice(),
       reflection: reflInst.slice(),
       filaments: filInst.slice(),
