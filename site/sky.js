@@ -112,31 +112,53 @@ async function veil(dark) {
   await new Promise((resolve) => setTimeout(resolve, 1060));
 }
 
-/* ?demo= swaps the scene without touching the hero config, and the module only
-   loads when asked for, so the homepage never fetches it */
-async function sceneFor(seed) {
-  const name = params.get('demo');
-  if (!name) return heroScene(seed);
-  /* A failed import must fall back to the hero here, not tumble into boot()'s
-     catch, which would blame the engine and swap in the static placeholder */
-  try {
-    const { demoScene } = await import('/site/demo-scenes.js');
-    const aspect = window.innerWidth / Math.max(window.innerHeight, 1);
-    const scene = demoScene(name, seed, aspect);
-    if (!scene) console.warn(`Cosmorph: no demo scene named "${name}", using the hero.`);
-    return scene ?? heroScene(seed);
-  } catch (err) {
-    console.warn('Cosmorph: demo scenes failed to load, using the hero.', err);
-    return heroScene(seed);
-  }
+/* The default homepage is Sam's authored .cosmos, run through the same
+   sanitizer and config builder Firmament uses. A reroll or a shared ?seed
+   drops to the procedural hero; any failure here does the same. */
+async function authoredScene() {
+  const [{ deserialize, buildEngineConfig }, res] = await Promise.all([
+    import('/firmament/preset.js'),
+    fetch('/site/hero.cosmos'),
+  ]);
+  if (!res.ok) throw new Error(`hero.cosmos ${res.status}`);
+  const { scene, savedT } = deserialize(await res.json());
+  return { config: buildEngineConfig(scene), savedT };
 }
 
-async function startEngine(seed, forceGL) {
-  const config = await sceneFor(seed);
+/* ?demo= swaps the scene without touching the hero config, and the module only
+   loads when asked for, so the homepage never fetches it */
+async function sceneFor(seed, useAuthored) {
+  const name = params.get('demo');
+  /* A failed import must fall back to the hero here, not tumble into boot()'s
+     catch, which would blame the engine and swap in the static placeholder */
+  if (name) {
+    try {
+      const { demoScene } = await import('/site/demo-scenes.js');
+      const aspect = window.innerWidth / Math.max(window.innerHeight, 1);
+      const scene = demoScene(name, seed, aspect);
+      if (!scene) console.warn(`Cosmorph: no demo scene named "${name}", using the hero.`);
+      return { config: scene ?? heroScene(seed), savedT: 0 };
+    } catch (err) {
+      console.warn('Cosmorph: demo scenes failed to load, using the hero.', err);
+      return { config: heroScene(seed), savedT: 0 };
+    }
+  }
+  if (useAuthored) {
+    try {
+      return await authoredScene();
+    } catch (err) {
+      console.warn('Cosmorph: authored homepage failed to load, using the procedural hero.', err);
+    }
+  }
+  return { config: heroScene(seed), savedT: 0 };
+}
+
+async function startEngine(seed, forceGL, useAuthored = false) {
+  const { config, savedT } = await sceneFor(seed, useAuthored);
   sky = await tryEngine(config, forceGL);
-  clock = createEvolutionClock(`cosmorph:T:${seed}`);
+  clock = createEvolutionClock(`cosmorph:T:${config.seed ?? seed}`, savedT);
   evolutionRate = config.evolution.rate;
-  console.info(`Cosmorph: seed ${seed} on ${sky.backend}`);
+  console.info(`Cosmorph: seed ${config.seed ?? seed} on ${sky.backend}`);
 }
 
 /* Fade to black, rebuild the whole sky on a fresh seed, fade back in.
@@ -172,6 +194,8 @@ async function reroll() {
 async function boot() {
   const urlSeed = parseInt(params.get('seed'), 10);
   const initialSeed = Number.isFinite(urlSeed) ? urlSeed : HERO_SEED;
+  /* No explicit seed and no demo: the authored default sky */
+  const useAuthored = !Number.isFinite(urlSeed) && !params.get('demo');
 
   document.getElementById('reroll')?.addEventListener('click', reroll);
 
@@ -183,7 +207,7 @@ async function boot() {
   }
 
   try {
-    await startEngine(initialSeed, params.get('gl') === '1');
+    await startEngine(initialSeed, params.get('gl') === '1', useAuthored);
   } catch (err) {
     console.warn('Cosmorph: engine unavailable, using placeholder starfield.', err);
     freshCanvas();

@@ -7,7 +7,7 @@ import {
   Fn, float, vec2, vec3, clamp, cos, exp, floor, fract, length,
   mix, pow, sin, smoothstep,
 } from 'three/tsl';
-import { hash1, fbm3o2, FBM2_NORM, CELL_BIAS } from './noise.js';
+import { hash1, fbm3o2, ridged4, FBM2_NORM, CELL_BIAS } from './noise.js';
 import { rot2, remapRange } from './sdf.js';
 
 /* Reciprocal so the shell-parity math multiplies instead of dividing */
@@ -90,7 +90,8 @@ function granulation(U, pn) {
 function spiralGalaxy(U, pn, u, dir, look, wantLine) {
   /* Logarithmic spiral: constant pitch puts the phase on ln(r), tan(pitch) =
      m / uGxWind. Default spin is 2*PI/4096, one turn per uTev wrap. */
-  const A = u.max(1e-3).log().mul(U.uGxWind)
+  const lnu = u.max(1e-3).log().toVar();
+  const A = lnu.mul(U.uGxWind)
     .sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
   const ca = cos(A).toVar();
   const sa = sin(A).toVar();
@@ -141,11 +142,53 @@ function spiralGalaxy(U, pn, u, dir, look, wantLine) {
 
   /* The lane trails the arms by a fixed phase and only shows on the near half
      of the disk, where the dust sits in front of the light. */
-  const laneCos = armCos.mul(cos(U.uGxLanePhase)).add(armSin.mul(sin(U.uGxLanePhase)));
   const near = smoothstep(U.uGxNearSoft.max(1e-3).negate(), U.uGxNearSoft.max(1e-3),
     dir.y.mul(U.uGxNearSide));
-  const lane = pow(laneCos.mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0))
-    .mul(near).mul(U.uGxLaneDepth).toVar();
+  const lp = U.uGxLanePhase.toVar();
+  const laneCos = armCos.mul(cos(lp)).add(armSin.mul(sin(lp))).toVar();
+  /* The phase frame spins ever faster toward the center, so dust texture
+     activity eases out across the bulge instead of shredding the inner disk. */
+  const act = smoothstep(rb, rb.mul(2.5), u).toVar();
+
+  let band = pow(laneCos.mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0)).toVar();
+  let fil = null;
+  /* Both texture tiers are build-gated like the bar: an untextured lane pays
+     for neither ridge field. */
+  if (look.fil) {
+    /* Ridged filaments on the wound (armCos, armSin, ln r) frame: constant-
+       phase lines ARE the arms there, so every ridge winds with the spiral. */
+    const filN = ridged4(vec3(
+      armCos.mul(U.uGxLaneFilFreq), armSin.mul(U.uGxLaneFilFreq),
+      lnu.mul(U.uGxLaneFilAlong).add(U.uTev.mul(U.uGxMorph)),
+    ).add(U.uGxOff.mul(5.0)), U.uGxLaneFilSharp).toVar();
+    /* The same scalar jitters the band's phase: lanes hug a wandering side of
+       the arm instead of running mechanically parallel to it. */
+    const j = filN.sub(0.5).mul(U.uGxLaneWob).mul(act).toVar();
+    const laneSin = armSin.mul(cos(lp)).sub(armCos.mul(sin(lp))).toVar();
+    band = pow(laneCos.mul(cos(j)).add(laneSin.mul(sin(j)))
+      .mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0)).toVar();
+    /* Carve only the band's heart: the wings stay the smooth classic lane, or
+       the texture reads as veins across the whole disk face. */
+    const heart = smoothstep(0.2, 0.6, band).toVar();
+    fil = mix(float(1.0).sub(U.uGxLaneFil.mul(act).mul(heart)), float(1.0), filN).toVar();
+  }
+  let lane = (fil ? band.mul(fil) : band).mul(near).mul(U.uGxLaneDepth).toVar();
+
+  if (look.spurs) {
+    /* Spur feathers jut across the arm: plain unwound polar sampling, so the
+       ridges cut the band instead of following it. max() keeps crossings from
+       double-darkening; the laneDepth factor keeps it the group's master dial. */
+    const spN = ridged4(vec3(
+      dir.mul(U.uGxSpurFreq),
+      lnu.mul(U.uGxSpurFreq).mul(0.35).add(U.uTev.mul(U.uGxMorph)),
+    ).add(U.uGxOff.mul(11.0)), U.uGxSpurFilSharp).toVar();
+    const sp = U.uGxSpurPhase.toVar();
+    const spCos = armCos.mul(cos(sp)).add(armSin.mul(sin(sp))).toVar();
+    const spBand = pow(spCos.mul(0.5).add(0.5).max(1e-4), U.uGxSpurSharp.max(0.0)).toVar();
+    const spurs = smoothstep(0.45, 0.8, spN).mul(spBand).mul(near)
+      .mul(U.uGxSpurAmt).mul(U.uGxLaneDepth).mul(act);
+    lane = lane.max(spurs).toVar();
+  }
 
   const barLum = bar ? bar.mul(fall).toVar() : null;
   const body = bulge.add(disk).add(grit);

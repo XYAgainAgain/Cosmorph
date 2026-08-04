@@ -1042,6 +1042,16 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       uGxLanePhase: uniform(g.lanePhase),
       uGxLaneSharp: uniform(Math.max(g.laneSharp, 0)),
       uGxLaneDepth: uniform(g.laneDepth),
+      uGxLaneFil: uniform(clamp01(g.laneFil)),
+      uGxLaneFilFreq: uniform(Math.max(g.laneFilFreq, 0)),
+      uGxLaneFilAlong: uniform(Math.max(g.laneFilAlong, 0)),
+      uGxLaneFilSharp: uniform(Math.max(g.laneFilSharp, 0)),
+      uGxLaneWob: uniform(Math.max(g.laneWob, 0)),
+      uGxSpurAmt: uniform(clamp01(g.spurAmt)),
+      uGxSpurPhase: uniform(g.spurPhase),
+      uGxSpurSharp: uniform(Math.max(g.spurSharp, 0)),
+      uGxSpurFreq: uniform(Math.max(g.spurFreq, 0)),
+      uGxSpurFilSharp: uniform(Math.max(g.spurFilSharp, 0)),
       uGxNearSide: uniform(g.nearSide),
       uGxNearSoft: uniform(Math.max(g.nearSoft, 1e-3)),
       uGxCutIn: uniform(g.cutIn),
@@ -1121,7 +1131,10 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     bag.gxOpts = {
       field: g.field !== false,
       showpiece: g.showpiece !== false,
-      look: { ...look, bar: g.barAmt > 0 },
+      look: {
+        ...look, bar: g.barAmt > 0, spurs: g.spurAmt > 0,
+        fil: g.laneFil > 0 || g.laneWob > 0,
+      },
     };
     /* Sprite tier follows the spiral gates: nested ellipses describe a disk,
        not a shell or a detached ring. */

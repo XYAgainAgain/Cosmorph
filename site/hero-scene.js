@@ -1,6 +1,6 @@
-/* The homepage sky: one curated scene, expressed as the engine's entity
-   array. Per-entity seeds derive from the master so a future reroll of one
-   layer never disturbs the others. */
+/* The procedural hero: what a reroll or a shared ?seed renders. The default
+   homepage is the authored site/hero.cosmos; this is every other seed.
+   Per-entity seeds derive from the master so layers reroll independently. */
 
 import { deriveSeed } from '/engine/core/rng.js';
 

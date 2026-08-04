@@ -79,6 +79,38 @@ export const fbm3o2 = /*@__PURE__*/ makeFbm3(2);
 export const fbm3o4 = /*@__PURE__*/ makeFbm3(4);
 export const fbm3o5 = /*@__PURE__*/ makeFbm3(5);
 
+/* Golden-angle rotation coefficients, folded with the lacunarity in JS so the
+   shader sees plain constants and every backend agrees bit-for-bit. */
+const ROT_C = Math.cos(2.39996322972865332) * 2.02;
+const ROT_S = Math.sin(2.39996322972865332) * 2.02;
+
+/* fbm with each octave's xy lattice rotated by the golden angle and its z
+   phase slid: aligned octaves share seam axes, and those seams read as soft
+   rectangles — or, through any gradient or pow, a maze. */
+export function makeFbm3Rot(octaves) {
+  return Fn(([pIn]) => {
+    const p = pIn.toVar();
+    const sum = float(0).toVar();
+    const amp = float(0.5).toVar();
+    for (let o = 0; o < octaves; o++) {
+      sum.addAssign(valueNoise3(p).mul(amp));
+      /* vec3 constructor args evaluate before the assign lands, so reading p
+         on the right side is safe in both GLSL and WGSL. */
+      p.assign(vec3(
+        p.x.mul(ROT_C).sub(p.y.mul(ROT_S)),
+        p.x.mul(ROT_S).add(p.y.mul(ROT_C)),
+        p.z.mul(2.02).add(17.7),
+      ));
+      amp.mulAssign(0.5);
+    }
+    return sum;
+  });
+}
+
+export const fbm3o2r = /*@__PURE__*/ makeFbm3Rot(2);
+export const fbm3o4r = /*@__PURE__*/ makeFbm3Rot(4);
+export const fbm3o5r = /*@__PURE__*/ makeFbm3Rot(5);
+
 /* Octave amplitude sums, for rescaling raw fbm to [0,1]; the 2-octave mean */
 export const FBM2_NORM = 1 / 0.75;
 export const FBM4_NORM = 1 / 0.9375;

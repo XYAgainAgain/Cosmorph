@@ -1,12 +1,10 @@
 /* Emission nebula, 2D field. Writes line channels vec3(Hα, OIII, SII) only —
    never RGB. The palette matrix touches these once, in compose. */
 
-import { Fn, float, vec2, vec3, vec4, dot, clamp, cos, sin, exp, length, smoothstep } from 'three/tsl';
-import { fbm3o2, fbm3o4, fbm3o5, FBM2_NORM } from './noise.js';
-
-/* Forward-difference step, in noise-domain units rather than sky units, so the
-   wall term tracks the field's own features at any frequency. */
-const GRAD_EPS = 0.09;
+import { Fn, float, vec2, vec3, vec4, dot, clamp, cos, sin, exp, smoothstep } from 'three/tsl';
+/* Rotated-octave fbm throughout: this entity's cavity walls and pow-contrast
+   chains amplify lattice seams that the other entities' soft fields hide. */
+import { fbm3o2r, fbm3o4r, fbm3o5r, FBM2_NORM, FBM2_MID } from './noise.js';
 
 /* A cavity blown out of a cloud, not a gradient: an ionization scalar with a
    wavy front, a limb-brightened wall term, and a hot interior. */
@@ -15,9 +13,9 @@ export function buildEmissionNodes(skyU, U) {
     const zEvo = U.uTev.mul(U.uMorphRate);
     const p3 = vec3(skyU.mul(U.uNebFreq), zEvo).add(U.uNebOff);
 
-    const q1 = fbm3o4(p3.mul(1.7));
-    const q2 = fbm3o4(p3.mul(1.7).add(vec3(5.2, 1.3, 2.8)));
-    const M = fbm3o5(p3.mul(2.4).add(vec3(q1, q2, float(0)).mul(U.uWarp)));
+    const q1 = fbm3o4r(p3.mul(1.7));
+    const q2 = fbm3o4r(p3.mul(1.7).add(vec3(5.2, 1.3, 2.8)));
+    const M = fbm3o5r(p3.mul(2.4).add(vec3(q1, q2, float(0)).mul(U.uWarp)));
 
     const d = skyU.sub(U.uNebIonSrc);
     const G = float(1).div(dot(d, d).div(U.uNebIonR2).add(1.0));
@@ -25,17 +23,16 @@ export function buildEmissionNodes(skyU, U) {
     /* Bounded extent: low-frequency coverage carves real black sky, biased
        toward the ionizing source or the cavity lands in a coverage hole. */
     const cp = vec3(skyU.mul(U.uNebFreq).mul(0.9), zEvo.mul(0.4)).add(U.uNebOff.mul(2.0));
-    const cov = smoothstep(U.uCovLo, U.uCovHi, fbm3o2(cp).add(G.mul(U.uCovIon)));
+    const cov = smoothstep(U.uCovLo, U.uCovHi, fbm3o2r(cp).add(G.mul(U.uCovIon)));
 
-    /* Grazing cavity walls are the bright regions: the density gradient is the
-       brightness. Two octaves, not one: a single octave's gradient carries the
-       lattice's axis alignment, and pow(limbK) amplifies it into a maze. */
+    /* Grazing cavity walls are the bright regions: an iso-shell of the density
+       field seen edge-on. Never |grad fbm| — gradient ridges align to the value-
+       noise lattice and pow(limbK) amplifies them into a geometric maze. */
     const wp = cp.mul(2.4);
-    const w0 = fbm3o2(wp);
-    const gx = fbm3o2(wp.add(vec3(GRAD_EPS, 0.0, 0.0))).sub(w0);
-    const gy = fbm3o2(wp.add(vec3(0.0, GRAD_EPS, 0.0))).sub(w0);
-    /* 1.1 normalizes a 2-octave slope over GRAD_EPS into roughly [0,1] */
-    const wall = clamp(length(vec2(gx, gy)).mul(1.0 / GRAD_EPS).mul(1.1), 0.0, 1.0)
+    const n0 = fbm3o2r(wp).mul(FBM2_NORM);
+    /* Iso-level at the normalized field's midpoint, where the shell is one
+       connected lacework; 4 sets the shell half-width at a quarter of range. */
+    const wall = clamp(float(1).sub(n0.sub(0.5).abs().mul(4.0)), 0.0, 1.0)
       .max(1e-4).pow(U.uLimbK);
     /* Divided by the field's own mean wall value so the dial buys internal
        dynamic range instead of overall brightness: walls rise, fill drops. */
@@ -59,9 +56,13 @@ export function buildEmissionNodes(skyU, U) {
       skyU.x.mul(sc).sub(skyU.y.mul(ss)),
       skyU.x.mul(ss).add(skyU.y.mul(sc)),
     );
-    const sp = vec3(sRot.x.mul(U.uStriaFreq), sRot.y.mul(U.uStriaFreqY), zEvo.mul(0.3))
+    /* Meander breaks the comb's lattice-regular spacing: without it the bands
+       repeat like ruled lines and cross into a geometric weave. ±3/4 period. */
+    const mw = fbm3o2r(vec3(skyU.mul(U.uNebFreq).mul(0.35), zEvo.mul(0.2))
+      .add(U.uNebOff.mul(9.0))).sub(FBM2_MID).mul(2.5);
+    const sp = vec3(sRot.x.mul(U.uStriaFreq).add(mw), sRot.y.mul(U.uStriaFreqY), zEvo.mul(0.3))
       .add(U.uNebOff.mul(0.5));
-    const lane = fbm3o2(sp).mul(FBM2_NORM);
+    const lane = fbm3o2r(sp).mul(FBM2_NORM);
     const stria = float(1).add(lane.sub(0.5).mul(U.uStria).mul(2.0));
 
     const E = G.mul(M.sub(0.5).mul(U.uMottle).add(1.0))

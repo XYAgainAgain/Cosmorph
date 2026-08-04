@@ -538,6 +538,11 @@ function renderCredits() {
       ${url ? `<a class="credit__link" href="${esc(url)}" target="_blank" rel="noopener">Source image</a>` : ''}
     </li>`);
   }
+  /* Standing credit: the galaxy dust-lane math derives from Petr Chekushkin's
+     SpiralForge studies, shared with permission. Condition of the arrangement. */
+  cards.push(`<li class="credit">
+    <p class="credit__line">Galaxy dust-lane techniques studied from SpiralForge by Petr Chekushkin, with the author's permission.</p>
+  </li>`);
   dom.credits.hidden = cards.length === 0;
   dom.creditsList.innerHTML = cards.join('');
 }

@@ -4,9 +4,11 @@
    re-seed of the drift every ~170 days is the accepted cost. */
 const T_WRAP = 4096 * 3600;
 
-/* A seed change means a new storage key, which is what resets T to 0 */
-export function createEvolutionClock(storageKey) {
-  let savedT = 0;
+/* A seed change means a new storage key, which is what resets T to 0.
+   initialT (seconds) seeds a first visit, so an authored scene boots at the
+   evolution moment its author actually tuned. */
+export function createEvolutionClock(storageKey, initialT = 0) {
+  let savedT = Number.isFinite(initialT) && initialT > 0 ? initialT % T_WRAP : 0;
   try {
     const stored = Number(localStorage.getItem(storageKey));
     if (Number.isFinite(stored) && stored >= 0) savedT = stored % T_WRAP;
