@@ -20,7 +20,7 @@ Cosmorph replaces your desktop wallpaper with any patch of celestial majesty you
 
 - **Chill and Enjoy Space:** The idea behind this was "what if astrophotography and lava lamps had a baby" if that tells you anything about how it's meant to be enjoyed. Set it up however you like and then just watch the cosmos swirl. It works on any screen size and spreads across all your monitors.
 - **Literally Reshape the Universe:** With [Firmament](https://cosmorph.app/firmament/), the scene creation studio, you can tweak absolutely any part of the scene you want or randomize it. If you find a nebula you like, you can lock it in place and keep randomizing until the vibes are *juuust right!* Once space looks good to you, you can use it in Wallpaper Engine on your PC or save & share a `.cosmos` file. So many sliders...
-- **Respect to the OGs:** The seed used on the homepage is `9281980`, AKA September 28th, 1980, AKA the air date of the first episode of Carl Sagan's *Cosmos: A Personal Voyage*, AKA the best show ever.
+- **Respect to the OGs:** The seed used for the stars on the homepage is `9281980`, AKA September 28th, 1980, AKA the air date of the first episode of Carl Sagan's *Cosmos: A Personal Voyage*, AKA the best show ever.
 - **No Bullshit:** No trackers, no ads, no subscriptions, no DRM. All basic functionality of Cosmorph is free for desktop users, with a paid option for real spaceheads who want total control coming Soon™. A paid Android app is also brewing.
 
 ## The Stellar Nursery
