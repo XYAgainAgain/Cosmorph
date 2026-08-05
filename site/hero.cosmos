@@ -265,7 +265,7 @@
         "laneFilAlong": 4,
         "laneFilSharp": 4,
         "laneWob": 1,
-        "spurAmt": 0.04,
+        "spurAmt": 0,
         "spurPhase": -0.7,
         "spurSharp": 1.1,
         "spurFreq": 9,

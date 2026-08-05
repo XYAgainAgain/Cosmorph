@@ -440,6 +440,16 @@ function gateKeys(type) {
   return keys;
 }
 
+/* Every `gate` predicate on this type, as one signature. A live uniform can still
+   decide whether its chain compiles at all, so only a flip here needs a rebuild. */
+function gateState(entity) {
+  const eff = effectiveParams(entity);
+  return TYPE_BY_ID[entity.type].params
+    .filter((param) => param.gate)
+    .map((param) => (param.gate(eff) ? 1 : 0))
+    .join('');
+}
+
 /* True when muting this type writes a build-gated key, which no live poke can
    reach: the starcloud's rift tau is the only one so far. */
 function mutesStructural(type) {
@@ -749,10 +759,12 @@ function commitParam(entity, param, value, live = false) {
     if (entity.type === 'shape' && param.key === 'asset') reseedShapeAsset(entity);
     return true;
   }
+  const gatesBefore = param.gate ? gateState(entity) : null;
   setPath(entity.params, param.key, value);
   const bag = entityBag(entity);
   if (bag && !entity.hidden) applyParam(bag, param, value, uniformCtx(entity));
   else if (bag) applyAll();
+  if (gatesBefore !== null && gateState(entity) !== gatesBefore) scheduleRebuild();
   return true;
 }
 
@@ -839,6 +851,7 @@ function rollValue(param) {
 
 function rerollGroup(entity, group) {
   const spec = TYPE_BY_ID[entity.type];
+  const gatesBefore = gateState(entity);
   let structural = false;
   /* A derived enum owns its dependent flags: the dice pick one of its presets
      instead of rolling the flags raw, or most rolls land on states no preset
@@ -856,7 +869,7 @@ function rerollGroup(entity, group) {
     structural = true;
   }
   applyAll();
-  if (structural) scheduleRebuild();
+  if (structural || gateState(entity) !== gatesBefore) scheduleRebuild();
   host.requestRender();
   renderEntityDetail();
   markDirty();

@@ -4,7 +4,7 @@
    the line RT. */
 
 import {
-  Fn, float, vec2, vec3, clamp, cos, exp, floor, fract, length,
+  Fn, If, float, vec2, vec3, clamp, cos, exp, floor, fract, length,
   mix, pow, sin, smoothstep,
 } from 'three/tsl';
 import { hash1, fbm3o2, ridged4, FBM2_NORM, CELL_BIAS } from './noise.js';
@@ -41,10 +41,14 @@ export const armHarmonic = /*@__PURE__*/ Fn(([dir, count]) => {
   return acc;
 });
 
+/* The smoothstep collapses if the outer edge is not above the inner one, so the
+   clamp is shared: the early-out gate must cut on the exact same radius. */
+const extentEdge = (U) => U.uGxCutOut.max(U.uGxCutIn.add(1e-3));
+
 /* Exponential wings never reach zero; without a cut a disk leaves a faint box
    across the frame. Taken per radius so a polar ring is not clipped by the host. */
 export function extentCut(U, r) {
-  return float(1).sub(smoothstep(U.uGxCutIn, U.uGxCutOut.max(U.uGxCutIn.add(1e-3)), r));
+  return float(1).sub(smoothstep(U.uGxCutIn, extentEdge(U), r));
 }
 
 /* Pink beads strung along whatever structure carries the young stars. One
@@ -88,138 +92,148 @@ function granulation(U, pn) {
 /* Grand-design spiral: logarithmic arms over a Moffat bulge, dust lane on the
    near half. uGxArmAmt at 0 drops the arms and leaves a lenticular. */
 function spiralGalaxy(U, pn, u, dir, look, wantLine) {
-  /* Logarithmic spiral: constant pitch puts the phase on ln(r), tan(pitch) =
-     m / uGxWind. Default spin is 2*PI/4096, one turn per uTev wrap. */
-  const lnu = u.max(1e-3).log().toVar();
-  const A = lnu.mul(U.uGxWind)
-    .sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
-  const ca = cos(A).toVar();
-  const sa = sin(A).toVar();
+  const cont = vec3(0).toVar();
+  const lines = wantLine ? vec3(0).toVar() : null;
 
-  /* Mixing toward dir is a free m=1 mode: dir IS cos/sin of one theta, so one
-     arm brightens and its opposite thins, which is what lopsided disks do. */
-  const m = mix(armHarmonic(dir, U.uGxArmCount), dir, U.uGxArmAsym).toVar();
-  const armCos = m.x.mul(ca).add(m.y.mul(sa)).toVar();
-  const armSin = m.y.mul(ca).sub(m.x.mul(sa)).toVar();
-  const arm = pow(armCos.mul(0.5).add(0.5).max(1e-4), U.uGxArmSharp.max(0.0)).toVar();
+  /* Every term below is multiplied by extentCut, which is exactly zero at and
+     past the edge, so skipping the ridged/fbm chain out there changes nothing. */
+  If(u.lessThan(extentEdge(U)), () => {
+    /* Logarithmic spiral: constant pitch puts the phase on ln(r), tan(pitch) =
+       m / uGxWind. Default spin is 2*PI/4096, one turn per uTev wrap. */
+    const lnu = u.max(1e-3).log().toVar();
+    const A = lnu.mul(U.uGxWind)
+      .sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
+    const ca = cos(A).toVar();
+    const sa = sin(A).toVar();
 
-  /* Build-gated: at the barAmt=0 default this whole log/cos/sin/pow chain would
-     be paid per fragment to multiply out to nothing. */
-  let bar = null;
-  if (look.bar) {
-    /* The bar is the same arm pattern frozen at its own radius, so its ends land
-       exactly where the arms root and the whole figure co-rotates as one. */
-    const barLen = U.uGxBarLen.max(1e-3).toVar();
-    const ab = barLen.log().mul(U.uGxWind).sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
-    const barCos = m.x.mul(cos(ab)).add(m.y.mul(sin(ab))).toVar();
-    bar = pow(barCos.mul(0.5).add(0.5).max(1e-4), U.uGxBarSharp.max(0.0))
-      .mul(float(1).sub(smoothstep(barLen.mul(0.55), barLen, u)))
-      .mul(U.uGxBarAmt).toVar();
-  }
+    /* Mixing toward dir is a free m=1 mode: dir IS cos/sin of one theta, so one
+       arm brightens and its opposite thins, which is what lopsided disks do. */
+    const m = mix(armHarmonic(dir, U.uGxArmCount), dir, U.uGxArmAsym).toVar();
+    const armCos = m.x.mul(ca).add(m.y.mul(sa)).toVar();
+    const armSin = m.y.mul(ca).sub(m.x.mul(sa)).toVar();
+    const arm = pow(armCos.mul(0.5).add(0.5).max(1e-4), U.uGxArmSharp.max(0.0)).toVar();
 
-  /* Disk-frame noise: the arm pattern rotates through material that stays put,
-     which is what a density wave actually does. */
-  const mot = fbm3o2(vec3(pn.mul(U.uGxMotFreq), U.uTev.mul(U.uGxMorph)).add(U.uGxOff)).toVar();
-  const gran = granulation(U, pn);
-  /* Speckle and flocculence share one coverage floor, so the dark tier chews the
-     arms into clumps; capped well under 1 to keep the remap's slope finite. */
-  const armLo = clamp(mot.mul(U.uGxMotAmt).add(gran.dark), 0.0, 0.9).toVar();
-  const armK = clamp(
-    remapRange(arm, armLo, float(1.0), float(0.0), float(1.0)), 0.0, 1.0,
-  ).toVar();
-  const armF = mix(float(1.0), armK, U.uGxArmAmt).toVar();
+    /* Build-gated: at the barAmt=0 default this whole log/cos/sin/pow chain would
+       be paid per fragment to multiply out to nothing. */
+    let bar = null;
+    if (look.bar) {
+      /* The bar is the same arm pattern frozen at its own radius, so its ends land
+         exactly where the arms root and the whole figure co-rotates as one. */
+      const barLen = U.uGxBarLen.max(1e-3).toVar();
+      const ab = barLen.log().mul(U.uGxWind).sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
+      const barCos = m.x.mul(cos(ab)).add(m.y.mul(sin(ab))).toVar();
+      bar = pow(barCos.mul(0.5).add(0.5).max(1e-4), U.uGxBarSharp.max(0.0))
+        .mul(float(1).sub(smoothstep(barLen.mul(0.55), barLen, u)))
+        .mul(U.uGxBarAmt).toVar();
+    }
 
-  const rb = U.uGxBulgeR.max(1e-3).toVar();
-  /* Moffat bulge rather than de Vaucouleurs: bounded at the center, so nothing
-     needs clamping ahead of the compose stretch. */
-  const bulge = pow(u.mul(u).div(rb.mul(rb)).add(1.0), U.uGxBulgeBeta.max(0.5).negate())
-    .mul(U.uGxBulgeAmt).toVar();
-  const fall = exp(u.mul(U.uGxDiskFall).negate()).toVar();
-  const disk = fall.mul(armF).toVar();
-  /* Bright speckle rides the arm-modulated disk, so the clumps crowd the arms
-     the way unresolved star clouds do instead of dusting the face evenly. */
-  const grit = disk.mul(gran.bright).toVar();
+    /* Disk-frame noise: the arm pattern rotates through material that stays put,
+       which is what a density wave actually does. */
+    const mot = fbm3o2(vec3(pn.mul(U.uGxMotFreq), U.uTev.mul(U.uGxMorph)).add(U.uGxOff)).toVar();
+    const gran = granulation(U, pn);
+    /* Speckle and flocculence share one coverage floor, so the dark tier chews the
+       arms into clumps; capped well under 1 to keep the remap's slope finite. */
+    const armLo = clamp(mot.mul(U.uGxMotAmt).add(gran.dark), 0.0, 0.9).toVar();
+    const armK = clamp(
+      remapRange(arm, armLo, float(1.0), float(0.0), float(1.0)), 0.0, 1.0,
+    ).toVar();
+    const armF = mix(float(1.0), armK, U.uGxArmAmt).toVar();
 
-  /* The lane trails the arms by a fixed phase and only shows on the near half
-     of the disk, where the dust sits in front of the light. */
-  const near = smoothstep(U.uGxNearSoft.max(1e-3).negate(), U.uGxNearSoft.max(1e-3),
-    dir.y.mul(U.uGxNearSide));
-  const lp = U.uGxLanePhase.toVar();
-  const laneCos = armCos.mul(cos(lp)).add(armSin.mul(sin(lp))).toVar();
-  /* The phase frame spins ever faster toward the center, so dust texture
-     activity eases out across the bulge instead of shredding the inner disk. */
-  const act = smoothstep(rb, rb.mul(2.5), u).toVar();
+    const rb = U.uGxBulgeR.max(1e-3).toVar();
+    /* Moffat bulge rather than de Vaucouleurs: bounded at the center, so nothing
+       needs clamping ahead of the compose stretch. */
+    const bulge = pow(u.mul(u).div(rb.mul(rb)).add(1.0), U.uGxBulgeBeta.max(0.5).negate())
+      .mul(U.uGxBulgeAmt).toVar();
+    const fall = exp(u.mul(U.uGxDiskFall).negate()).toVar();
+    const disk = fall.mul(armF).toVar();
+    /* Bright speckle rides the arm-modulated disk, so the clumps crowd the arms
+       the way unresolved star clouds do instead of dusting the face evenly. */
+    const grit = disk.mul(gran.bright).toVar();
 
-  let band = pow(laneCos.mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0)).toVar();
-  let fil = null;
-  /* Both texture tiers are build-gated like the bar: an untextured lane pays
-     for neither ridge field. */
-  if (look.fil) {
-    /* Ridged filaments on the wound (armCos, armSin, ln r) frame: constant-
-       phase lines ARE the arms there, so every ridge winds with the spiral. */
-    const filN = ridged4(vec3(
-      armCos.mul(U.uGxLaneFilFreq), armSin.mul(U.uGxLaneFilFreq),
-      lnu.mul(U.uGxLaneFilAlong).add(U.uTev.mul(U.uGxMorph)),
-    ).add(U.uGxOff.mul(5.0)), U.uGxLaneFilSharp).toVar();
-    /* The same scalar jitters the band's phase: lanes hug a wandering side of
-       the arm instead of running mechanically parallel to it. */
-    const j = filN.sub(0.5).mul(U.uGxLaneWob).mul(act).toVar();
-    const laneSin = armSin.mul(cos(lp)).sub(armCos.mul(sin(lp))).toVar();
-    band = pow(laneCos.mul(cos(j)).add(laneSin.mul(sin(j)))
-      .mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0)).toVar();
-    /* Carve only the band's heart: the wings stay the smooth classic lane, or
-       the texture reads as veins across the whole disk face. */
-    const heart = smoothstep(0.2, 0.6, band).toVar();
-    fil = mix(float(1.0).sub(U.uGxLaneFil.mul(act).mul(heart)), float(1.0), filN).toVar();
-  }
-  let lane = (fil ? band.mul(fil) : band).mul(near).mul(U.uGxLaneDepth).toVar();
+    /* The lane trails the arms by a fixed phase and only shows on the near half
+       of the disk, where the dust sits in front of the light. */
+    const near = smoothstep(U.uGxNearSoft.max(1e-3).negate(), U.uGxNearSoft.max(1e-3),
+      dir.y.mul(U.uGxNearSide));
+    const lp = U.uGxLanePhase.toVar();
+    const laneCos = armCos.mul(cos(lp)).add(armSin.mul(sin(lp))).toVar();
+    /* The phase frame spins ever faster toward the center, so dust texture
+       activity eases out across the bulge instead of shredding the inner disk. */
+    const act = smoothstep(rb, rb.mul(2.5), u).toVar();
 
-  if (look.spurs) {
-    /* Spur feathers jut across the arm: plain unwound polar sampling, so the
-       ridges cut the band instead of following it. max() keeps crossings from
-       double-darkening; the laneDepth factor keeps it the group's master dial. */
-    const spN = ridged4(vec3(
-      dir.mul(U.uGxSpurFreq),
-      lnu.mul(U.uGxSpurFreq).mul(0.35).add(U.uTev.mul(U.uGxMorph)),
-    ).add(U.uGxOff.mul(11.0)), U.uGxSpurFilSharp).toVar();
-    const sp = U.uGxSpurPhase.toVar();
-    const spCos = armCos.mul(cos(sp)).add(armSin.mul(sin(sp))).toVar();
-    const spBand = pow(spCos.mul(0.5).add(0.5).max(1e-4), U.uGxSpurSharp.max(0.0)).toVar();
-    const spurs = smoothstep(0.45, 0.8, spN).mul(spBand).mul(near)
-      .mul(U.uGxSpurAmt).mul(U.uGxLaneDepth).mul(act);
-    lane = lane.max(spurs).toVar();
-  }
+    let band = pow(laneCos.mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0)).toVar();
+    let fil = null;
+    /* Both texture tiers are build-gated like the bar: an untextured lane pays
+       for neither ridge field. */
+    if (look.fil) {
+      /* Ridged filaments on the wound (armCos, armSin, ln r) frame: constant-
+         phase lines ARE the arms there, so every ridge winds with the spiral. */
+      const filN = ridged4(vec3(
+        armCos.mul(U.uGxLaneFilFreq), armSin.mul(U.uGxLaneFilFreq),
+        lnu.mul(U.uGxLaneFilAlong).add(U.uTev.mul(U.uGxMorph)),
+      ).add(U.uGxOff.mul(5.0)), U.uGxLaneFilSharp).toVar();
+      /* The same scalar jitters the band's phase: lanes hug a wandering side of
+         the arm instead of running mechanically parallel to it. */
+      const j = filN.sub(0.5).mul(U.uGxLaneWob).mul(act).toVar();
+      const laneSin = armSin.mul(cos(lp)).sub(armCos.mul(sin(lp))).toVar();
+      band = pow(laneCos.mul(cos(j)).add(laneSin.mul(sin(j)))
+        .mul(0.5).add(0.5).max(1e-4), U.uGxLaneSharp.max(0.0)).toVar();
+      /* Carve only the band's heart: the wings stay the smooth classic lane, or
+         the texture reads as veins across the whole disk face. */
+      const heart = smoothstep(0.2, 0.6, band).toVar();
+      fil = mix(float(1.0).sub(U.uGxLaneFil.mul(act).mul(heart)), float(1.0), filN).toVar();
+    }
+    let lane = (fil ? band.mul(fil) : band).mul(near).mul(U.uGxLaneDepth).toVar();
 
-  const barLum = bar ? bar.mul(fall).toVar() : null;
-  const body = bulge.add(disk).add(grit);
-  const lum = (barLum ? body.add(barLum) : body).toVar();
-  /* The divisor must sum every additive dial: leave grit or the bar out and lum
-     runs past it, which clips the lane remap flat and stops the lane carving. */
-  let peak = U.uGxBulgeAmt.add(1.0).add(U.uGxGranBright);
-  if (barLum) peak = peak.add(U.uGxBarAmt);
-  const n = lum.div(peak.max(1.0)).toVar();
-  const carved = clamp(remapRange(n, lane, float(1.0), float(0.0), float(1.0)), 0.0, 1.0);
+    if (look.spurs) {
+      /* Spur feathers jut across the arm: plain unwound polar sampling, so the
+         ridges cut the band instead of following it. max() keeps crossings from
+         double-darkening; the laneDepth factor keeps it the group's master dial. */
+      const spN = ridged4(vec3(
+        dir.mul(U.uGxSpurFreq),
+        lnu.mul(U.uGxSpurFreq).mul(0.35).add(U.uTev.mul(U.uGxMorph)),
+      ).add(U.uGxOff.mul(11.0)), U.uGxSpurFilSharp).toVar();
+      const sp = U.uGxSpurPhase.toVar();
+      const spCos = armCos.mul(cos(sp)).add(armSin.mul(sin(sp))).toVar();
+      const spBand = pow(spCos.mul(0.5).add(0.5).max(1e-4), U.uGxSpurSharp.max(0.0)).toVar();
+      const spurs = smoothstep(0.45, 0.8, spN).mul(spBand).mul(near)
+        .mul(U.uGxSpurAmt).mul(U.uGxLaneDepth).mul(act);
+      lane = lane.max(spurs).toVar();
+    }
 
-  const cut = extentCut(U, u).toVar();
+    const barLum = bar ? bar.mul(fall).toVar() : null;
+    const body = bulge.add(disk).add(grit);
+    const lum = (barLum ? body.add(barLum) : body).toVar();
+    /* The divisor must sum every additive dial: leave grit or the bar out and lum
+       runs past it, which clips the lane remap flat and stops the lane carving. */
+    let peak = U.uGxBulgeAmt.add(1.0).add(U.uGxGranBright);
+    if (barLum) peak = peak.add(U.uGxBarAmt);
+    const n = lum.div(peak.max(1.0)).toVar();
+    const carved = clamp(remapRange(n, lane, float(1.0), float(0.0), float(1.0)), 0.0, 1.0);
 
-  /* Tint by which component dominates, so the arms stay blue right up against
-     a warm bulge instead of the whole inner disk going yellow. A bar counts
-     with the bulge: it is the same old red population, not young disk stars. */
-  const w = (barLum ? bulge.add(barLum) : bulge).div(lum.max(1e-3));
-  const tintHi = U.uGxTintHi.max(U.uGxTintLo.add(1e-3));
-  const tint = mix(U.uGxDisk, U.uGxBulge, smoothstep(U.uGxTintLo, tintHi, w));
+    const cut = extentCut(U, u).toVar();
 
-  const out = { cont: tint.mul(carved).mul(cut).mul(U.uGxGain) };
-  /* The knot noise is only built for the line pass; leaving it in the continuum
-     body would emit a whole dead fbm there. */
-  if (wantLine) {
-    const knotN = fbm3o2(vec3(pn.mul(U.uGxHiiFreq), U.uTev.mul(U.uGxMorph)).add(U.uGxOff.mul(7.0)))
-      .mul(FBM2_NORM).toVar();
-    /* Scaled by uGxArmAmt too: a lenticular has no arms, so it must not keep
-       stringing HII regions along the spiral pattern nothing else can see. */
-    const host = armK.mul(disk).mul(cut).mul(U.uGxArmAmt).toVar();
-    out.line = hiiLine(U, host, knotN).add(hiiFlower(U, host, knotN, u));
-  }
+    /* Tint by which component dominates, so the arms stay blue right up against
+       a warm bulge instead of the whole inner disk going yellow. A bar counts
+       with the bulge: it is the same old red population, not young disk stars. */
+    const w = (barLum ? bulge.add(barLum) : bulge).div(lum.max(1e-3));
+    const tintHi = U.uGxTintHi.max(U.uGxTintLo.add(1e-3));
+    const tint = mix(U.uGxDisk, U.uGxBulge, smoothstep(U.uGxTintLo, tintHi, w));
+
+    cont.assign(tint.mul(carved).mul(cut).mul(U.uGxGain));
+    /* The knot noise is only built for the line pass; leaving it in the continuum
+       body would emit a whole dead fbm there. */
+    if (wantLine) {
+      const knotN = fbm3o2(vec3(pn.mul(U.uGxHiiFreq), U.uTev.mul(U.uGxMorph)).add(U.uGxOff.mul(7.0)))
+        .mul(FBM2_NORM).toVar();
+      /* Scaled by uGxArmAmt too: a lenticular has no arms, so it must not keep
+         stringing HII regions along the spiral pattern nothing else can see. */
+      const host = armK.mul(disk).mul(cut).mul(U.uGxArmAmt).toVar();
+      lines.assign(hiiLine(U, host, knotN).add(hiiFlower(U, host, knotN, u)));
+    }
+  });
+
+  const out = { cont };
+  if (wantLine) out.line = lines;
   return out;
 }
 

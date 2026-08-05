@@ -3,22 +3,23 @@
    entity-array scene config; layer shaders never output RGB directly. */
 
 import * as THREE from 'three/webgpu';
-import { exp, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { exp, float, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { createRng, deriveSeed } from '../core/rng.js';
 import { generateBrightStars } from '../entities/stars.js';
 import { buildBrightStarNodes } from '../shaders/tsl/stars.js';
 import { buildEmissionNodes } from '../shaders/tsl/nebula.js';
 import { buildContinuumNodes, wispTau, WISP_SIGMA } from '../shaders/tsl/dust.js';
-import { buildReflectionNodes, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
+import { buildReflectionNodes, reflectionTau, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
 import { buildFilamentNodes, FILAMENT_DEFAULTS } from '../shaders/tsl/filaments.js';
-import { buildEchoNodes, ECHO_DEFAULTS } from '../shaders/tsl/echo.js';
-import { buildShadowFanNodes, SHADOWFAN_DEFAULTS } from '../shaders/tsl/shadowfan.js';
-import { buildSearchlightNodes, SEARCHLIGHT_DEFAULTS } from '../shaders/tsl/searchlight.js';
+import { buildEchoNodes, echoTau, ECHO_DEFAULTS } from '../shaders/tsl/echo.js';
+import { buildShadowFanNodes, shadowFanTau, SHADOWFAN_DEFAULTS } from '../shaders/tsl/shadowfan.js';
+import { buildSearchlightNodes, searchlightTau, SEARCHLIGHT_DEFAULTS } from '../shaders/tsl/searchlight.js';
 import { buildPlanetaryNodes, PLANETARY_DEFAULTS } from '../shaders/tsl/planetary.js';
 import { buildJetNodes, JET_DEFAULTS } from '../shaders/tsl/jets.js';
 import { buildWrBubbleNodes, WRBUBBLE_DEFAULTS } from '../shaders/tsl/wrbubble.js';
 import { buildClusterNodes, GLOBULAR_DEFAULTS } from '../shaders/tsl/clusters.js';
-import { buildStarcloudNodes, STARCLOUD_DEFAULTS } from '../shaders/tsl/starcloud.js';
+import { buildStarcloudNodes, riftTau, STARCLOUD_DEFAULTS } from '../shaders/tsl/starcloud.js';
+import { globuleTauAndRim } from '../shaders/tsl/globules.js';
 import {
   buildGalaxyNodes, GALAXY_DEFAULTS, devNormFor, GX_FAMILIES, ARM_COUNT_TABLE,
 } from '../shaders/tsl/galaxies.js';
@@ -26,12 +27,14 @@ import { ARM_MAX } from '../shaders/tsl/galaxy-showpiece.js';
 import { generateGalaxyStars } from '../entities/galaxy-stars.js';
 import { buildGalaxyStarNodes } from '../shaders/tsl/galaxy-stars.js';
 import { buildIonCloudNodes, ION_CLOUD_DEFAULTS } from '../shaders/tsl/ionization-cloud.js';
-import { SHAPE_DEFAULTS } from '../shaders/tsl/shape.js';
+import { shapeTauAndRim, SHAPE_DEFAULTS } from '../shaders/tsl/shape.js';
 import { loadShapeAsset } from '../entities/shape.js';
 import { LENS_DEFAULTS, LENS_MAX_HALOS } from '../shaders/tsl/lensing.js';
 import { DUST_MARCH_DEFAULTS } from '../shaders/tsl/dustmarch.js';
 import { buildDustPass } from './dustpass.js';
 import { buildComposeNodes } from '../shaders/tsl/compose.js';
+import { buildBakedComposeNodes } from '../shaders/tsl/compose-baked.js';
+import { PLANE_NAMES, planeFor, RATE_FLOOR, REBAKE_EPS } from './planes.js';
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
    Community default is natural HOO; SHO reads dated to many eyes now. */
@@ -103,6 +106,39 @@ const DEFAULTS = {
   shape: { ...SHAPE_DEFAULTS },
 };
 
+/* Depth-plane bucketing reads each type's default depth; these mirror the
+   `e.depth ?? N` fallbacks in the bag factories and must track them. */
+const PLANE_DEPTHS = {
+  emission: 0.3, ifn: 0.12, darkDust: 0.55, starcloud: 0.1, globules: 0.6,
+  reflection: 0.35, filaments: 0.25, echo: 0.4, shadowFan: 0.42,
+  searchlight: 0.4, planetary: 0.45, jets: 0.42, wrbubble: 0.42,
+  clusters: 0.2, galaxies: 0.13, ionCloud: 0.5, shape: 0.5, dustMarch: 0.55,
+};
+
+/* Every param a type multiplies evolution time by. morphRate alone misses the
+   fast ones: jets drift 3.0 hard-cuts its knot spacing long before it rebakes. */
+const RATE_PARAMS = {
+  jets: ['morphRate', 'drift', 'precRate'],
+  echo: ['rate'],
+  reflection: ['morph'],
+  searchlight: ['morphRate', 'spin'],
+  shadowFan: ['morphRate', 'rotRate'],
+  galaxies: ['morphRate', 'spin', 'starsSpin'],
+};
+
+/* Marched dust carries its own defaults object rather than a DEFAULTS entry,
+   and a type with no rate param at all is assumed to drift at the floor. */
+const planeRate = (type, e) => {
+  const defs = type === 'dustMarch' ? DUST_MARCH_DEFAULTS : DEFAULTS[type];
+  let rate = null;
+  for (const key of RATE_PARAMS[type] ?? ['morphRate']) {
+    const v = e.params?.[key] ?? defs?.[key];
+    /* A negative spin drifts exactly as fast as a positive one */
+    if (Number.isFinite(v)) rate = Math.max(rate ?? 0, Math.abs(v));
+  }
+  return rate ?? RATE_FLOOR;
+};
+
 /* Must match the overscan default in entities/stars.js: the bright tier tiles
    at exactly the generation span, so a mismatch would show a seam under pan. */
 const BRIGHT_OVERSCAN = 0.06;
@@ -140,7 +176,9 @@ function offsetFrom(seed, salt) {
   );
 }
 
-export async function createSky2D({ canvas, config, forceWebGL = false, maxParallaxPx = 14 }) {
+export async function createSky2D({
+  canvas, config, forceWebGL = false, maxParallaxPx = 14, baked = false,
+}) {
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, forceWebGL });
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
@@ -272,6 +310,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
        instance pre-shifts off these, the way the feature layers already do. */
     uDepthLine: uniform(baseEnts.emission[0]?.depth ?? 0.3),
     uDepthCont: uniform(baseEnts.ifn[0]?.depth ?? 0.12),
+    /* Parallax coefficient per depth plane, set at build to the member mean.
+       Created unconditionally: only the baked composite ever reaches them, and
+       an uncreated uniform would emit the WGSL token `null` if one ever did. */
+    uPlaneDeep: uniform(0),
+    uPlaneDistant: uniform(0),
+    uPlaneFar: uniform(0),
+    uPlaneClose: uniform(0),
 
     /* TSL emits a uniform only once the graph reaches it, so create them all */
     uLensAt: uniform(new THREE.Vector2(0, 0)),
@@ -1420,8 +1465,19 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     mat.depthTest = false;
     mat.depthWrite = false;
     const scene = new THREE.Scene();
-    scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    scene.add(quad);
+    /* Tagged rather than reached through children[0], which the baked path
+       appends sprite meshes to. */
+    scene.userData.quad = quad;
     return scene;
+  }
+
+  function disposePass(scene) {
+    const quad = scene?.userData.quad;
+    if (!quad) return;
+    quad.geometry.dispose();
+    quad.material.dispose();
   }
 
   const rtOpts = {
@@ -1433,6 +1489,12 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   const lineRT = new THREE.RenderTarget(2, 2, rtOpts);
   const contRT = new THREE.RenderTarget(2, 2, rtOpts);
   const brightRT = new THREE.RenderTarget(2, 2, rtOpts);
+
+  /* Filled by the baked block below; empty on the live path, which is what
+     lets resize() and dispose() walk it unconditionally. */
+  const builtPlanes = [];
+  const bakedGxMeshes = [];
+  const bakedStats = { bakes: 0, frames: 0, planeBakes: {} };
 
   /* The glow and its shock filaments are one object in two RTs, so each half
      pre-shifts to its own RT depth in order to land together on screen. */
@@ -1551,7 +1613,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     ? buildDustPass({
       instances: dustInst,
       U,
-      skyAt: (depthU) => skyAtDepth(depthU, U.uDepthDust),
+      /* A bake must be valid at any parallax, so the baked build drops the
+         pre-shift; at parallax 0 the two agree, so capture is untouched. */
+      skyAt: baked ? () => skyU : (depthU) => skyAtDepth(depthU, U.uDepthDust),
     })
     : null;
 
@@ -1595,6 +1659,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
   brightMat.depthWrite = false;
   let brightMesh = null;
   let dpr = 1;
+
+  /* Second bright tier for the baked path: identical geometry, but its occlude
+     callback samples a plane bake instead of re-evaluating wisp noise. */
+  let bakedBrightScene = null;
+  let bakedBrightMat = null;
+  let bakedBrightMesh = null;
+  let bakedComposeScene = null;
 
   const starSeed = byType.stars?.seed ?? config.seed;
 
@@ -1681,9 +1752,251 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       brightMesh.geometry.dispose();
       brightScene.remove(brightMesh);
     }
-    brightMesh = new THREE.Mesh(buildBrightGeometry(U.uAspect.value, dpr), brightMat);
+    if (bakedBrightMesh) bakedBrightScene.remove(bakedBrightMesh);
+    /* One geometry, two meshes: the baked bright pass shares it, so the single
+       dispose above covers both. */
+    const geo = buildBrightGeometry(U.uAspect.value, dpr);
+    brightMesh = new THREE.Mesh(geo, brightMat);
     brightMesh.frustumCulled = false;
     brightScene.add(brightMesh);
+    if (bakedBrightScene) {
+      bakedBrightMesh = new THREE.Mesh(geo, bakedBrightMat);
+      bakedBrightMesh.frustumCulled = false;
+      bakedBrightScene.add(bakedBrightMesh);
+    }
+  }
+
+  /* Baked path: the scene's entities bucketed into at most four depth planes,
+     each baked to its own pair of RTs and composited by parallax coefficient.
+     Every line below is gated, so a live build graphs exactly what it always did. */
+  if (baked) {
+    const bakedEnts = {
+      emission: orNone(baseEnts.emission),
+      ifn: orNone(baseEnts.ifn),
+      darkDust: orNone(baseEnts.darkDust),
+      starcloud: baseEnts.starcloud,
+      globules: featureEnts.globules,
+      reflection: featureEnts.reflection,
+      filaments: featureEnts.filaments,
+      echo: featureEnts.echo,
+      shadowFan: featureEnts.shadowFan,
+      searchlight: featureEnts.searchlight,
+      planetary: featureEnts.planetary,
+      jets: featureEnts.jets,
+      wrbubble: featureEnts.wrbubble,
+      clusters: featureEnts.clusters,
+      galaxies: featureEnts.galaxies,
+      ionCloud: featureEnts.ionCloud,
+      shape: featureEnts.shape,
+      dustMarch: dustEnts,
+    };
+    const bakedInst = {
+      emission: emisInst, ifn: ifnInst, darkDust: wispInst, starcloud: scInst,
+      globules: globInst, reflection: reflInst, filaments: filInst, echo: echoInst,
+      shadowFan: fanInst, searchlight: beamInst, planetary: pnInst, jets: jetInst,
+      wrbubble: wrbInst, clusters: cluInst, galaxies: gxInst, ionCloud: ionInst,
+      shape: shapeInst, dustMarch: dustInst,
+    };
+
+    const planeU = [U.uPlaneDeep, U.uPlaneDistant, U.uPlaneFar, U.uPlaneClose];
+    const groups = PLANE_NAMES.map(() => ({ sum: 0, count: 0, score: 0, by: {} }));
+    for (const [type, inst] of Object.entries(bakedInst)) {
+      inst.forEach((bag, i) => {
+        const e = bakedEnts[type][i] ?? {};
+        const depth = e.depth ?? PLANE_DEPTHS[type];
+        const g = groups[planeFor(depth)];
+        g.sum += depth;
+        g.count += 1;
+        g.score = Math.max(g.score, planeRate(type, e));
+        (g.by[type] ??= []).push(bag);
+      });
+    }
+
+    /* Same filter and order the live sprite meshes were built in, which is how
+       a baked sprite mesh finds the geometry to share. */
+    const gxSpriteBags = gxInst.filter((bag) => bag.gxsCount > 0);
+    /* Twinkle stays a live-tier effect: baked into a plane it would hard-snap
+       the whole faint field to an uncorrelated phase on every rebake. */
+    const bakedTwinkle = uniform(0);
+    /* A render target samples back v-flipped, so reading the dust MRT from
+       inside a bake has to undo that to land on the same overscanned texel. */
+    const bakeUV = vec2(uv().x, uv().y.oneMinus());
+
+    /* The march is one shared MRT for every marched entity, so exactly one
+       plane owns it; a second claimant would double-count its tau. */
+    const dustIdx = groups.findIndex((g) => (g.by.dustMarch?.length ?? 0) > 0);
+
+    groups.forEach((g, idx) => {
+      if (g.count === 0) return;
+      const by = g.by;
+      const uDepth = planeU[idx];
+      uDepth.value = g.sum / g.count;
+      const hasDust = idx === dustIdx;
+
+      /* Plain skyU, never skyAtDepth: a bake has to be valid at any parallax,
+         and the composite is what applies this plane's coefficient. */
+      let lineSum = vec3(0.0);
+      for (const bag of by.emission ?? []) lineSum = lineSum.add(buildEmissionNodes(skyU, bag).rgb);
+      for (const bag of by.reflection ?? []) lineSum = lineSum.add(buildReflectionNodes(skyU, bag).line);
+      for (const bag of by.filaments ?? []) lineSum = lineSum.add(buildFilamentNodes(skyU, bag).line);
+      for (const bag of by.planetary ?? []) lineSum = lineSum.add(buildPlanetaryNodes(skyU, bag, bag.pnOpts).line);
+      for (const bag of by.jets ?? []) lineSum = lineSum.add(buildJetNodes(skyU, bag, bag.jetOpts).line);
+      for (const bag of by.wrbubble ?? []) lineSum = lineSum.add(buildWrBubbleNodes(skyU, bag, bag.wrbOpts).line);
+      for (const bag of by.galaxies ?? []) {
+        const nodes = buildGalaxyNodes(skyU, bag, bag.gxOpts);
+        if (nodes.line) lineSum = lineSum.add(nodes.line);
+      }
+      for (const bag of by.ionCloud ?? []) lineSum = lineSum.add(buildIonCloudNodes(skyU, bag, bag.ionOpts).line);
+      for (const bag of by.echo ?? []) {
+        if (bag.echoOpts.ha) lineSum = lineSum.add(buildEchoNodes(skyU, bag, bag.echoOpts).line);
+      }
+
+      let tauSum = float(0);
+      for (const bag of by.darkDust ?? []) tauSum = tauSum.add(wispTau(skyU, bag));
+      for (const bag of by.globules ?? []) tauSum = tauSum.add(globuleTauAndRim(skyU, bag, bag.cometary).tau);
+      for (const bag of by.shape ?? []) tauSum = tauSum.add(shapeTauAndRim(skyU, bag, bag.shpMap, bag.shpOpts).tau);
+      for (const bag of by.reflection ?? []) tauSum = tauSum.add(reflectionTau(skyU, bag));
+      for (const bag of by.echo ?? []) tauSum = tauSum.add(echoTau(skyU, bag));
+      for (const bag of by.shadowFan ?? []) tauSum = tauSum.add(shadowFanTau(skyU, bag));
+      for (const bag of by.searchlight ?? []) tauSum = tauSum.add(searchlightTau(skyU, bag));
+      for (const bag of by.starcloud ?? []) {
+        if (bag.scOpts.rift) tauSum = tauSum.add(riftTau(skyU, bag));
+      }
+      /* The march's own tau folds in here so the composite pays one exp per
+         plane; only its emission lands after the walk. */
+      if (hasDust && dust) tauSum = tauSum.add(texture(dust.lineTex, bakeUV).a);
+
+      let contSum = vec3(0.0);
+      for (const bag of by.ifn ?? []) {
+        const steady = Object.create(bag);
+        steady.uTwinklePhase = bakedTwinkle;
+        contSum = contSum.add(buildContinuumNodes(skyU, U.uPxPerUnit, steady, bag.ifnOpts).rgb);
+      }
+      for (const bag of by.reflection ?? []) contSum = contSum.add(buildReflectionNodes(skyU, bag).continuum);
+      for (const bag of by.echo ?? []) contSum = contSum.add(buildEchoNodes(skyU, bag, bag.echoOpts).continuum);
+      for (const bag of by.jets ?? []) contSum = contSum.add(buildJetNodes(skyU, bag, bag.jetOpts).continuum);
+      for (const bag of by.shadowFan ?? []) contSum = contSum.add(buildShadowFanNodes(skyU, bag, bag.fanOpts).continuum);
+      for (const bag of by.searchlight ?? []) contSum = contSum.add(buildSearchlightNodes(skyU, bag, bag.beamOpts).continuum);
+      for (const bag of by.planetary ?? []) contSum = contSum.add(buildPlanetaryNodes(skyU, bag, bag.pnOpts).continuum);
+      for (const bag of by.wrbubble ?? []) contSum = contSum.add(buildWrBubbleNodes(skyU, bag, bag.wrbOpts).continuum);
+      for (const bag of by.galaxies ?? []) contSum = contSum.add(buildGalaxyNodes(skyU, bag, bag.gxOpts).continuum);
+      for (const bag of by.clusters ?? []) {
+        contSum = contSum.add(buildClusterNodes(skyU, U.uPxPerUnit, bag, bag.cluOpts).continuum);
+      }
+      for (const bag of by.starcloud ?? []) contSum = contSum.add(buildStarcloudNodes(skyU, bag, bag.scOpts).continuum);
+
+      /* RT B's alpha carries only the occluding wisps: the bright tier reads it
+         back per star, and it must not see the rest of the plane's tau. */
+      const occluding = (by.darkDust ?? []).filter((bag) => bag.wispOcclude);
+      let occTau = float(0);
+      for (const bag of occluding) occTau = occTau.add(wispTau(skyU, bag));
+
+      const rtA = new THREE.RenderTarget(2, 2, rtOpts);
+      const rtB = new THREE.RenderTarget(2, 2, rtOpts);
+      const sceneA = fullscreenPass(vec4(lineSum, tauSum));
+      const sceneB = fullscreenPass(vec4(contSum, occTau));
+
+      for (const bag of by.galaxies ?? []) {
+        if (!bag.gxsCount) continue;
+        /* No parallax pre-shift in a bake, or the sprites shear against the
+           glow every time the plane rebakes at a new pointer offset. */
+        const nodes = buildGalaxyStarNodes(bag, { ...bag.gxsOpts, preShift: false });
+        const mat = new THREE.MeshBasicNodeMaterial();
+        mat.positionNode = nodes.positionNode;
+        mat.fragmentNode = nodes.fragmentNode;
+        mat.transparent = true;
+        /* Additive color like the live tier, but alpha passes through
+           untouched: sprite alpha would otherwise corrupt the occluder tau. */
+        mat.blending = THREE.CustomBlending;
+        mat.blendEquation = THREE.AddEquation;
+        mat.blendSrc = THREE.OneFactor;
+        mat.blendDst = THREE.OneFactor;
+        mat.blendEquationAlpha = THREE.AddEquation;
+        mat.blendSrcAlpha = THREE.ZeroFactor;
+        mat.blendDstAlpha = THREE.OneFactor;
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        const mesh = new THREE.Mesh(gxStarMeshes[gxSpriteBags.indexOf(bag)].geometry, mat);
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 1;
+        sceneB.add(mesh);
+        bakedGxMeshes.push(mesh);
+      }
+
+      /* The tau builders run a second time for the rim, and deliberately so:
+         each pass needs its own graph, and the cost is paid only on a bake. */
+      let rimRT = null;
+      let rimScene = null;
+      if ((by.globules?.length ?? 0) + (by.shape?.length ?? 0) > 0) {
+        let rimSum = vec3(0.0);
+        for (const bag of by.globules ?? []) {
+          rimSum = rimSum.add(globuleTauAndRim(skyU, bag, bag.cometary).rim);
+        }
+        for (const bag of by.shape ?? []) {
+          rimSum = rimSum.add(shapeTauAndRim(skyU, bag, bag.shpMap, bag.shpOpts).rim);
+        }
+        rimRT = new THREE.RenderTarget(2, 2, rtOpts);
+        rimScene = fullscreenPass(vec4(rimSum, 0.0));
+      }
+
+      builtPlanes.push({
+        name: PLANE_NAMES[idx],
+        uDepth,
+        rtA,
+        rtB,
+        rimRT,
+        sceneA,
+        sceneB,
+        rimScene,
+        hasDust,
+        hasOccluder: occluding.length > 0,
+        score: g.score,
+        types: Object.keys(by),
+        bakedTev: null,
+        dirty: true,
+      });
+    });
+
+    const occPlanes = builtPlanes.filter((pl) => pl.hasOccluder);
+    if (occPlanes.length > 0) {
+      bakedBrightScene = new THREE.Scene();
+      /* Invert skyU to find the star's texel, then undo the render target's
+         v-flip; explicit LOD because this samples at the vertex stage. */
+      const bakedOcclude = (skyPos) => {
+        const p = skyPos.sub(U.uCamera).div(vec2(U.uAspect, 1.0))
+          .sub(0.5).div(U.uMarginScale).add(0.5);
+        const at = vec2(p.x, p.y.oneMinus());
+        let tau = texture(occPlanes[0].rtB.texture, at).level(float(0)).a;
+        for (const pl of occPlanes.slice(1)) {
+          tau = tau.add(texture(pl.rtB.texture, at).level(float(0)).a);
+        }
+        return exp(tau.negate().mul(WISP_SIGMA));
+      };
+      const nodes = buildBrightStarNodes(U, { occlude: bakedOcclude });
+      bakedBrightMat = new THREE.MeshBasicNodeMaterial();
+      bakedBrightMat.positionNode = nodes.positionNode;
+      bakedBrightMat.fragmentNode = nodes.fragmentNode;
+      bakedBrightMat.transparent = true;
+      bakedBrightMat.blending = THREE.AdditiveBlending;
+      bakedBrightMat.depthTest = false;
+      bakedBrightMat.depthWrite = false;
+    }
+
+    const dustPlane = builtPlanes.find((pl) => pl.hasDust) ?? null;
+    bakedComposeScene = fullscreenPass(buildBakedComposeNodes({
+      planes: builtPlanes.map((pl) => ({
+        texA: pl.rtA.texture,
+        texB: pl.rtB.texture,
+        texRim: pl.rimRT ? pl.rimRT.texture : null,
+        uDepth: pl.uDepth,
+      })),
+      brightTex: brightRT.texture,
+      U,
+      lens: lensOn ? { halos: lensHalos } : null,
+      dust: dustPlane && dust
+        ? { lineTex: dust.lineTex, contTex: dust.contTex, uDepth: dustPlane.uDepth }
+        : null,
+    }));
   }
 
   /* Only a tile crossing costs a geometry rebuild; a drag inside one tile is
@@ -1693,6 +2006,9 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     camX = x;
     camY = y;
     U.uCamera.value.set(x, y);
+    /* Every bake is camera-anchored, so any pan stales all of them, tile
+       crossing or not. Empty on a live build, exactly as in resize(). */
+    for (const pl of builtPlanes) pl.dirty = true;
     if (moved) rebuildBright();
   }
 
@@ -1712,6 +2028,13 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     contRT.setSize(w, h);
     brightRT.setSize(w, h);
     if (dust) dust.setSize(w, h);
+    /* Rims are soft by nature, so their target rides at half res */
+    for (const pl of builtPlanes) {
+      pl.rtA.setSize(w, h);
+      pl.rtB.setSize(w, h);
+      pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)));
+      pl.dirty = true;
+    }
 
     const aspect = cssW / cssH;
     U.uResolution.value.set(w, h);
@@ -1751,6 +2074,45 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     renderTo(null, tevHours, parallaxCssX, parallaxCssY);
   }
 
+  /* Baked frame: rebake whatever is stale, then composite. The bright tier and
+     the composite are the only per-frame work once the planes hold still. */
+  function renderBaked(tevHours, parallaxCssX, parallaxCssY) {
+    U.uTev.value = tevHours;
+    U.uTwinklePhase.value = (tevHours * P.stars.twinkleRate) % 1;
+    U.uParallax.value.set(parallaxCssX * dpr, parallaxCssY * dpr);
+
+    for (const pl of builtPlanes) {
+      /* A field morph has no displacement to measure, so staleness is elapsed
+         evolution times the plane's fastest morph rate. */
+      const stale = pl.bakedTev === null
+        || Math.abs(tevHours - pl.bakedTev) * pl.score >= REBAKE_EPS;
+      if (!pl.dirty && !stale) continue;
+
+      if (pl.hasDust && dust) {
+        renderer.setRenderTarget(dust.rt);
+        renderer.render(dust.scene, camera);
+      }
+      renderer.setRenderTarget(pl.rtA);
+      renderer.render(pl.sceneA, camera);
+      renderer.setRenderTarget(pl.rtB);
+      renderer.render(pl.sceneB, camera);
+      if (pl.rimRT) {
+        renderer.setRenderTarget(pl.rimRT);
+        renderer.render(pl.rimScene, camera);
+      }
+      pl.bakedTev = tevHours;
+      pl.dirty = false;
+      bakedStats.bakes += 1;
+      bakedStats.planeBakes[pl.name] = (bakedStats.planeBakes[pl.name] ?? 0) + 1;
+    }
+
+    renderer.setRenderTarget(brightRT);
+    renderer.render(bakedBrightScene ?? brightScene, camera);
+    renderer.setRenderTarget(null);
+    renderer.render(bakedComposeScene, camera);
+    bakedStats.frames += 1;
+  }
+
   /* Export path: one frame at an exact pixel count with parallax neutralised,
      read back off-screen so the live canvas never shows the export framing.
      `onResize` re-seats whatever the host poked, which resize() resets. */
@@ -1780,6 +2142,12 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
     contRT.dispose();
     brightRT.dispose();
     dust?.dispose();
+    disposePass(lineScene);
+    disposePass(contScene);
+    disposePass(composeScene);
+    brightMat?.dispose();
+    /* The baked bright mesh borrows this geometry, so it must be freed exactly once */
+    brightMesh?.geometry.dispose();
     /* Per unique asset, not per instance: two entities sharing one shape share
        one texture, and disposing it twice is a use-after-free on reroll. */
     for (const asset of shapeAssets.values()) asset.texture.dispose();
@@ -1787,6 +2155,18 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
       mesh.geometry.dispose();
       mesh.material.dispose();
     }
+    for (const pl of builtPlanes) {
+      pl.rtA.dispose();
+      pl.rtB.dispose();
+      pl.rimRT?.dispose();
+      disposePass(pl.sceneA);
+      disposePass(pl.sceneB);
+      disposePass(pl.rimScene);
+    }
+    disposePass(bakedComposeScene);
+    /* Geometry only ever belongs to the live mesh, hence material-only here */
+    for (const mesh of bakedGxMeshes) mesh.material.dispose();
+    bakedBrightMat?.dispose();
     renderer.dispose();
   }
 
@@ -1799,6 +2179,14 @@ export async function createSky2D({ canvas, config, forceWebGL = false, maxParal
      layers always list an instance 0, even when the scene named no entity. */
   return {
     render, resize, dispose, backend, capture, setCamera, uniforms: U,
+    /* Null on a live build, so a host can dispatch on it without knowing the mode */
+    renderBaked: baked ? renderBaked : null,
+    bakedStats,
+    /* Hosts floor their idle cadence when the live star tier actually twinkles */
+    twinkleActive: P.stars.twinkleDepth > 0 && P.stars.twinkleRate > 0,
+    planesInfo: builtPlanes.map((pl) => ({
+      name: pl.name, depth: pl.uDepth.value, score: pl.score, types: pl.types,
+    })),
     instances: {
       emission: emisInst.slice(),
       ifn: ifnInst.slice(),

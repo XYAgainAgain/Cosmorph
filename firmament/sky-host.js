@@ -1,7 +1,8 @@
 /* Engine lifecycle: WebGPU→WebGL2 boot, frame cap, evolution clock, rebuilds.
    A rebuild drops the old canvas only after the new one's first frame lands. */
 
-const FRAME_MS = 1000 / 30;
+/* 0 = uncapped: the editor renders at panel refresh; caps belong to wallpaper hosts */
+const FRAME_MS = 0;
 const MAX_THROW = 14; // css px of cursor parallax at full deflection
 /* Matches engine/core/evolution.js: keeps shader time inside float32 */
 const T_WRAP = 4096 * 3600;

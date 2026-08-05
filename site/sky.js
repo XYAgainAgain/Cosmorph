@@ -8,8 +8,21 @@ import { createEvolutionClock } from '/engine/core/evolution.js';
 const FRAME_MS = 1000 / 30;
 const MAX_THROW = 14; // css px of cursor parallax at full deflection
 
+/* Burst cadence: full rAF while anything is moving, idle ticks once it settles.
+   The spec's optional "half refresh" burst rate is deferred to a later chunk. */
+const STILL_MS = 1000;
+const SETTLE_PX = 0.05;
+/* A twinkling star tier is motion, so it floors the idle cadence at 30 FPS and
+   prefers half the measured panel refresh; 2 FPS is only for a static sky. */
+const IDLE_STATIC_MS = 500;
+let idleMs = 1000 / 30;
+let refreshHz = 0;
+
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
+/* Baked is the default; ?live=1 keeps the old live render at the 30 FPS cap */
+const LIVE = params.get('live') === '1';
+let bakedOverride = null; // debug hotkey C flips this past the URL flag
 
 let canvasEl = document.getElementById('sky');
 let sky = null;
@@ -18,7 +31,11 @@ let evolutionRate = 1;
 let rafId = 0;
 let lastFrame = 0;
 let lastNow = 0;
+let lastInput = 0;
+let fadesActive = 0;
 let rerolling = false;
+let drawnFrames = 0; // mode-agnostic counter; the debug HUD derives FPS from it
+const lastBoot = { seed: 0, forceGL: false, useAuthored: false };
 
 const target = { x: 0, y: 0 };
 const cursor = { x: 0, y: 0 };
@@ -33,18 +50,51 @@ function freshCanvas() {
 
 async function tryEngine(config, forceGL) {
   const { createSky2D } = await import('/engine/render/sky2d.js');
+  const baked = bakedOverride ?? !LIVE;
   if (forceGL) {
-    return createSky2D({ canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW });
+    return createSky2D({
+      canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW, baked,
+    });
   }
   try {
-    return await createSky2D({ canvas: freshCanvas(), config, maxParallaxPx: MAX_THROW });
+    return await createSky2D({
+      canvas: freshCanvas(), config, maxParallaxPx: MAX_THROW, baked,
+    });
   } catch (err) {
     console.warn('Cosmorph: WebGPU path failed, retrying on WebGL2.', err);
-    return createSky2D({ canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW });
+    return createSky2D({
+      canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW, baked,
+    });
   }
 }
 
+/* One dispatch for both modes, so the reduced-motion single frame and the
+   resize repaint go through whichever path the build actually made. */
+function draw(px, py) {
+  (sky.renderBaked ?? sky.render)(tev(), px, py);
+}
+
 const tev = () => (clock.now() / 3600) * evolutionRate;
+
+function computeIdle() {
+  const twinkling = sky?.twinkleActive ?? true;
+  idleMs = twinkling ? 1000 / Math.max(30, (refreshHz || 60) / 2) : IDLE_STATIC_MS;
+}
+
+/* Median of 40 rAF deltas; the panel's true refresh, robust to one-off stalls */
+function measureRefresh() {
+  const deltas = [];
+  let prev = 0;
+  const tick = (t) => {
+    if (prev > 0) deltas.push(t - prev);
+    prev = t;
+    if (deltas.length < 40) { requestAnimationFrame(tick); return; }
+    deltas.sort((a, b) => a - b);
+    refreshHz = Math.min(1000 / deltas[20], 480);
+    computeIdle();
+  };
+  requestAnimationFrame(tick);
+}
 
 function resizeNow() {
   if (!sky) return false;
@@ -54,11 +104,23 @@ function resizeNow() {
   return true;
 }
 
+/* Anything still in motion — recent pointer input, a fade, or cursor damping
+   that has not settled — holds the composite at panel refresh */
+function bursting(now) {
+  return (now - lastInput) < STILL_MS
+    || fadesActive > 0
+    || Math.hypot(target.x - cursor.x, target.y - cursor.y) > SETTLE_PX;
+}
+
 function frame(now) {
   rafId = requestAnimationFrame(frame);
-  if (now - lastFrame < FRAME_MS) return;
+  /* Cap follows the engine's actual mode, so the debug C-toggle can override
+     the URL flag either way; the live path keeps its own 30 FPS cap. */
+  const cap = sky.renderBaked ? (bursting(now) ? 0 : idleMs) : FRAME_MS;
+  if (cap > 0 && now - lastFrame < cap) return;
   const dt = Math.min((now - lastNow) / 1000, 0.25);
-  lastFrame = now;
+  /* Carry the remainder so a capped cadence averages its true rate against vsync */
+  lastFrame = cap > 0 ? now - ((now - lastFrame) % cap) : now;
   lastNow = now;
 
   /* Exponential damping toward the pointer, framerate-independent */
@@ -66,7 +128,8 @@ function frame(now) {
   cursor.x += (target.x - cursor.x) * k;
   cursor.y += (target.y - cursor.y) * k;
 
-  sky.render(tev(), cursor.x, cursor.y);
+  draw(cursor.x, cursor.y);
+  drawnFrames += 1;
 }
 
 function start() {
@@ -85,9 +148,9 @@ function renderOnce() {
   if (!resizeNow()) return;
   if (reduceMotion.matches) {
     stop();
-    sky.render(tev(), 0, 0);
+    draw(0, 0);
   } else {
-    sky.render(tev(), cursor.x, cursor.y);
+    draw(cursor.x, cursor.y);
     start();
   }
 }
@@ -107,9 +170,16 @@ async function veil(dark) {
     await new Promise((r) => setTimeout(r, 150));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   }
-  veilEl.classList.toggle('is-dark', dark);
-  if (reduceMotion.matches) return;
-  await new Promise((resolve) => setTimeout(resolve, 1060));
+  /* Counted rather than flagged so overlapping fades cannot un-burst each other,
+     and raised only here so a slow load never holds the burst open waiting */
+  fadesActive += 1;
+  try {
+    veilEl.classList.toggle('is-dark', dark);
+    if (reduceMotion.matches) return;
+    await new Promise((resolve) => setTimeout(resolve, 1060));
+  } finally {
+    fadesActive -= 1;
+  }
 }
 
 /* The default homepage is Sam's authored .cosmos, run through the same
@@ -162,11 +232,34 @@ async function sceneFor(seed, useAuthored) {
 }
 
 async function startEngine(seed, forceGL, useAuthored = false) {
+  Object.assign(lastBoot, { seed, forceGL, useAuthored });
   const { config, savedT } = await sceneFor(seed, useAuthored);
   sky = await tryEngine(config, forceGL);
+  /* ?debug=1 exposes the instance for bake-stats inspection; never set by the site */
+  if (params.has('debug')) window.__sky = sky;
   clock = createEvolutionClock(`cosmorph:T:${config.seed ?? seed}`, savedT);
   evolutionRate = config.evolution.rate;
+  computeIdle();
   console.info(`Cosmorph: seed ${config.seed ?? seed} on ${sky.backend}`);
+}
+
+/* Debug-only baked↔live flip: same seed, same T, fresh engine on the other path */
+async function setMode(nextBaked) {
+  if (rerolling || !sky) return;
+  rerolling = true;
+  try {
+    stop();
+    clock.persist();
+    sky.dispose();
+    sky = null;
+    bakedOverride = nextBaked;
+    await startEngine(lastBoot.seed, lastBoot.forceGL, lastBoot.useAuthored);
+    renderOnce();
+  } catch (err) {
+    console.warn('Cosmorph: mode toggle failed.', err);
+  } finally {
+    rerolling = false;
+  }
 }
 
 /* Fade to black, rebuild the whole sky on a fresh seed, fade back in.
@@ -224,7 +317,27 @@ async function boot() {
     return;
   }
 
+  measureRefresh();
+
+  if (params.has('debug')) {
+    import('/site/debug.js').then((m) => m.initDebug({
+      getState: () => ({
+        backend: sky?.backend,
+        mode: sky?.renderBaked ? 'baked' : 'live',
+        bursting: rafId ? bursting(performance.now()) : false,
+        idleMs,
+        refreshHz,
+        twinkle: sky?.twinkleActive ?? false,
+        planes: sky?.planesInfo ?? [],
+        stats: sky?.bakedStats ?? null,
+        drawnFrames,
+      }),
+      toggleMode: () => setMode(!sky?.renderBaked),
+    })).catch((err) => console.warn('Cosmorph: debug tools failed to load.', err));
+  }
+
   window.addEventListener('pointermove', (e) => {
+    lastInput = performance.now();
     target.x = ((e.clientX / window.innerWidth) * 2 - 1) * MAX_THROW;
     target.y = ((e.clientY / window.innerHeight) * 2 - 1) * MAX_THROW;
   }, { passive: true });

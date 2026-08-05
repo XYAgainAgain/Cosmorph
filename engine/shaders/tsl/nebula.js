@@ -34,9 +34,11 @@ export function buildEmissionNodes(skyU, U) {
        connected lacework; 4 sets the shell half-width at a quarter of range. */
     const wall = clamp(float(1).sub(n0.sub(0.5).abs().mul(4.0)), 0.0, 1.0)
       .max(1e-4).pow(U.uLimbK);
-    /* Divided by the field's own mean wall value so the dial buys internal
-       dynamic range instead of overall brightness: walls rise, fill drops. */
-    const limb = wall.mul(U.uLimb).add(1.0).div(U.uLimb.mul(0.45).add(1.0));
+    /* Divided by E[wall], which falls as limbK rises: rational fit to a 4M-sample
+       Monte Carlo, ≤0.34% over the 0.2–5 dial. Limb buys range, never brightness. */
+    const eWall = U.uLimbK.mul(8.7483).add(1.0)
+      .div(U.uLimbK.mul(U.uLimbK).mul(6.0763).add(U.uLimbK.mul(10.239)).add(1.0));
+    const limb = wall.mul(U.uLimb).add(1.0).div(U.uLimb.mul(eWall).add(1.0));
 
     /* The front wanders on the mottling field (a circle reads as drafted), in
        front widths; wob × width caps at 0.15 so slider extremes cannot shred it. */
@@ -57,7 +59,7 @@ export function buildEmissionNodes(skyU, U) {
       skyU.x.mul(ss).add(skyU.y.mul(sc)),
     );
     /* Meander breaks the comb's lattice-regular spacing: without it the bands
-       repeat like ruled lines and cross into a geometric weave. ±3/4 period. */
+       repeat like ruled lines and cross into a geometric weave. ±0.94 period. */
     const mw = fbm3o2r(vec3(skyU.mul(U.uNebFreq).mul(0.35), zEvo.mul(0.2))
       .add(U.uNebOff.mul(9.0))).sub(FBM2_MID).mul(2.5);
     const sp = vec3(sRot.x.mul(U.uStriaFreq).add(mw), sRot.y.mul(U.uStriaFreqY), zEvo.mul(0.3))

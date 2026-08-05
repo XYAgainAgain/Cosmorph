@@ -17,7 +17,7 @@ const QUAD_K = 4.0;
    of ellipse-crowding pitch against the glow's log spiral. */
 const LINK_PITCH = 1.0;
 
-export function buildGalaxyStarNodes(U, { linked = true } = {}) {
+export function buildGalaxyStarNodes(U, { linked = true, preShift = true } = {}) {
   const iA = attribute('iA', 'vec4');
   const iB = attribute('iB', 'vec4');
 
@@ -103,9 +103,13 @@ export function buildGalaxyStarNodes(U, { linked = true } = {}) {
 
     /* Invert the continuum pass's uv-to-sky chain, parallax pre-shift included;
        the margin divide is what the 1:1-sampled bright tier does not need. */
-    const shift = U.uParallax.mul(vec2(1.0, -1.0))
-      .mul(U.uDepthGx.sub(U.uDepthCont)).div(U.uResolution);
-    const uvE = vec2(sky.x.sub(U.uCamera.x).div(U.uAspect), sky.y.sub(U.uCamera.y)).add(shift);
+    const skyUv = vec2(sky.x.sub(U.uCamera.x).div(U.uAspect), sky.y.sub(U.uCamera.y));
+    /* A bake must be valid at any parallax, so the baked sprite drops the
+       pre-shift; freezing one sample into the RT shears the field on rebake. */
+    const uvE = preShift
+      ? skyUv.add(U.uParallax.mul(vec2(1.0, -1.0))
+        .mul(U.uDepthGx.sub(U.uDepthCont)).div(U.uResolution))
+      : skyUv;
     const clip = uvE.sub(0.5).mul(2.0).div(U.uMarginScale);
     /* A faded or fully extinguished star collapses its quad to a point rather
        than rasterizing transparent fill across the frame. */

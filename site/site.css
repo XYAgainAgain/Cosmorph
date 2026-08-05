@@ -318,3 +318,29 @@
     76% { translate: 0 0.3rem; }
   }
 }
+
+/* Debug HUD: injected by site/debug.js under ?debug=1 only, never on a clean URL */
+.debug-hud {
+  position: fixed;
+  inset-block-start: 0.75rem;
+  inset-inline-start: 0.75rem;
+  z-index: 99;
+  padding: 0.6rem 0.85rem;
+  background: oklch(0 0 0 / 0.72);
+  border: 1px solid var(--edge);
+  border-radius: 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  pointer-events: none;
+
+  span { display: block; }
+  .is-mode { color: var(--oiii); font-weight: 600; }
+  .is-flash { animation: debug-flash 0.9s ease-out; }
+}
+
+@keyframes debug-flash {
+  from { color: var(--oiii); background: oklch(0.82 0.13 178 / 0.2); }
+}

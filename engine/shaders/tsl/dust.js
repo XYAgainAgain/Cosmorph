@@ -2,7 +2,7 @@
    Wisps output optical depth, never dark paint — compose turns it into
    wavelength-dependent transmittance so thin edges redden before going black. */
 
-import { Fn, float, vec2, vec3, vec4, cos, sin, exp, mix, smoothstep, abs } from 'three/tsl';
+import { Fn, float, vec2, vec3, vec4, cos, sin, mix, smoothstep, abs } from 'three/tsl';
 import { fbm3o2, fbm3o4, valueNoise3, FBM2_NORM, FBM2_MID, FBM4_NORM } from './noise.js';
 import { rot2 } from './sdf.js';
 import { faintStarLayer } from './stars.js';
@@ -96,9 +96,4 @@ export function wispTau(skyW, U) {
      left to redden, so the warm band lives on this faint skirt outside the core. */
   const skirt = smoothstep(U.uWispTh.sub(U.uWispFringe), U.uWispTh.add(U.uWispSoft), carved);
   return U.uWispTau.mul(mix(skirt.mul(U.uWispSkirt), float(1.0), core));
-}
-
-/* Wisp-only transmittance for the opt-in break with additive-last */
-export function wispTransmittance(skyW, U) {
-  return exp(wispTau(skyW, U).negate().mul(WISP_SIGMA));
 }

@@ -28,17 +28,20 @@ const FEATURES = [
 ];
 
 /* Numeric params drift ±delta of their full spec range around the default.
-   Structural, bool, enum, and link params never jitter here: gates and
+   Structural, gated, bool, enum, and link params never jitter here: gates and
    morphology flips are curated in character() instead, where the odds are chosen. */
 function jitterParams(entity, rng, delta = 0.12) {
   const spec = TYPE_BY_ID[entity.type];
   for (const p of spec.params) {
-    if (p.derived || p.structural || p.kind === 'bool' || p.kind === 'enum' || p.kind === 'link') continue;
+    if (p.derived || p.structural || p.gate || p.kind === 'bool' || p.kind === 'enum' || p.kind === 'link') continue;
     const v = getPath(entity.params, p.key);
     if (typeof v !== 'number') continue;
     /* Colors drift half as far: a hue swing reads as a palette break */
     const d = p.key.includes('.') ? delta * 0.5 : delta;
-    const j = v + (rng.next() * 2 - 1) * (p.max - p.min) * d;
+    let j = v + (rng.next() * 2 - 1) * (p.max - p.min) * d;
+    /* Whole-number dials (arm count, member cells) must stay on their grid; a
+       fractional arm count blends two harmonics and reads as a smeared spiral. */
+    if (p.step >= 1) j = Math.round(j / p.step) * p.step;
     setPath(entity.params, p.key, Math.min(Math.max(j, p.min), p.max));
   }
 }

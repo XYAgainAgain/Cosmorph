@@ -206,7 +206,7 @@ export const GALAXY_DEFAULTS = {
   lanePhase: 0.55,
   laneSharp: 2.4,
   laneDepth: 0.45,
-  laneFil: 0.45,
+  laneFil: 0.0,
   laneFilFreq: 3.5,
   laneFilAlong: 1.8,
   laneFilSharp: 4.0,

@@ -151,6 +151,11 @@ const p = (key, label, min, max, step, def, group, tier, extra = {}) => ({
   key, label, min, max, step, def, group, tier, ...extra,
 });
 
+/* `gate` marks a live uniform that still sits on a sky2d build gate: the studio
+   pokes it, and rebuilds only when the predicate's boolean actually flips. */
+const laneTexGate = (P) => P.laneFil > 0 || P.laneWob > 0;
+const spurGate = (P) => P.spurAmt > 0;
+
 /* Aspect-scaled framed position: sky x spans [0, aspect] */
 const aspectX = (u) => ({ set: (U, v, ctx) => { U[u].value.x = v * ctx.aspect; } });
 const plainY = (u) => ({ set: (U, v) => { U[u].value.y = v; } });
@@ -1197,7 +1202,7 @@ export const ENTITY_TYPES = [
       p('armAmt', 'Arm contrast', 0, 1, 0.01, 0.85, 'Spiral Arms', 1, { u: 'uGxArmAmt' }),
       p('wind', 'Winding', 0.2, 12, 0.01, 3.0, 'Spiral Arms', 1, { u: 'uGxWind' }),
       p('armSharp', 'Arm sharpness', 0, 8, 0.01, 1.6, 'Spiral Arms', 2, { u: 'uGxArmSharp' }),
-      p('armCount', 'Arm count', 1, 6, 0.05, 2, 'Spiral Arms', 2, { u: 'uGxArmCount' }),
+      p('armCount', 'Arm count', 1, 6, 1, 2, 'Spiral Arms', 2, { u: 'uGxArmCount' }),
       p('armAsym', 'Lopsidedness', 0, 1, 0.01, 0, 'Spiral Arms', 2, { u: 'uGxArmAsym' }),
       p('diskFall', 'Disk falloff', 0.2, 10, 0.01, 3.2, 'Spiral Arms', 2, { u: 'uGxDiskFall' }),
       p('motAmt', 'Flocculence', 0, 1, 0.01, 0.45, 'Spiral Arms', 2, { u: 'uGxMotAmt' }),
@@ -1248,12 +1253,12 @@ export const ENTITY_TYPES = [
       p('laneDepth', 'Lane depth', 0, 1, 0.01, 0.45, 'Dust Lane', 2, { u: 'uGxLaneDepth' }),
       p('lanePhase', 'Lane lag', -3.1416, 3.1416, 0.01, 0.55, 'Dust Lane', 2, { u: 'uGxLanePhase', unit: 'rad' }),
       p('laneSharp', 'Lane sharpness', 0, 8, 0.01, 2.4, 'Dust Lane', 3, { u: 'uGxLaneSharp' }),
-      p('laneFil', 'Filament depth', 0, 1, 0.01, 0.45, 'Dust Lane', 2, { u: 'uGxLaneFil', structural: true }),
+      p('laneFil', 'Filament depth', 0, 1, 0.01, 0, 'Dust Lane', 2, { u: 'uGxLaneFil', gate: laneTexGate }),
       p('laneFilFreq', 'Filament frequency', 0, 24, 0.1, 3.5, 'Dust Lane', 3, { u: 'uGxLaneFilFreq' }),
       p('laneFilAlong', 'Filament winding', 0, 12, 0.1, 1.8, 'Dust Lane', 3, { u: 'uGxLaneFilAlong' }),
       p('laneFilSharp', 'Filament sharpness', 0, 12, 0.1, 4.0, 'Dust Lane', 3, { u: 'uGxLaneFilSharp' }),
-      p('laneWob', 'Lane wobble', 0, 2, 0.01, 0, 'Dust Lane', 2, { u: 'uGxLaneWob', unit: 'rad', structural: true }),
-      p('spurAmt', 'Spur strength', 0, 1, 0.01, 0, 'Dust Lane', 2, { structural: true }),
+      p('laneWob', 'Lane wobble', 0, 2, 0.01, 0, 'Dust Lane', 2, { u: 'uGxLaneWob', unit: 'rad', gate: laneTexGate }),
+      p('spurAmt', 'Spur strength', 0, 1, 0.01, 0, 'Dust Lane', 2, { u: 'uGxSpurAmt', gate: spurGate }),
       p('spurPhase', 'Spur lead', -3.1416, 3.1416, 0.01, -0.7, 'Dust Lane', 3, { u: 'uGxSpurPhase', unit: 'rad' }),
       p('spurSharp', 'Spur sharpness', 0, 8, 0.01, 1.1, 'Dust Lane', 3, { u: 'uGxSpurSharp' }),
       p('spurFreq', 'Spur frequency', 0, 30, 0.1, 9.0, 'Dust Lane', 3, { u: 'uGxSpurFreq' }),
