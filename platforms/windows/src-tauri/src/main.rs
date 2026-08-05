@@ -18,8 +18,9 @@ fn main() {
             {
                 let hwnd = windows::Win32::Foundation::HWND(window.hwnd()?.0);
                 if let Err(err) = desktop::attach_to_desktop(hwnd) {
+                    // Never show unparented: that floats a bare window over the desktop
                     eprintln!("Cosmorph: could not reach the wallpaper layer: {err}");
-                    window.show()?;
+                    return Err(err.into());
                 }
             }
 

@@ -2051,8 +2051,9 @@ export async function createSky2D({
 
   function renderTo(target, tevHours, parallaxCssX, parallaxCssY) {
     U.uTev.value = tevHours;
-    /* Wrapped CPU-side so the shader's sin argument stays small forever */
-    U.uTwinklePhase.value = (tevHours * P.stars.twinkleRate) % 1;
+    /* Real session time, not tev: twinkle is atmospheric, and a high evolution
+       rate would strobe it. Wrapped CPU-side so the sin argument stays small. */
+    U.uTwinklePhase.value = ((performance.now() / 3.6e6) * P.stars.twinkleRate) % 1;
     U.uParallax.value.set(parallaxCssX * dpr, parallaxCssY * dpr);
 
     renderer.setRenderTarget(lineRT);
@@ -2078,7 +2079,7 @@ export async function createSky2D({
      the composite are the only per-frame work once the planes hold still. */
   function renderBaked(tevHours, parallaxCssX, parallaxCssY) {
     U.uTev.value = tevHours;
-    U.uTwinklePhase.value = (tevHours * P.stars.twinkleRate) % 1;
+    U.uTwinklePhase.value = ((performance.now() / 3.6e6) * P.stars.twinkleRate) % 1;
     U.uParallax.value.set(parallaxCssX * dpr, parallaxCssY * dpr);
 
     for (const pl of builtPlanes) {
@@ -2117,6 +2118,7 @@ export async function createSky2D({
      read back off-screen so the live canvas never shows the export framing.
      `onResize` re-seats whatever the host poked, which resize() resets. */
   async function capture({ width, height, tev = 0, onResize = null }) {
+    if (baked) throw new Error('capture() is unavailable for baked sky instances');
     const prev = lastSize;
     const rt = new THREE.RenderTarget(width, height, {
       type: THREE.UnsignedByteType,

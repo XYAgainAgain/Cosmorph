@@ -43,8 +43,12 @@ export const CAPTURE_SIZES = [
   { id: '1440x2560', label: '1440 × 2560' },
 ];
 
-/* Scene-level grading. These are compose.js uniforms, not entity params. */
+/* Scene-level controls. Grading entries are compose.js uniforms. */
 export const SCENE_PARAMS = [
+  {
+    key: 'evolutionRate', label: 'Evolution rate', min: 0, max: 100, step: 1, def: 1,
+    group: 'Evolution', tier: 1, scene: true, unit: 'units/hour',
+  },
   {
     key: 'exposure', label: 'Exposure', min: 0.05, max: 3, step: 0.01, def: 0.85,
     group: 'Grading', tier: 1, u: 'uExposure',

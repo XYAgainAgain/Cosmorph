@@ -157,7 +157,7 @@ export function createSkyHost({ mount, forceGL = false }) {
      every caller's await settles after the build that superseded theirs. */
   function apply(config) {
     queued = config;
-    chain = chain.then(async () => {
+    chain = chain.catch(() => {}).then(async () => {
       const cfg = queued;
       if (!cfg || disposed) return;
       queued = null;
@@ -248,6 +248,10 @@ export function createSkyHost({ mount, forceGL = false }) {
     setTime(seconds) {
       clock.baseT = Math.max(0, seconds) % T_WRAP;
       clock.anchor = performance.now();
+      requestRender();
+    },
+    setEvolutionRate(rate) {
+      evolutionRate = rate;
       requestRender();
     },
     setSpeed(mult) {

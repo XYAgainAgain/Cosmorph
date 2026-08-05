@@ -51,11 +51,20 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     for (const pl of planes) {
       const a = texture(pl.texA, sampleAt(pl.uDepth, at)).toVar();
       const lineRaw = warp ? smear3(pl.texA, pl.uDepth, a.rgb) : a.rgb;
-      const cont = texture(pl.texB, sampleAt(pl.uDepth, at)).rgb;
+      const contCenter = texture(pl.texB, sampleAt(pl.uDepth, at)).rgb;
+      let contRaw = warp ? smear3(pl.texB, pl.uDepth, contCenter) : contCenter;
+      if (warp) {
+        const disp = contRaw.toVar();
+        const rOut = texture(pl.texB, sampleAt(pl.uDepth, warp.at.add(warp.disp).clamp(0.0, 1.0))).r;
+        const bIn = texture(pl.texB, sampleAt(pl.uDepth, warp.at.sub(warp.disp).clamp(0.0, 1.0))).b;
+        disp.r.assign(mix(disp.r, rOut, warp.chroma));
+        disp.b.assign(mix(disp.b, bIn, warp.chroma));
+        contRaw = disp;
+      }
       const trans = exp(a.a.negate().mul(WISP_SIGMA)).toVar();
       const emitLine = palette(lineRaw);
       outLine = outLine.add(warp ? emitLine.mul(warp.gain) : emitLine).mul(trans);
-      outCont = outCont.add(warp ? cont.mul(warp.gain) : cont).mul(trans);
+      outCont = outCont.add(warp ? contRaw.mul(warp.gain) : contRaw).mul(trans);
       tTot = tTot.mul(trans);
     }
 
@@ -77,8 +86,7 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     }
     if (rimRaw) lit = lit.add(scnr(palette(rimRaw)));
 
-    /* Drawn ring emission, extinguished by the whole walk's transmittance.
-       Continuum chromatic dispersion is live-path only in this chunk. */
+    /* Drawn ring emission, extinguished by the whole walk's transmittance. */
     if (warp) lit = lit.add(scnr(palette(warp.ring)).mul(tTot));
 
     const bright = texture(brightTex, screen).rgb;

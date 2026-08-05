@@ -59,8 +59,12 @@ export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
     const density = U.uStarDensity.mul(grad).mul(clump).min(1.0);
 
     const twHalf = U.uTwinkleDepth.mul(0.5);
-    const stars = faintStarLayer(skyU, pxPerUnit, 42.0, density, 1.7, U.uStarOffA, U.uTwinklePhase, twHalf)
-      .add(faintStarLayer(skyU, pxPerUnit, 14.0, density.mul(0.55), 4.0, U.uStarOffB, U.uTwinklePhase, twHalf));
+    const cellsA = U.uStarDensity.mul(0.0).add(42.0).toVar();
+    const scaleA = U.uStarDensity.mul(0.0).add(1.7).toVar();
+    const cellsB = U.uStarDensity.mul(0.0).add(14.0).toVar();
+    const scaleB = U.uStarDensity.mul(0.0).add(4.0).toVar();
+    const stars = faintStarLayer(skyU, pxPerUnit, cellsA, density, scaleA, U.uStarOffA, U.uTwinklePhase, twHalf)
+      .add(faintStarLayer(skyU, pxPerUnit, cellsB, density.mul(0.55), scaleB, U.uStarOffB, U.uTwinklePhase, twHalf));
 
     return vec4(ifnCol.add(stars), 1.0);
   })();

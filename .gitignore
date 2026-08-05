@@ -3,6 +3,7 @@ node_modules/
 
 # Dev Stuff (no peeking)
 .dev/
+assets/shapes/mm-*
 
 # Build Stuff (actual output via GitHub Releases)
 dist/

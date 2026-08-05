@@ -2,6 +2,7 @@
 //! There is no supported API for this: 0x052C is an undocumented message that
 //! makes Explorer split the icon layer off into its own WorkerW window.
 
+use std::time::{Duration, Instant};
 use windows::core::{w, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -11,17 +12,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const WM_SPAWN_WORKERW: u32 = 0x052C;
+const WORKERW_RETRY_DELAY: Duration = Duration::from_millis(50);
+const WORKERW_RETRY_LIMIT: Duration = Duration::from_secs(2);
 
 /// Ask Explorer for the wallpaper layer, then move `hwnd` into it.
-/// Falls back to Progman itself, which is what some Windows 10 shells hand back
-/// when they keep the icons and the wallpaper in one window.
 pub fn attach_to_desktop(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         let progman = FindWindowW(w!("Progman"), None)?;
 
-        // Explorer only creates the WorkerW layer once asked; the reply is
-        // ignored, the side effect is the point.
-        SendMessageTimeoutW(
+        let spawn_result = SendMessageTimeoutW(
             progman,
             WM_SPAWN_WORKERW,
             WPARAM(0),
@@ -30,15 +29,20 @@ pub fn attach_to_desktop(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
             1000,
             None,
         );
+        if spawn_result.0 == 0 {
+            return Err("Explorer did not accept the WorkerW spawn request".into());
+        }
 
-        // Landing in Progman instead can put the sky in front of the icons, so
-        // announce it; on a first run that is the thing to check.
-        let target = match find_wallpaper_layer() {
-            Some(worker) => worker,
-            None => {
-                eprintln!("Cosmorph: no WorkerW layer found, falling back to Progman.");
-                progman
+        let deadline = Instant::now() + WORKERW_RETRY_LIMIT;
+        let target = loop {
+            if let Some(worker) = find_wallpaper_layer() {
+                break worker;
             }
+
+            if Instant::now() >= deadline {
+                return Err("Explorer did not create a WorkerW wallpaper layer".into());
+            }
+            std::thread::sleep(WORKERW_RETRY_DELAY);
         };
         SetParent(hwnd, Some(target))?;
 

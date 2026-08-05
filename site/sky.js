@@ -207,15 +207,15 @@ async function sceneFor(seed, useAuthored) {
       const aspect = window.innerWidth / Math.max(window.innerHeight, 1);
       const scene = demoScene(name, seed, aspect);
       if (!scene) console.warn(`Cosmorph: no demo scene named "${name}", using the hero.`);
-      return { config: scene ?? heroScene(seed), savedT: 0 };
+      return { config: scene ?? heroScene(seed), savedT: 0, sceneIdentity: `demo:${name}` };
     } catch (err) {
       console.warn('Cosmorph: demo scenes failed to load, using the hero.', err);
-      return { config: heroScene(seed), savedT: 0 };
+      return { config: heroScene(seed), savedT: 0, sceneIdentity: `demo:${name}` };
     }
   }
   if (useAuthored) {
     try {
-      return await authoredScene();
+      return { ...await authoredScene(), sceneIdentity: 'authored-hero' };
     } catch (err) {
       console.warn('Cosmorph: authored homepage failed to load, using the procedural hero.', err);
     }
@@ -224,20 +224,20 @@ async function sceneFor(seed, useAuthored) {
      seed-deterministic so the URL reproduces the exact sky. */
   try {
     const { rerollScene } = await import('/site/reroll-scene.js');
-    return { config: rerollScene(seed), savedT: 0 };
+    return { config: rerollScene(seed), savedT: 0, sceneIdentity: 'procedural-hero' };
   } catch (err) {
     console.warn('Cosmorph: reroll generator failed, using the fixed hero.', err);
-    return { config: heroScene(seed), savedT: 0 };
+    return { config: heroScene(seed), savedT: 0, sceneIdentity: 'procedural-hero' };
   }
 }
 
 async function startEngine(seed, forceGL, useAuthored = false) {
   Object.assign(lastBoot, { seed, forceGL, useAuthored });
-  const { config, savedT } = await sceneFor(seed, useAuthored);
+  const { config, savedT, sceneIdentity } = await sceneFor(seed, useAuthored);
   sky = await tryEngine(config, forceGL);
   /* ?debug=1 exposes the instance for bake-stats inspection; never set by the site */
   if (params.has('debug')) window.__sky = sky;
-  clock = createEvolutionClock(`cosmorph:T:${config.seed ?? seed}`, savedT);
+  clock = createEvolutionClock(`cosmorph:T:${sceneIdentity}:${config.seed ?? seed}`, savedT);
   evolutionRate = config.evolution.rate;
   computeIdle();
   console.info(`Cosmorph: seed ${config.seed ?? seed} on ${sky.backend}`);

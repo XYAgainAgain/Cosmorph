@@ -1,6 +1,6 @@
 /* Static fallback sky for contexts without WebGL2/WebGPU. Ports the engine's
-   integer-hash field math to JS, so the same seed draws the same sky, frozen
-   at T = 0. Deliberately self-contained: it must run when engine files don't. */
+   field math to JS, approximating its seeded sky rather than matching exactly.
+   Deliberately self-contained: it must run when engine files don't. */
 
 const canvas = document.getElementById('sky');
 const ctx = canvas?.getContext('2d', { alpha: false });
@@ -178,7 +178,7 @@ function drawFaintTier(h, aspect, cells, densityMul, brightScale, off) {
       const bandD = Math.abs(sv - su * -0.28 - 0.32);
       const grad = 1 + (0.45 - 1) * sstep(0, 0.55, bandD);
       const clump = fbm3(su * 2.6 + offClump[0], sv * 2.6 + offClump[1], offClump[2], 2) * 0.9 + 0.55;
-      if (h1[2] >= Math.min(0.75 * grad * clump * densityMul, 1)) continue;
+      if (h1[2] >= Math.min(grad * clump * densityMul, 1)) continue;
 
       const rel = Math.pow(h2[0], 3);
       const L = Math.pow(h2[0], 6) * brightScale * 0.93;
@@ -203,14 +203,23 @@ function drawFaintTier(h, aspect, cells, densityMul, brightScale, off) {
   }
 }
 
-/* Bright tier mirrors engine/entities/stars.js draw for draw */
+/* Bright tier tracks the engine's population, with simplified 2D rendering */
 const SPECTRAL = [
-  { w: 0.08, lo: 9500, hi: 15000 },
-  { w: 0.18, lo: 7500, hi: 9800 },
-  { w: 0.38, lo: 5300, hi: 7300 },
-  { w: 0.24, lo: 4000, hi: 5200 },
-  { w: 0.12, lo: 3100, hi: 3900 },
+  { w: 0.20, lo: 10000, hi: 16000 },
+  { w: 0.28, lo: 7600, hi: 9900 },
+  { w: 0.33, lo: 5600, hi: 7500 },
+  { w: 0.14, lo: 4300, hi: 5500 },
+  { w: 0.05, lo: 3300, hi: 4200 },
 ];
+
+const ACCENT_FRACTION = 0.055;
+
+function starJitter(seed, i, salt) {
+  let h = (seed ^ Math.imul(i + 1, 0x9e3779b1) ^ Math.imul(salt, 0x85ebca6b)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
 
 function blackbodyRGB(kelvin) {
   const t = Math.min(Math.max(kelvin, 1000), 40000) / 100;
@@ -231,17 +240,23 @@ function blackbodyRGB(kelvin) {
 function drawBrightTier(h, aspect) {
   const rng = createRng(starSeed);
   const overscan = 0.06;
-  for (let i = 0; i < 84; i++) {
+  /* 169 and unit density mirror hero.cosmos, the sky this canvas stands in for */
+  for (let i = 0; i < 169; i++) {
     const u = rng();
-    const L = 0.06 + 0.94 * Math.pow(u, 3.2);
+    let L = 0.06 + 0.94 * Math.pow(u, 3.2);
     let roll = rng(), temp = 5800;
+    const lerp = rng();
     for (const s of SPECTRAL) {
-      if (roll < s.w) { temp = s.lo + rng() * (s.hi - s.lo); break; }
+      if (roll < s.w) { temp = s.lo + lerp * (s.hi - s.lo); break; }
       roll -= s.w;
+    }
+    if (starJitter(starSeed, i, 3) < ACCENT_FRACTION) {
+      temp = 3300 + starJitter(starSeed, i, 5) * 900;
+      L = Math.max(L, 0.52 + 0.42 * starJitter(starSeed, i, 4));
     }
     const [cr, cg, cb] = blackbodyRGB(temp);
     const alphaPx = 1 + 1.8 * Math.pow(L, 0.7);
-    const spikeLen = 26 + 105 * Math.pow(L, 0.9);
+    const spikeLen = (26 + 105 * Math.pow(L, 0.9)) * (0.72 + 0.56 * starJitter(starSeed, i, 1));
     const sx = (-overscan + rng() * (aspect + overscan * 2)) * h;
     const sy = h - (-overscan + rng() * (1 + overscan * 2)) * h;
     rng(); rng(); rng();

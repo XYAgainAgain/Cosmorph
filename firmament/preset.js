@@ -31,7 +31,9 @@ export function entitySeed(rootSeed, type, k = 0) {
 
 function gradingDefaults() {
   const out = {};
-  for (const param of SCENE_PARAMS) out[param.key] = param.def;
+  for (const param of SCENE_PARAMS) {
+    if (!param.scene) out[param.key] = param.def;
+  }
   return out;
 }
 
@@ -219,6 +221,7 @@ export function deserialize(raw) {
   };
 
   for (const param of SCENE_PARAMS) {
+    if (param.scene) continue;
     scene.grading[param.key] = clamp(num(raw.grading?.[param.key], param.def), param.min, param.max);
   }
 

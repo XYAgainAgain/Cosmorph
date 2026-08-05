@@ -193,7 +193,9 @@ function applyAll(sky = { uniforms: host.uniforms, instances: host.instances }) 
   const U = sky?.uniforms;
   if (!U) return;
   applyPalette(U);
-  for (const param of SCENE_PARAMS) applyParam(U, param, scene.grading[param.key], {});
+  for (const param of SCENE_PARAMS) {
+    if (!param.scene) applyParam(U, param, scene.grading[param.key], {});
+  }
   for (const { entity, k } of instanceRows()) {
     const spec = TYPE_BY_ID[entity.type];
     const bag = bagFor(sky, entity.type, k);
@@ -485,7 +487,7 @@ function renderSceneParams() {
     const shown = gated ? list.filter((p) => isGateRow(keys, p.key)) : list;
     if (!shown.length) return '';
     const open = isGroupOpen('scene', group, shown.some((p) => p.tier === 1));
-    const rows = shown.map((p) => sliderRow(p, scene.grading[p.key], 'scene')).join('');
+    const rows = shown.map((p) => sliderRow(p, p.scene ? scene[p.key] : scene.grading[p.key], 'scene')).join('');
     return `<details class="group" data-group="${group}" ${gated ? 'data-gated' : ''} ${open ? 'open' : ''}>
       <summary class="group__summary">
         <span class="group__name">${group}</span>
@@ -799,10 +801,12 @@ function onParamEvent(event) {
     const param = SCENE_PARAMS.find((p) => p.key === key);
     if (!param) return;
     const value = readControl(node, param);
-    const moved = scene.grading[key] !== value;
-    scene.grading[key] = value;
+    const values = param.scene ? scene : scene.grading;
+    const moved = values[key] !== value;
+    values[key] = value;
     updateReadout(node, param, value);
-    if (host.uniforms) applyParam(host.uniforms, param, value, {});
+    if (param.scene) host.setEvolutionRate(value);
+    else if (host.uniforms) applyParam(host.uniforms, param, value, {});
     /* A build gate (the lensing warp, its sub-halo count) changes the compose
        graph, so it cannot be poked; it has to go back through a rebuild. */
     if (param.structural) scheduleRebuild();
@@ -1062,11 +1066,11 @@ function syncSeedUrl() {
 }
 
 async function adoptPreset(raw, source) {
-  const { scene: next, savedT, warnings } = deserialize(raw);
+  const { scene: next, warnings } = deserialize(raw);
   scene = next;
   ui.selected = null;
   resolveSelection();
-  host.setTime(savedT);
+  host.setTime(0);
   syncSeedUrl();
   await rebuildNow();
   renderAll();
