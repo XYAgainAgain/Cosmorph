@@ -1,0 +1,14 @@
+[package]
+name = "cosmorph-native-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+glow = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Only link_all needs a GL context; the crate itself never touches EGL.
+[dev-dependencies]
+khronos-egl = { version = "6", features = ["dynamic"] }

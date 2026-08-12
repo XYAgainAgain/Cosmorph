@@ -48,10 +48,12 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     let outLine = vec3(0.0);
     let outCont = vec3(0.0);
     let tTot = vec3(1.0);
-    for (const pl of planes) {
-      const a = texture(pl.texA, sampleAt(pl.uDepth, at)).toVar();
+    /* Only the first read of a texture is named. Every read shares one sampler
+       uniform, but two same-named nodes collapse and the later tap loses its uv. */
+    for (const [i, pl] of planes.entries()) {
+      const a = texture(pl.texA, sampleAt(pl.uDepth, at)).setName(`texPlaneA${i}`).toVar();
       const lineRaw = warp ? smear3(pl.texA, pl.uDepth, a.rgb) : a.rgb;
-      const contCenter = texture(pl.texB, sampleAt(pl.uDepth, at)).rgb;
+      const contCenter = texture(pl.texB, sampleAt(pl.uDepth, at)).setName(`texPlaneB${i}`).rgb;
       let contRaw = warp ? smear3(pl.texB, pl.uDepth, contCenter) : contCenter;
       if (warp) {
         const disp = contRaw.toVar();
@@ -73,15 +75,16 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     /* The march front-attenuated its emission internally and its tau already
        rode into its owning plane's alpha, so this lands after the walk. */
     if (dust) {
-      const dl = texture(dust.lineTex, sampleAt(dust.uDepth, at)).rgb;
-      lit = lit.add(scnr(palette(dl))).add(texture(dust.contTex, sampleAt(dust.uDepth, at)).rgb);
+      const dl = texture(dust.lineTex, sampleAt(dust.uDepth, at)).setName('texDustLine').rgb;
+      const dc = texture(dust.contTex, sampleAt(dust.uDepth, at)).setName('texDustCont').rgb;
+      lit = lit.add(scnr(palette(dl))).add(dc);
     }
 
     /* Rims skip all tau, the same exemption the live path grants them */
     let rimRaw = null;
-    for (const pl of planes) {
+    for (const [i, pl] of planes.entries()) {
       if (!pl.texRim) continue;
-      const rim = texture(pl.texRim, sampleAt(pl.uDepth, at)).rgb;
+      const rim = texture(pl.texRim, sampleAt(pl.uDepth, at)).setName(`texRim${i}`).rgb;
       rimRaw = rimRaw ? rimRaw.add(rim) : rim;
     }
     if (rimRaw) lit = lit.add(scnr(palette(rimRaw)));
@@ -89,7 +92,7 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     /* Drawn ring emission, extinguished by the whole walk's transmittance. */
     if (warp) lit = lit.add(scnr(palette(warp.ring)).mul(tTot));
 
-    const bright = texture(brightTex, screen).rgb;
+    const bright = texture(brightTex, screen).setName('texBright').rgb;
     const scene = lit.add(bright).mul(U.uExposure);
 
     /* Color-preserving stretch: scale by the stretched luminance ratio.

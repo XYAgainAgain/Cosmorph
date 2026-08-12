@@ -1,0 +1,14 @@
+{
+  "name": "cosmorph-wallpaper-linux",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cosmorph standalone desktop wallpaper host (Linux)",
+  "scripts": {
+    "serve": "python3 ../shared/serve.py 8787",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

@@ -343,9 +343,27 @@ export async function createSky2D({
     uLensH2: uniform(lensHaloAt[2]),
   };
 
-  /* Per-instance uniform factories. Instance 0 assigns onto U itself, so a
-     one-per-type scene builds the exact graph and editor uniform names it
-     always did; later instances shadow through an Object.create(U) bag. */
+  /* A uniform's JS name becomes its std140 member name in extracted GLSL, and
+     two nodes sharing one name collapse into one member with no error at all. */
+  const uniformNames = new Set();
+  function nameUniforms(bag, k) {
+    for (const key of Object.keys(bag)) {
+      const v = bag[key];
+      /* An already-named node is an alias of one this walk has seen, not a
+         second member: instance 0's uDepthNeb IS U.uDepthLine. */
+      if (typeof v?.setName !== 'function' || v.name) continue;
+      const name = k === 0 ? key : `${key}__${k}`;
+      if (uniformNames.has(name)) {
+        throw new Error(`Cosmorph: duplicate uniform name "${name}"; it would silently alias.`);
+      }
+      uniformNames.add(name);
+      v.setName(name);
+    }
+  }
+  nameUniforms(U, 0);
+
+  /* Instance 0 assigns onto U itself, preserving the exact uniform names a
+     one-per-type scene always had; later instances shadow via Object.create(U). */
   const reseats = [];
   reseats.push((aspect) => {
     U.uLensAt.value.set((L.center?.[0] ?? 0.5) * aspect, L.center?.[1] ?? 0.5);
@@ -354,6 +372,7 @@ export async function createSky2D({
   function makeBag(k, uniforms, reseat) {
     const bag = k === 0 ? U : Object.create(U);
     Object.assign(bag, uniforms);
+    nameUniforms(bag, k);
     if (reseat) reseats.push((aspect) => reseat(bag, aspect));
     return bag;
   }
@@ -1420,6 +1439,7 @@ export async function createSky2D({
       uDmSkip: uniform(Math.max(d0.skipEps, 1e-5)),
       uDepthDust: uniform(dustEnts[0].depth ?? 0.55),
     });
+    nameUniforms(U, 0);
   }
 
   /* An empty list still builds instance 0 off the type defaults: these three
@@ -1818,6 +1838,7 @@ export async function createSky2D({
     /* Twinkle stays a live-tier effect: baked into a plane it would hard-snap
        the whole faint field to an uncorrelated phase on every rebake. */
     const bakedTwinkle = uniform(0);
+    nameUniforms({ uBakedTwinkle: bakedTwinkle }, 0);
     /* A render target samples back v-flipped, so reading the dust MRT from
        inside a bake has to undo that to land on the same overscanned texel. */
     const bakeUV = vec2(uv().x, uv().y.oneMinus());
@@ -1864,7 +1885,9 @@ export async function createSky2D({
       }
       /* The march's own tau folds in here so the composite pays one exp per
          plane; only its emission lands after the walk. */
-      if (hasDust && dust) tauSum = tauSum.add(texture(dust.lineTex, bakeUV).a);
+      if (hasDust && dust) {
+        tauSum = tauSum.add(texture(dust.lineTex, bakeUV).setName('texDustLine').a);
+      }
 
       let contSum = vec3(0.0);
       for (const bag of by.ifn ?? []) {
@@ -1895,6 +1918,7 @@ export async function createSky2D({
       const rtB = new THREE.RenderTarget(2, 2, rtOpts);
       const sceneA = fullscreenPass(vec4(lineSum, tauSum));
       const sceneB = fullscreenPass(vec4(contSum, occTau));
+      const gxsMeshes = [];
 
       for (const bag of by.galaxies ?? []) {
         if (!bag.gxsCount) continue;
@@ -1920,6 +1944,7 @@ export async function createSky2D({
         mesh.frustumCulled = false;
         mesh.renderOrder = 1;
         sceneB.add(mesh);
+        gxsMeshes.push(mesh);
         bakedGxMeshes.push(mesh);
       }
 
@@ -1948,6 +1973,7 @@ export async function createSky2D({
         sceneA,
         sceneB,
         rimScene,
+        gxsMeshes,
         hasDust,
         hasOccluder: occluding.length > 0,
         score: g.score,
@@ -1966,9 +1992,12 @@ export async function createSky2D({
         const p = skyPos.sub(U.uCamera).div(vec2(U.uAspect, 1.0))
           .sub(0.5).div(U.uMarginScale).add(0.5);
         const at = vec2(p.x, p.y.oneMinus());
-        let tau = texture(occPlanes[0].rtB.texture, at).level(float(0)).a;
+        /* level() clones the node and drops the name, so it is set last */
+        const bName = (pl) => `texPlaneB${builtPlanes.indexOf(pl)}`;
+        let tau = texture(occPlanes[0].rtB.texture, at)
+          .level(float(0)).setName(bName(occPlanes[0])).a;
         for (const pl of occPlanes.slice(1)) {
-          tau = tau.add(texture(pl.rtB.texture, at).level(float(0)).a);
+          tau = tau.add(texture(pl.rtB.texture, at).level(float(0)).setName(bName(pl)).a);
         }
         return exp(tau.negate().mul(WISP_SIGMA));
       };
@@ -2172,15 +2201,87 @@ export async function createSky2D({
     renderer.dispose();
   }
 
+  /* Dev surface for the native bundle dumper; no host reads it. */
+  const drawTo = (target, scene) => () => {
+    renderer.setRenderTarget(target);
+    renderer.render(scene, camera);
+    if (target) renderer.setRenderTarget(null);
+  };
+  const passes = [];
+  builtPlanes.forEach((pl, i) => {
+    passes.push({
+      id: `plane${i}.a`,
+      scene: pl.sceneA,
+      mesh: pl.sceneA.userData.quad,
+      target: pl.rtA,
+      targetScale: 1,
+      draw: drawTo(pl.rtA, pl.sceneA),
+    });
+    passes.push({
+      id: `plane${i}.b`,
+      scene: pl.sceneB,
+      mesh: pl.sceneB.userData.quad,
+      target: pl.rtB,
+      targetScale: 1,
+      draw: drawTo(pl.rtB, pl.sceneB),
+    });
+    /* Sprites are extra draws inside sceneB, so they share its scene and RT
+       and differ only in which mesh the shader is asked for. */
+    pl.gxsMeshes.forEach((mesh, k) => passes.push({
+      id: `plane${i}.gxs${k}`,
+      scene: pl.sceneB,
+      mesh,
+      target: pl.rtB,
+      targetScale: 1,
+      draw: drawTo(pl.rtB, pl.sceneB),
+    }));
+    if (!pl.rimScene) return;
+    passes.push({
+      id: `plane${i}.rim`,
+      scene: pl.rimScene,
+      mesh: pl.rimScene.userData.quad,
+      target: pl.rimRT,
+      targetScale: 0.5,
+      draw: drawTo(pl.rimRT, pl.rimScene),
+    });
+  });
+  if (dust) {
+    passes.push({
+      id: 'dust',
+      scene: dust.scene,
+      mesh: dust.scene.children[0],
+      target: dust.rt,
+      targetScale: 1,
+      draw: drawTo(dust.rt, dust.scene),
+    });
+  }
+  const brightSceneUsed = bakedBrightScene ?? brightScene;
+  passes.push({
+    id: 'bright',
+    scene: brightSceneUsed,
+    /* resize() rebuilds this mesh, so it cannot be captured at build time */
+    get mesh() { return bakedBrightMesh ?? brightMesh; },
+    target: brightRT,
+    targetScale: 1,
+    draw: drawTo(brightRT, brightSceneUsed),
+  });
+  const composeSceneUsed = bakedComposeScene ?? composeScene;
+  passes.push({
+    id: 'compose',
+    scene: composeSceneUsed,
+    mesh: composeSceneUsed.userData.quad,
+    target: null,
+    targetScale: 1,
+    draw: drawTo(null, composeSceneUsed),
+  });
+
   const backend = isWebGPU ? 'webgpu' : 'webgl2';
-  /* `uniforms` is the editor hook: Firmament pokes values live instead of
-     rebuilding the graph for every slider drag. resize() re-seats the framed
-     positions from the build-time params, so a live editor re-applies after it. */
-  /* `instances` exposes every duplicate's own bag; `uniforms` stays the
-     instance-0 view Firmament already binds to. The three unconditional base
-     layers always list an instance 0, even when the scene named no entity. */
+  /* `uniforms` is the editor hook Firmament pokes live; resize() re-seats
+     framed positions from build params, so a live editor re-applies after. */
+  /* `instances` holds every duplicate's own bag; `uniforms` stays the
+     instance-0 view. Base layers always list an instance 0, even if unnamed. */
   return {
-    render, resize, dispose, backend, capture, setCamera, uniforms: U,
+    render, resize, dispose, backend, capture, setCamera, uniforms: U, passes,
     /* Null on a live build, so a host can dispatch on it without knowing the mode */
     renderBaked: baked ? renderBaked : null,
     bakedStats,

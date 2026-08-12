@@ -60,7 +60,7 @@ Here's what kinds of celestial phenomena you can expect to find floating around 
 | Windows (Wallpaper Engine) | In development! |
 | Windows (standalone) | In development! |
 | Android (live wallpaper) | Planned! |
-| Linux | X11 started, Wayland on the way! |
+| Linux | Planned, currently blocked upstream, dang it! |
 | macOS | Might do it later... no promises lol |
 | The IRL sky, very far away | Live right now, depending on what your local [time is](https://time.is/)! |
 
@@ -70,7 +70,7 @@ Have you any thoughts, problems, typos, unexpected wormholes, or bugs to report?
 
 Questions, commercial licensing, cool screenshots/space pics, or anything else:
 
-- Discord: ~~**XYAgain**~~ (not right now, in account recovery process lmao)
+- Discord: **XYAgain**
 - Email: **sam@tkb.band**
 
 ## Shameless Self Promotion

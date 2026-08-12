@@ -1,0 +1,29 @@
+[package]
+name = "cosmorph-wallpaper-linux"
+version = "0.1.0"
+description = "Cosmorph standalone desktop wallpaper host (Linux)"
+authors = ["Sam Atwood"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+
+# Version must track tauri's own gtk stack; a mismatch makes gtk_window() types foreign.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+x11rb = "0.13"
+
+# Disk-usage profile carried over from RainyDesk, where a default dev profile
+# grew the target dir into the multi-GB range.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.release]
+strip = "symbols"
+lto = "thin"

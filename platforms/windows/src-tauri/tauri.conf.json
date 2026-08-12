@@ -12,7 +12,7 @@
       {
         "label": "wallpaper",
         "title": "Cosmorph",
-        "url": "/platforms/windows/wallpaper.html",
+        "url": "/platforms/shared/wallpaper.html",
         "decorations": false,
         "resizable": false,
         "skipTaskbar": true,

@@ -1,0 +1,19 @@
+[package]
+name = "cosmorph-wallpaper"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cosmorph-wallpaper"
+path = "src/main.rs"
+
+[dependencies]
+cosmorph-native-core = { path = "../core" }
+glow = "0.18"
+khronos-egl = { version = "6", features = ["dynamic"] }
+libc = "0.2"
+libloading = "0.8"
+serde_json = "1"
+x11-dl = "2.21"
+x11rb = { version = "0.13", features = ["randr", "shape"] }
