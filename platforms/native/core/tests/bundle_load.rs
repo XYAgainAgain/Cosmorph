@@ -39,8 +39,8 @@ fn loads_and_validates_the_hero_bundle() {
 
     assert_eq!(m.artifact_version, ARTIFACT_VERSION);
     assert_eq!(m.scene.seed, HERO_SEED, "hero seed");
-    // 3 planes × a/b, the plane-0 galaxy sprite pass, bright, compose
-    assert_eq!(m.programs.len(), 9, "hero program count");
+    // 4 planes × a/b, the swirl sprite pass, the dust occluder, bright, compose
+    assert_eq!(m.programs.len(), 12, "hero program count");
 
     for blob in &m.blobs {
         let bytes = bundle.blob(blob.id).expect("blob out of range");

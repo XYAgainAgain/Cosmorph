@@ -6,15 +6,15 @@ import {
   smoothstep, step, max, clamp, attribute, positionLocal, varyingProperty,
 } from 'three/tsl';
 import { hash3 } from './noise.js';
-
-const TAU = Math.PI * 2;
+import { twinkleMod } from './twinkle.js';
 
 /* One faint-field grid scale. Caller folds gradient and clumping into
-   `density`; 3×3 neighbor search lets wings cross cell borders cleanly. */
-export const faintStarLayer = /*@__PURE__*/ Fn(([skyU, pxPerUnit, cells, density, brightScale, off, twPhase, twDepth]) => {
+   `density`; 3×3 neighbor search lets wings cross cell borders cleanly.
+   rgb is the star light, alpha its raw luminance for compose's twinkle. */
+export const faintStarLayer = /*@__PURE__*/ Fn(([skyU, pxPerUnit, cells, density, brightScale, off]) => {
   const g = skyU.mul(cells);
   const base = floor(g);
-  const acc = vec3(0).toVar();
+  const acc = vec4(0.0).toVar();
   const pxScale = pxPerUnit.div(cells);
 
   for (let dx = -1; dx <= 1; dx++) {
@@ -42,11 +42,6 @@ export const faintStarLayer = /*@__PURE__*/ Fn(([skyU, pxPerUnit, cells, density
       const x = float(1).div(r2.add(1));
       const psf = x.mul(x); // Moffat β=2 fast path
 
-      /* Gentle background sparkle; the flux clamp keeps sub-pixel stars stable */
-      const tw = float(1.0).sub(twDepth).add(
-        twDepth.mul(sin(twPhase.add(h2.z).mul(TAU)).mul(0.5).add(0.5)),
-      );
-
       const t = pow(h2.y, 0.45);
       const col = mix(
         mix(vec3(1.0, 0.76, 0.5), vec3(1.0, 1.0, 1.0), smoothstep(0.0, 0.55, t)),
@@ -56,7 +51,10 @@ export const faintStarLayer = /*@__PURE__*/ Fn(([skyU, pxPerUnit, cells, density
       /* Dim stars sit near the noise floor and read colorless */
       const colS = mix(vec3(1.0), col, smoothstep(0.0, 0.12, rel));
 
-      acc.addAssign(colS.mul(L.mul(tw).mul(energy).mul(psf).mul(present)));
+      /* Amplitude, never phase: a baked phase would snap the whole field on
+         every rebake, which is why compose owns the modulation now. */
+      const amp = L.mul(energy).mul(psf).mul(present);
+      acc.addAssign(vec4(colS.mul(amp), amp));
     }
   }
   return acc;
@@ -110,12 +108,9 @@ export function buildBrightStarNodes(U, { occlude = null } = {}) {
     const alphaPx = vMisc.z;
     const beta = vMisc.w;
 
-    /* Optics sparkle on the evolution clock, never per-frame randomness.
-       Phase arrives pre-wrapped to [0,1) so sin never sees a huge argument. */
-    const tw = float(1.0).sub(U.uTwinkleDepth).add(
-      U.uTwinkleDepth.mul(sin(U.uTwinklePhase.add(phase).mul(TAU)).mul(0.5).add(0.5)),
-    );
-    const L = L0.mul(tw);
+    /* The same law compose runs over the baked field, so the two tiers scintillate
+       as one sky. Phases arrive pre-wrapped to [0,1) so sin stays small. */
+    const L = L0.mul(twinkleMod(U.uTwinklePhase, phase, U.uTwinkleDepth));
 
     const a2 = alphaPx.mul(alphaPx);
     const r2 = dot(q, q);

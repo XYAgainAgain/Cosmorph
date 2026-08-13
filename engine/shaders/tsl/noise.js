@@ -60,6 +60,20 @@ export const valueNoise3 = /*@__PURE__*/ Fn(([p]) => {
   );
 });
 
+/* 2D value noise in [0,1] — half the lattice hashes of valueNoise3 with z = 0 */
+export const valueNoise2 = /*@__PURE__*/ Fn(([p]) => {
+  const i = floor(p);
+  const f = fract(p);
+  const u = f.mul(f).mul(f.mul(-2.0).add(3.0));
+
+  const n00 = hash1(vec3(i, 0.0));
+  const n10 = hash1(vec3(i.add(vec2(1, 0)), 0.0));
+  const n01 = hash1(vec3(i.add(vec2(0, 1)), 0.0));
+  const n11 = hash1(vec3(i.add(vec2(1, 1)), 0.0));
+
+  return mix(mix(n00, n10, u.x), mix(n01, n11, u.x), u.y);
+});
+
 /* JS-unrolled octave count, no runtime loop. Gain 0.5 suits gas. */
 export function makeFbm3(octaves) {
   return Fn(([pIn]) => {

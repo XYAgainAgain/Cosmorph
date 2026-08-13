@@ -1,7 +1,5 @@
-/* The showpiece galaxy: one hero object in spiral, shell-elliptical, or ring
-   morphology. Split out of galaxies.js, which keeps the deep-field tier and
-   stays the orchestrator. Starlight is continuum; only the HII knots reach
-   the line RT. */
+/* Hero spiral, shell-elliptical, and ring morphologies live here; galaxies.js
+   orchestrates them. Starlight is continuum, while HII knots reach the line RT. */
 
 import {
   Fn, If, float, vec2, vec3, clamp, cos, exp, floor, fract, length,
@@ -9,6 +7,7 @@ import {
 } from 'three/tsl';
 import { hash1, fbm3o2, ridged4, FBM2_NORM, CELL_BIAS } from './noise.js';
 import { rot2, remapRange } from './sdf.js';
+import { spinAngle } from './spin.js';
 
 /* Reciprocal so the shell-parity math multiplies instead of dividing */
 const INV_TAU = 1 / (Math.PI * 2);
@@ -91,7 +90,7 @@ function granulation(U, pn) {
 
 /* Grand-design spiral: logarithmic arms over a Moffat bulge, dust lane on the
    near half. uGxArmAmt at 0 drops the arms and leaves a lenticular. */
-function spiralGalaxy(U, pn, u, dir, look, wantLine) {
+function spiralGalaxy(U, pn, u, dir, near, look, wantLine) {
   const cont = vec3(0).toVar();
   const lines = wantLine ? vec3(0).toVar() : null;
 
@@ -99,10 +98,9 @@ function spiralGalaxy(U, pn, u, dir, look, wantLine) {
      past the edge, so skipping the ridged/fbm chain out there changes nothing. */
   If(u.lessThan(extentEdge(U)), () => {
     /* Logarithmic spiral: constant pitch puts the phase on ln(r), tan(pitch) =
-       m / uGxWind. Default spin is 2*PI/4096, one turn per uTev wrap. */
+       m/uGxWind. The turn itself came in through pn, from spin.js. */
     const lnu = u.max(1e-3).log().toVar();
-    const A = lnu.mul(U.uGxWind)
-      .sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
+    const A = lnu.mul(U.uGxWind).sub(U.uGxPhase).toVar();
     const ca = cos(A).toVar();
     const sa = sin(A).toVar();
 
@@ -120,15 +118,17 @@ function spiralGalaxy(U, pn, u, dir, look, wantLine) {
       /* The bar is the same arm pattern frozen at its own radius, so its ends land
          exactly where the arms root and the whole figure co-rotates as one. */
       const barLen = U.uGxBarLen.max(1e-3).toVar();
-      const ab = barLen.log().mul(U.uGxWind).sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
+      /* The figure now turns whole in the caller, at the fragment's own radius,
+         so a nonzero core lead shears the bar as it shears everything else. */
+      const ab = barLen.log().mul(U.uGxWind).sub(U.uGxPhase).toVar();
       const barCos = m.x.mul(cos(ab)).add(m.y.mul(sin(ab))).toVar();
       bar = pow(barCos.mul(0.5).add(0.5).max(1e-4), U.uGxBarSharp.max(0.0))
         .mul(float(1).sub(smoothstep(barLen.mul(0.55), barLen, u)))
         .mul(U.uGxBarAmt).toVar();
     }
 
-    /* Disk-frame noise: the arm pattern rotates through material that stays put,
-       which is what a density wave actually does. */
+    /* Disk-frame noise, co-rotating with the pattern: compose warps the whole
+       plane, so material left standing still is what snapped at every rebake. */
     const mot = fbm3o2(vec3(pn.mul(U.uGxMotFreq), U.uTev.mul(U.uGxMorph)).add(U.uGxOff)).toVar();
     const gran = granulation(U, pn);
     /* Speckle and flocculence share one coverage floor, so the dark tier chews the
@@ -150,10 +150,6 @@ function spiralGalaxy(U, pn, u, dir, look, wantLine) {
        the way unresolved star clouds do instead of dusting the face evenly. */
     const grit = disk.mul(gran.bright).toVar();
 
-    /* The lane trails the arms by a fixed phase and only shows on the near half
-       of the disk, where the dust sits in front of the light. */
-    const near = smoothstep(U.uGxNearSoft.max(1e-3).negate(), U.uGxNearSoft.max(1e-3),
-      dir.y.mul(U.uGxNearSide));
     const lp = U.uGxLanePhase.toVar();
     const laneCos = armCos.mul(cos(lp)).add(armSin.mul(sin(lp))).toVar();
     /* The phase frame spins ever faster toward the center, so dust texture
@@ -321,15 +317,16 @@ function ringGalaxy(sky, U, u, dir, look, wantLine) {
 
 /* One showpiece at a uniform-specified pose. Morphology is a build-time branch,
    so a scene only ever compiles the silhouette it asked for. */
-export function showpieceGalaxy(sky, U, look = {}, wantLine = false) {
+export function showpieceGalaxy(sky, U, look = {}, wantLine = false, spins = false) {
   /* Deproject: rotate into the major-axis frame, then stretch the minor axis
      back out. Orthographic is exact enough for an object this distant. */
   const q = rot2(sky.sub(U.uGxCenter), U.uGxPa.negate()).toVar();
-  const pn = vec2(q.x, q.y.div(U.uGxCosI.max(0.06))).div(U.uGxSize.max(1e-4)).toVar();
-  const u = length(pn).max(1e-4).toVar();
-  const dir = pn.div(u).toVar();
-
-  if (look.ring) return ringGalaxy(sky, U, u, dir, look, wantLine);
-  if (look.shell) return shellGalaxy(U, u, dir);
-  return spiralGalaxy(U, pn, u, dir, look, wantLine);
+  const pd = vec2(q.x, q.y.div(U.uGxCosI.max(0.06))).div(U.uGxSize.max(1e-4)).toVar();
+  const u = length(pd).max(1e-4).toVar();
+  if (look.ring) return ringGalaxy(sky, U, u, pd.div(u).toVar(), look, wantLine);
+  if (look.shell) return shellGalaxy(U, u, pd.div(u).toVar());
+  const pn = spins ? rot2(pd, spinAngle(U, u).negate()).toVar() : pd;
+  const near = smoothstep(U.uGxNearSoft.max(1e-3).negate(), U.uGxNearSoft.max(1e-3),
+    pn.y.div(u).mul(U.uGxNearSide)).toVar();
+  return spiralGalaxy(U, pn, u, pn.div(u).toVar(), near, look, wantLine);
 }

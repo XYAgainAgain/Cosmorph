@@ -68,14 +68,14 @@ fn cadence_bursts_on_input_and_falls_back_to_the_twinkle_rate() {
 #[test]
 fn the_scheduler_holds_the_hero_rebake_periods_and_bakes_one_plane_a_frame() {
     let clock = Clock::new(HERO_SAVED_T);
-    let mut scheduler = Scheduler::new(&[SCORE_DEEP, SCORE_DISTANT, SCORE_CLOSE], 1);
+    let mut scheduler = Scheduler::new(&[SCORE_DEEP, SCORE_DISTANT, SCORE_CLOSE], &[false; 3], 1);
     let mut bakes: Vec<Vec<f64>> = vec![Vec::new(); 3];
 
     let frames = 60 * 1200;
     for frame in 0..frames {
         let elapsed = frame as f64 / 60.0;
         let tev = clock.tev(elapsed, HERO_RATE);
-        if let Some(bake) = scheduler.next(tev) {
+        if let Some(bake) = scheduler.next(tev, &[]) {
             bakes[bake.plane].push(elapsed);
             assert!(bake.is_last(), "unbanded bakes finish in one frame");
         }
@@ -91,9 +91,9 @@ fn the_scheduler_holds_the_hero_rebake_periods_and_bakes_one_plane_a_frame() {
     assert!((deep - 138.0).abs() < 1.0, "deep plane period {deep}");
 
     // Boot dirties every plane; the cap has to spread them over three frames.
-    let mut fresh = Scheduler::new(&[SCORE_DEEP, SCORE_DISTANT, SCORE_CLOSE], 1);
-    let mut planes: Vec<usize> = (0..3).filter_map(|_| fresh.next(0.5).map(|b| b.plane)).collect();
-    assert!(fresh.next(0.5).is_none(), "a fourth plane baked from three");
+    let mut fresh = Scheduler::new(&[SCORE_DEEP, SCORE_DISTANT, SCORE_CLOSE], &[false; 3], 1);
+    let mut planes: Vec<usize> = (0..3).filter_map(|_| fresh.next(0.5, &[]).map(|b| b.plane)).collect();
+    assert!(fresh.next(0.5, &[]).is_none(), "a fourth plane baked from three");
     planes.sort_unstable();
     assert_eq!(planes, vec![0, 1, 2]);
 }

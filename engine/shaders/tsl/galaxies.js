@@ -100,17 +100,17 @@ export function fieldGalaxies(sky, U) {
 /* Both tiers land on the continuum RT; only the HII knots reach the line RT.
    The shell elliptical is an old stellar population, so it builds no line node. */
 export function buildGalaxyNodes(skyU, U, opts = {}) {
-  const { field = true, showpiece = false, look = {} } = opts;
+  const { field = true, showpiece = false, spins = false, look = {} } = opts;
 
   const continuum = Fn(() => {
     if (!showpiece) return field ? fieldGalaxies(skyU, U) : vec3(0.0);
-    const sp = showpieceGalaxy(skyU, U, look, false).cont;
+    const sp = showpieceGalaxy(skyU, U, look, false, spins).cont;
     return field ? fieldGalaxies(skyU, U).add(sp) : sp;
   })();
 
   const out = { continuum };
   if (showpiece && !look.shell) {
-    out.line = Fn(() => showpieceGalaxy(skyU, U, look, true).line)();
+    out.line = Fn(() => showpieceGalaxy(skyU, U, look, true, spins).line)();
   }
   return out;
 }
@@ -184,7 +184,10 @@ export const GALAXY_DEFAULTS = {
   pa: 0.55,
   wind: 3.0,
   phase: 0.0,
-  spin: 0.001534, /* 2*PI/4096, rounded onto the studio's slider grid */
+  /* Sixteen lattice steps make one turn per 256 evolution hours. */
+  spin: Math.PI / 128,
+  lead: 0.35,
+  leadR: 0.25,
   armCount: 2.0,
   armAsym: 0.0,
   armAmt: 0.85,
@@ -238,8 +241,6 @@ export const GALAXY_DEFAULTS = {
   starsAxis: 0.68,
   starsBulgeFrac: 0.22,
   starsZH: 0.035,
-  starsSpin: 0.02,
-  starsRotExp: 1.0,
   starsLaneTau: 1.2,
 
   hii: 0.3,

@@ -3,7 +3,9 @@
 
 use glow::HasContext;
 
-use crate::bundle::{Blend, Bundle, GlslType, IndexType, PlaneSpec, ProgramSpec, SamplerSource};
+use crate::bundle::{
+    spin_phase, Blend, Bundle, GlslType, IndexType, PlaneSpec, ProgramSpec, SamplerSource,
+};
 use crate::program::GpuProgram;
 use crate::scheduler::{Bake, Scheduler};
 use crate::stars;
@@ -29,8 +31,9 @@ pub struct Rect {
 /// What the host supplies per frame. Everything else is geometry or bundle data.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameInput {
-    pub tev: f32,
-    pub twinkle_phase: f32,
+    pub tev: f64,
+    /// Three independently wrapped octave phases, per `tickTwinkle()` in sky2d.js.
+    pub twinkle_phase: [f32; 3],
     /// Device pixels, already damped by the host.
     pub parallax: [f32; 2],
     /// Bit `i` set draws monitor rect `i` in the composite; a clear bit is a rect
@@ -84,6 +87,12 @@ enum Dyn {
     PxPerUnit,
     Camera,
     Depth(f32),
+    /// The plane whose bake clock this member follows.
+    BakeTev(usize),
+    /// Prewrapped Ωp·T for one galaxy, at the live clock or at its plane's
+    /// last bake. Carries the galaxy's own signed pattern speed.
+    SpinPhase(f64),
+    BakeSpinPhase(usize, f64),
 }
 
 impl Dyn {
@@ -108,6 +117,44 @@ impl Dyn {
                     })?;
                 Dyn::Depth(plane.depth)
             }
+            "spinPhase" | "bakeSpinPhase" => {
+                let (plane, spec) = planes
+                    .iter()
+                    .find_map(|p| {
+                        p.spin
+                            .iter()
+                            .find(|s| {
+                                uniform
+                                    == if key == "spinPhase" {
+                                        &s.phase_uniform
+                                    } else {
+                                        &s.bake_phase_uniform
+                                    }
+                            })
+                            .map(|s| (p, s))
+                    })
+                    .ok_or_else(|| {
+                        Error::from(format!(
+                            "program '{program}' drives '{uniform}' but no plane's spin list names it"
+                        ))
+                    })?;
+                if key == "spinPhase" {
+                    Dyn::SpinPhase(spec.rate)
+                } else {
+                    Dyn::BakeSpinPhase(plane.id, spec.rate)
+                }
+            }
+            "bakeTev" => {
+                let plane = planes
+                    .iter()
+                    .find(|p| p.bake_tev_uniforms.iter().any(|u| u == uniform))
+                    .ok_or_else(|| {
+                        Error::from(format!(
+                            "program '{program}' drives '{uniform}' but no plane lists it in bakeTevUniforms"
+                        ))
+                    })?;
+                Dyn::BakeTev(plane.id)
+            }
             other => {
                 return Err(format!(
                     "program '{program}' member '{uniform}' declares dynamic '{other}', which this host does not drive"
@@ -117,12 +164,24 @@ impl Dyn {
         })
     }
 
-    fn values(self, view: &View, camera: [f32; 2], input: &FrameInput, tev: f32) -> ([f32; 4], usize) {
+    fn values(
+        self,
+        view: &View,
+        camera: [f32; 2],
+        input: &FrameInput,
+        tev: f64,
+        baked: &[f64],
+    ) -> ([f32; 4], usize) {
         let pair = |a: f32, b: f32| ([a, b, 0.0, 0.0], 2);
         let one = |a: f32| ([a, 0.0, 0.0, 0.0], 1);
+        let three = |v: [f32; 3]| ([v[0], v[1], v[2], 0.0], 3);
         match self {
-            Dyn::Tev => one(tev),
-            Dyn::TwinklePhase => one(input.twinkle_phase),
+            Dyn::Tev => one(tev as f32),
+            Dyn::BakeTev(plane) => one(baked[plane] as f32),
+            // Spin stays in rendered parity; f64 CPU math aligns hosts before the shared f32 upload.
+            Dyn::SpinPhase(rate) => one(spin_phase(rate, tev) as f32),
+            Dyn::BakeSpinPhase(plane, rate) => one(spin_phase(rate, baked[plane]) as f32),
+            Dyn::TwinklePhase => three(input.twinkle_phase),
             Dyn::Parallax => pair(input.parallax[0], input.parallax[1]),
             Dyn::Resolution => pair(view.span.w as f32, view.span.h as f32),
             Dyn::Aspect => one(view.aspect),
@@ -199,6 +258,9 @@ pub struct Engine {
     scheduler: Scheduler,
     /// Completed rebakes per plane, for `--bench`.
     bake_counts: Vec<u32>,
+    /// The tev each plane's targets currently hold, committed on a bake's last
+    /// band. Compose warps galaxy spin against it, so it must never run ahead.
+    plane_baked_tev: Vec<f64>,
     camera: [f32; 2],
     view: View,
     scissors: Vec<(i32, i32, i32, i32)>,
@@ -344,7 +406,13 @@ impl Engine {
         let frame_passes = (0..passes.len()).filter(|i| !claimed[*i]).collect();
 
         let scores: Vec<f32> = m.planes.iter().map(|p| p.score).collect();
+        let swirl: Vec<bool> = m
+            .planes
+            .iter()
+            .map(|p| p.spin.iter().any(|s| s.swirl))
+            .collect();
         let bake_counts = vec![0u32; m.planes.len()];
+        let plane_baked_tev = vec![0.0f64; m.planes.len()];
         let camera = m.scene.camera;
         let span = Rect { x: 0, y: 0, w: 1, h: 1 };
         let view = View::new(span, 1.0, m.scene.max_parallax_px);
@@ -360,8 +428,9 @@ impl Engine {
             passes,
             plane_passes,
             frame_passes,
-            scheduler: Scheduler::new(&scores, 1),
+            scheduler: Scheduler::new(&scores, &swirl, 1),
             bake_counts,
+            plane_baked_tev,
             camera,
             view,
             scissors: Vec::new(),
@@ -394,8 +463,33 @@ impl Engine {
 
     /// Splits every plane bake across `bands` frames; 1 bakes each plane whole.
     pub fn set_bands(&mut self, bands: u32) {
-        let scores: Vec<f32> = self.bundle.manifest.planes.iter().map(|p| p.score).collect();
-        self.scheduler = Scheduler::new(&scores, bands);
+        let planes = &self.bundle.manifest.planes;
+        let scores: Vec<f32> = planes.iter().map(|p| p.score).collect();
+        let swirl: Vec<bool> = planes
+            .iter()
+            .map(|p| p.spin.iter().any(|s| s.swirl))
+            .collect();
+        self.scheduler = Scheduler::new(&scores, &swirl, bands);
+    }
+
+    /// Predicted spin displacement per plane, the native mirror of `spinDriftPx`
+    /// in sky2d.js. A plane with no spinning galaxy prices at zero.
+    fn spin_drift(&self, tev: f64) -> Vec<f32> {
+        let px_per_unit = self.view.px_per_unit;
+        self.bundle
+            .manifest
+            .planes
+            .iter()
+            .enumerate()
+            .map(|(index, plane)| {
+                let baked = self.plane_baked_tev[index];
+                plane
+                    .spin
+                    .iter()
+                    .map(|spec| spec.drift_px(tev, baked, px_per_unit))
+                    .fold(0.0f32, f32::max)
+            })
+            .collect()
     }
 
     /// Adopts a new span and monitor layout: reallocates targets, re-evaluates
@@ -465,15 +559,16 @@ impl Engine {
     /// Requires a current GL context matching `gl`.
     pub unsafe fn warm_start(&mut self, gl: &glow::Context, input: FrameInput) -> Result<()> {
         self.require_span()?;
-        for program in 0..self.programs.len() {
-            self.write_dynamic(program, &input, input.tev)?;
-        }
         let cap = self.plane_passes.len() * self.scheduler.bands().max(1) as usize + 1;
         for _ in 0..cap {
-            match self.scheduler.next(input.tev) {
+            let spin = self.spin_drift(input.tev);
+            match self.scheduler.next(input.tev, &spin) {
                 Some(bake) => self.run_bake(gl, bake, &input)?,
                 None => break,
             }
+        }
+        for program in 0..self.programs.len() {
+            self.write_dynamic(program, &input, input.tev)?;
         }
         self.run_frame_passes(gl, &input)?;
         check_errors(gl, "warm start")
@@ -485,11 +580,14 @@ impl Engine {
     /// Requires a current GL context matching `gl`.
     pub unsafe fn render(&mut self, gl: &glow::Context, input: FrameInput) -> Result<()> {
         self.require_span()?;
+        let spin = self.spin_drift(input.tev);
+        if let Some(bake) = self.scheduler.next(input.tev, &spin) {
+            self.run_bake(gl, bake, &input)?;
+        }
+        // Dynamics write after the bake, or compose would warp this frame's fresh
+        // plane against the previous bake's clock. run_bake writes its own first.
         for program in 0..self.programs.len() {
             self.write_dynamic(program, &input, input.tev)?;
-        }
-        if let Some(bake) = self.scheduler.next(input.tev) {
-            self.run_bake(gl, bake, &input)?;
         }
         self.run_frame_passes(gl, &input)
     }
@@ -523,12 +621,13 @@ impl Engine {
         }
     }
 
-    fn write_dynamic(&mut self, program: usize, input: &FrameInput, tev: f32) -> Result<()> {
+    fn write_dynamic(&mut self, program: usize, input: &FrameInput, tev: f64) -> Result<()> {
         let view = self.view;
         let camera = self.camera;
+        let baked = &self.plane_baked_tev;
         let gpu = &mut self.programs[program];
         for slot in &self.dynamics[program] {
-            let (values, len) = slot.value.values(&view, camera, input, tev);
+            let (values, len) = slot.value.values(&view, camera, input, tev, baked);
             gpu.blocks[slot.block].write(slot.member, slot.ty, &values[..len])?;
         }
         Ok(())
@@ -608,6 +707,7 @@ impl Engine {
         }
         if bake.is_last() {
             self.bake_counts[bake.plane] += 1;
+            self.plane_baked_tev[bake.plane] = bake.tev;
         }
         Ok(())
     }

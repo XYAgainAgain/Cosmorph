@@ -46,8 +46,11 @@ export const CAPTURE_SIZES = [
 /* Scene-level controls. Grading entries are compose.js uniforms. */
 export const SCENE_PARAMS = [
   {
-    key: 'evolutionRate', label: 'Evolution rate', min: 0, max: 100, step: 1, def: 1,
+    key: 'evolutionRate', label: 'Evolution rate', min: 0, max: 300, step: 1, def: 1,
     group: 'Evolution', tier: 1, scene: true, unit: 'units/hour',
+    /* uTev's wrap is 4096 h × this, and the spin saturation window is built
+       against it at build time. */
+    structural: true,
   },
   {
     key: 'exposure', label: 'Exposure', min: 0.05, max: 3, step: 0.01, def: 0.85,
@@ -159,6 +162,9 @@ const p = (key, label, min, max, step, def, group, tier, extra = {}) => ({
    pokes it, and rebuilds only when the predicate's boolean actually flips. */
 const laneTexGate = (P) => P.laneFil > 0 || P.laneWob > 0;
 const spurGate = (P) => P.spurAmt > 0;
+/* sky2d snapshots gxSpins at build, and a swirl galaxy needs its own plane, so
+   a galaxy dialed off zero has to rebuild or its spin never leaves the bake. */
+const spinGate = (P) => P.spin !== 0 || P.lead !== 0;
 
 /* Aspect-scaled framed position: sky x spans [0, aspect] */
 const aspectX = (u) => ({ set: (U, v, ctx) => { U[u].value.x = v * ctx.aspect; } });
@@ -247,6 +253,10 @@ export const ENTITY_TYPES = [
       p('count', 'Bright count', 0, 400, 1, 84, 'Bright Tier', 1, { structural: true }),
       p('gain', 'Bright gain', 0, 3, 0.01, 1.0, 'Bright Tier', 1, { u: 'uStarGain' }),
       p('twinkleDepth', 'Twinkle depth', 0, 1, 0.01, 0.3, 'Optics', 1, { u: 'uTwinkleDepth' }),
+      p('twinkleFieldDepth', 'Field twinkle depth', 0, 1, 0.01, 0.3, 'Optics', 1, { u: 'uTwinkleFieldDepth' }),
+      /* Belongs between PSF width and mean star spacing (~span/42): below, a PSF
+         crawls under its own phase gradient; above, neighbors shimmer in lockstep. */
+      p('twinkleWave', 'Twinkle grain', 2, 64, 0.5, 12, 'Optics', 2, { u: 'uTwinkleWave', unit: 'px' }),
       p('spikeThreshold', 'Spike threshold', 0, 2, 0.01, 0.82, 'Optics', 1, { u: 'uSpikeThreshold' }),
       p('spikeAngle', 'Spike angle', 0, 1.5708, 0.005, 0.35, 'Optics', 1, { u: 'uSpikeAngle', unit: 'rad' }),
       /* Nonzero default; the decal rationale lives in stars.js */
@@ -1204,7 +1214,9 @@ export const ENTITY_TYPES = [
       p('cutIn', 'Fade start', 0.1, 4, 0.01, 1.15, 'Showpiece', 3, pairLo('uGxCutIn', 'uGxCutOut', 'cutOut')),
       p('cutOut', 'Fade end', 0.1, 6, 0.01, 1.75, 'Showpiece', 3, pairHi('uGxCutOut', 'cutIn')),
       p('armAmt', 'Arm contrast', 0, 1, 0.01, 0.85, 'Spiral Arms', 1, { u: 'uGxArmAmt' }),
-      p('wind', 'Winding', 0.2, 12, 0.01, 3.0, 'Spiral Arms', 1, { u: 'uGxWind' }),
+      p('wind', 'Arm direction', -12, 12, 0.01, 3.0, 'Spiral Arms', 1, {
+        u: 'uGxWind', structural: true,
+      }),
       p('armSharp', 'Arm sharpness', 0, 8, 0.01, 1.6, 'Spiral Arms', 2, { u: 'uGxArmSharp' }),
       p('armCount', 'Arm count', 1, 6, 1, 2, 'Spiral Arms', 2, { u: 'uGxArmCount' }),
       p('armAsym', 'Lopsidedness', 0, 1, 0.01, 0, 'Spiral Arms', 2, { u: 'uGxArmAsym' }),
@@ -1240,9 +1252,6 @@ export const ENTITY_TYPES = [
       p('starsSize', 'Star size', 0.3, 4, 0.05, 1.1, 'Resolved Stars', 2, { u: 'uGxsSize' }),
       p('starsZH', 'Scale height', 0.002, 0.3, 0.001, 0.035, 'Resolved Stars', 2, { u: 'uGxsZH' }),
       p('starsLaneTau', 'Far-side extinction', 0, 4, 0.01, 1.2, 'Resolved Stars', 2, { u: 'uGxsLaneTau' }),
-      p('starsSpin', 'Orbital rate', 0, 0.05, 0.00001, 0.02, 'Resolved Stars', 2, { u: 'uGxsSpin' }),
-      /* 1 is a flat rotation curve; 0 makes the whole disk turn rigidly */
-      p('starsRotExp', 'Rotation curve', 0, 2, 0.01, 1.0, 'Resolved Stars', 3, { u: 'uGxsRotExp' }),
       p('bulgeAmt', 'Bulge weight', 0, 6, 0.01, 1.6, 'Bulge', 1, { u: 'uGxBulgeAmt' }),
       p('bulgeR', 'Bulge radius', 0.005, 1, 0.005, 0.16, 'Bulge', 1, { u: 'uGxBulgeR' }),
       p('bulgeBeta', 'Moffat beta', 0.5, 6, 0.01, 1.5, 'Bulge', 2, { u: 'uGxBulgeBeta' }),
@@ -1323,8 +1332,18 @@ export const ENTITY_TYPES = [
       p('polarW', 'Polar width', 0.005, 1, 0.005, 0.09, 'Polar Ring', 2, { u: 'uGxPolarW' }),
       p('polarPa', 'Plane offset', -3.1416, 3.1416, 0.01, 1.5708, 'Polar Ring', 2, { u: 'uGxPolarPa', unit: 'rad' }),
       p('polarCosI', 'Polar inclination', 0.06, 1, 0.01, 0.25, 'Polar Ring', 2, { u: 'uGxPolarCosI' }),
-      /* Below ~0.0008 rad/h the 4096 h wrap quantizes the pattern to a stop */
-      p('spin', 'Arm rotation', 0, 0.02, 0.000001, 0.001534, 'Evolution', 2, { u: 'uGxSpin' }),
+      /* The engine silently snaps this friendly dial to the seamless lattice. */
+      p('spin', 'Pattern rotation', 0, 2, 0.005, Math.PI / 128, 'Evolution', 2, {
+        u: 'uGxSpin', unit: 'rad/h', gate: spinGate,
+      }),
+      /* How far the core runs ahead of the arms once phase mixing saturates.
+         Bounded, so this is also what sizes the rebake margin. */
+      p('lead', 'Core lead', 0, 1.5, 0.01, 0.35, 'Evolution', 2, {
+        u: 'uGxLead', unit: 'rad', gate: spinGate, structural: true,
+      }),
+      p('leadR', 'Lead radius', 0.02, 2, 0.01, 0.25, 'Evolution', 3, {
+        u: 'uGxLeadR', structural: true,
+      }),
       p('morphRate', 'Morph rate', 0, 1, 0.01, 0.03, 'Evolution', 2, { u: 'uGxMorph' }),
     ],
   },

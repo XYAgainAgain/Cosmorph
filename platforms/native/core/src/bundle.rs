@@ -83,6 +83,7 @@ pub struct BakeMs {
 #[serde(rename_all = "lowercase")]
 pub enum PixelFormat {
     Rgba16f,
+    R16f,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,8 +91,16 @@ pub enum PixelFormat {
 pub struct TargetSpec {
     pub id: String,
     pub format: PixelFormat,
+    /// The occlusion target carries a conservative max, so filtering it would
+    /// average that away; older manifests predate the field and were all linear.
+    #[serde(default = "linear")]
+    pub filter: Filter,
     pub scale: f32,
     pub attachments: usize,
+}
+
+fn linear() -> Filter {
+    Filter::Linear
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -387,7 +396,79 @@ pub struct PlaneSpec {
     pub score: f32,
     #[serde(default)]
     pub has_dust: bool,
+    /// Galaxy `uGxBakeTev` members this plane drives from its own bake clock.
+    #[serde(default)]
+    pub bake_tev_uniforms: Vec<String>,
+    /// Spin pricing for every spinning galaxy this plane carries, swirled or
+    /// demoted. Empty on manifests dumped before spin existed.
+    #[serde(default)]
+    pub spin: Vec<SpinSpec>,
     pub passes: Vec<String>,
+}
+
+/// The evolution clock's own wrap; `wrap / CLOCK_H` recovers the scene's
+/// evolution rate. Mirrors `SPIN_CLOCK_H` in engine/shaders/tsl/spin.js.
+const CLOCK_H: f64 = 4096.0;
+/// Real hours a demoted galaxy waits between rebakes, per `SPIN_DEMOTED_MIN_H`.
+const DEMOTED_MIN_H: f64 = 0.05;
+
+/// One spinning galaxy's rebake pricing. Angles are magnitudes: a negative
+/// pattern speed drifts exactly as fast as a positive one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpinSpec {
+    /// Disc radius in sky units; the host scales it by its own px-per-unit.
+    pub radius: f32,
+    /// Rigid pattern speed, rad/h.
+    pub rigid: f32,
+    /// The same speed, signed. Wrapped against the clock into `phase_uniform`.
+    #[serde(default)]
+    pub rate: f64,
+    /// Prewrapped Ωp·T, and its value at this plane's last bake. Empty on
+    /// manifests dumped before the phase uniforms existed.
+    #[serde(default)]
+    pub phase_uniform: String,
+    #[serde(default)]
+    pub bake_phase_uniform: String,
+    /// Saturated core lead, rad.
+    pub lead: f32,
+    pub sat_ramp: f32,
+    /// uTev's wrap in hours, 4096 × the evolution rate.
+    pub wrap: f32,
+    /// Compose carries this galaxy's rotation between rebakes.
+    pub swirl: bool,
+}
+
+/// Ωp·T wrapped to (−π, π], mirroring `spinPhaseAt` in spin.js. Computed in
+/// f64: the raw product runs past f32's resolution at a high evolution rate.
+pub fn spin_phase(rate: f64, tev: f64) -> f64 {
+    const TAU: f64 = std::f64::consts::TAU;
+    let p = rate * tev;
+    p - TAU * (p / TAU).round()
+}
+
+impl SpinSpec {
+    /// Mirrors `spinDriftPx` in engine/shaders/tsl/spin.js: predicted pixels the
+    /// pattern has moved since this plane was baked.
+    pub fn drift_px(&self, tev: f64, baked_tev: f64, px_per_unit: f32) -> f32 {
+        let dt = (tev - baked_tev).abs();
+        let rigid = !self.swirl;
+        if rigid && dt < DEMOTED_MIN_H * (self.wrap as f64 / CLOCK_H) {
+            return 0.0;
+        }
+        let wrap = self.wrap as f64;
+        let sat_ramp = self.sat_ramp.max(1e-6) as f64;
+        let sat = |t: f64| {
+            let s = |x: f64| {
+                let u = (x / sat_ramp).clamp(0.0, 1.0);
+                u * u * (3.0 - 2.0 * u)
+            };
+            s(t) * s(wrap - t)
+        };
+        let shear = self.lead as f64 * (sat(tev) - sat(baked_tev)).abs();
+        let turn = if rigid { self.rigid as f64 * dt } else { 0.0 };
+        ((shear + turn) * self.radius as f64 * px_per_unit as f64) as f32
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -717,7 +798,14 @@ impl Bundle {
         }
 
         let mut plane_ids = HashSet::new();
-        for plane in &m.planes {
+        for (index, plane) in m.planes.iter().enumerate() {
+            if plane.id != index {
+                return Err(format!(
+                    "plane '{}' has id {}, but its manifest index is {index}",
+                    plane.name, plane.id
+                )
+                .into());
+            }
             if !plane_ids.insert(plane.id) {
                 return Err(format!("plane id {} is declared twice", plane.id).into());
             }
@@ -779,10 +867,31 @@ mod tests {
     }
 
     #[test]
+    fn plane_ids_must_match_manifest_positions() {
+        let json = manifest("\"len\": 12").replace(
+            "\"id\": 0, \"name\": \"deep\"",
+            "\"id\": 7, \"name\": \"deep\"",
+        );
+        let err = Bundle::load(json.as_bytes(), vec![0u8; 12]).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "plane 'deep' has id 7, but its manifest index is 0"
+        );
+    }
+
+    #[test]
     fn accepts_a_well_formed_bundle() {
         let bundle = load("\"len\": 12").expect("should validate");
         assert_eq!(bundle.blob(0).unwrap().len(), 12);
         assert_eq!(bundle.program("compose").unwrap().members.len(), 3);
+    }
+
+    #[test]
+    fn spin_phase_keeps_subpixel_time_past_f32_integer_precision() {
+        let tev = 16_777_216.25;
+        let phase = spin_phase(1.0, tev);
+        let narrowed = spin_phase(1.0, tev as f32 as f64);
+        assert!((phase - narrowed).abs() > 0.1);
     }
 
     #[test]

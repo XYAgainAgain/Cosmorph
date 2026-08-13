@@ -45,6 +45,9 @@ const BENCH_SAMPLES: usize = 1_000_000;
 /// Long enough for a slow hotplug, short enough that a stuck one still redraws.
 const RESPAN_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 const RESPAN_ACK_POLL: Duration = Duration::from_millis(4);
+/// Golden and silver ratios, matching `TWINKLE_RATES` in sky2d.js: irrational
+/// multiples of the base rate never re-align, so the scintillation never loops.
+const TWINKLE_RATES: [f64; 3] = [1.0, 1.618_033_988_7, 2.414_213_562_4];
 
 fn main() {
     if let Err(err) = run() {
@@ -286,7 +289,7 @@ fn run() -> Result<()> {
     let session = Instant::now();
     let warm = FrameInput {
         tev: clock.tev(0.0, evolution_rate),
-        twinkle_phase: 0.0,
+        twinkle_phase: [0.0; 3],
         parallax: [0.0, 0.0],
         active_rects: FrameInput::ALL_RECTS,
     };
@@ -400,7 +403,7 @@ fn run() -> Result<()> {
                     tev: clock.tev(elapsed_s, evolution_rate),
                     // Session time, not tev: twinkle is atmospheric, so a fast evolution
                     // rate must not speed it up.
-                    twinkle_phase: ((elapsed_s / 3600.0 * twinkle_rate as f64) % 1.0) as f32,
+                    twinkle_phase: twinkle_phase(elapsed_s, twinkle_rate),
                     parallax: [cursor.0 * dpr, cursor.1 * dpr],
                     active_rects: active,
                 };
@@ -452,6 +455,13 @@ fn run() -> Result<()> {
     // EGL resources must go before the connection that owns the window they bind.
     drop(display);
     outcome
+}
+
+/// Each octave wraps on its own, exactly as `tickTwinkle()` does: wrapping one
+/// phase and scaling it in the shader would jump at every wrap.
+fn twinkle_phase(elapsed_s: f64, rate: f32) -> [f32; 3] {
+    let t = elapsed_s / 3600.0 * rate as f64;
+    TWINKLE_RATES.map(|r| ((t * r) % 1.0) as f32)
 }
 
 /// A failed write costs continuity, never the session: the wallpaper keeps running.

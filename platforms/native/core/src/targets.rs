@@ -1,9 +1,10 @@
-//! Render targets and static textures: RGBA16F, LINEAR, CLAMP_TO_EDGE, no mips,
-//! no depth. Bake targets are framebuffer-sized; overscan lives in the sampling domain.
+//! Render targets and static textures: half-float, CLAMP_TO_EDGE, no mips, no
+//! depth, format and filter per the manifest. Bake targets are framebuffer-sized;
+//! overscan lives in the sampling domain.
 
 use glow::HasContext;
 
-use crate::bundle::{Filter, TargetSpec, TextureSpec, Wrap};
+use crate::bundle::{Filter, PixelFormat, TargetSpec, TextureSpec, Wrap};
 use crate::frame::check_errors;
 use crate::{Error, Result};
 
@@ -14,6 +15,15 @@ pub struct RenderTarget {
     pub scale: f32,
     pub width: i32,
     pub height: i32,
+    format: PixelFormat,
+}
+
+/// `(internal format, format)` for `tex_image_2d`; the type is always HALF_FLOAT.
+fn gl_format(format: PixelFormat) -> (i32, u32) {
+    match format {
+        PixelFormat::Rgba16f => (glow::RGBA16F as i32, glow::RGBA),
+        PixelFormat::R16f => (glow::R16F as i32, glow::RED),
+    }
 }
 
 /// The half-float color-buffer gate, checked before a single target is allocated.
@@ -57,6 +67,7 @@ impl RenderTarget {
         })?;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
 
+        let (internal, layout) = gl_format(spec.format);
         let mut textures = Vec::with_capacity(spec.attachments);
         let mut draw_buffers = Vec::with_capacity(spec.attachments);
         for i in 0..spec.attachments {
@@ -67,15 +78,15 @@ impl RenderTarget {
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGBA16F as i32,
+                internal,
                 width,
                 height,
                 0,
-                glow::RGBA,
+                layout,
                 glow::HALF_FLOAT,
                 glow::PixelUnpackData::Slice(None),
             );
-            set_sampling(gl, Filter::Linear, Wrap::Clamp);
+            set_sampling(gl, spec.filter, Wrap::Clamp);
             gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
                 glow::COLOR_ATTACHMENT0 + i as u32,
@@ -98,6 +109,7 @@ impl RenderTarget {
                 scale: spec.scale,
                 width,
                 height,
+                format: spec.format,
             };
             target.delete(gl);
             return Err(format!(
@@ -114,6 +126,7 @@ impl RenderTarget {
             scale: spec.scale,
             width,
             height,
+            format: spec.format,
         })
     }
 
@@ -131,16 +144,17 @@ impl RenderTarget {
         // Anything already queued would otherwise be blamed on this reallocation.
         let _ = check_errors(gl, "before target reallocation");
 
+        let (internal, layout) = gl_format(self.format);
         for texture in &self.textures {
             gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGBA16F as i32,
+                internal,
                 width,
                 height,
                 0,
-                glow::RGBA,
+                layout,
                 glow::HALF_FLOAT,
                 glow::PixelUnpackData::Slice(None),
             );

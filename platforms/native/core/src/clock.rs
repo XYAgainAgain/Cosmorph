@@ -29,8 +29,8 @@ impl Clock {
         (self.saved_t + elapsed.max(0.0)) % T_WRAP
     }
 
-    pub fn tev(&self, elapsed: f64, rate: f32) -> f32 {
-        (self.now(elapsed) / 3600.0 * rate as f64) as f32
+    pub fn tev(&self, elapsed: f64, rate: f32) -> f64 {
+        self.now(elapsed) / 3600.0 * rate as f64
     }
 }
 

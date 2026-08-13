@@ -3,7 +3,7 @@
    Globular and open are the same code under different parameters. */
 
 import {
-  Fn, float, vec2, vec3, clamp, dot, floor, mix, smoothstep, step,
+  Fn, float, vec2, vec3, vec4, clamp, dot, floor, mix, smoothstep, step,
 } from 'three/tsl';
 import { hash3, fbm3o2, CELL_BIAS } from './noise.js';
 import { rot2 } from './sdf.js';
@@ -69,7 +69,9 @@ function membersWith(sky, pxPerUnit, U, F, clumped = true) {
   const g = clusterLocal(sky, U).mul(cells).toVar();
   const base = floor(g).toVar();
   const pxScale = pxPerUnit.div(cells).toVar();
-  const acc = vec3(0).toVar();
+  /* rgb is member light, alpha their raw luminance: resolved members are stars,
+     so they stamp the same twinkle amplitude the faint field does. */
+  const acc = vec4(0.0).toVar();
 
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
@@ -121,7 +123,8 @@ function membersWith(sky, pxPerUnit, U, F, clumped = true) {
       const col = pop.mul(mix(vec3(1.06, 1.0, 0.94), vec3(0.94, 1.0, 1.06), h2.y));
       const colS = mix(vec3(1.0), col, smoothstep(0.0, 0.12, rel));
 
-      acc.addAssign(colS.mul(L.mul(energy).mul(psf).mul(present)));
+      const amp = L.mul(energy).mul(psf).mul(present);
+      acc.addAssign(vec4(colS.mul(amp), amp));
     }
   }
   return acc;
@@ -130,7 +133,7 @@ function membersWith(sky, pxPerUnit, U, F, clumped = true) {
 /* Granular sparkle where members start to resolve. Spatially stable by
    construction: cell-hash positions, no time term anywhere in this module. */
 export function clusterMembers(sky, pxPerUnit, U, clumped = true) {
-  return membersWith(sky, pxPerUnit, U, clusterFrame(U), clumped);
+  return membersWith(sky, pxPerUnit, U, clusterFrame(U), clumped).rgb;
 }
 
 /* Membership mask in [0,1] for the faint-star layer to fold into its density.
@@ -146,7 +149,9 @@ export function buildClusterNodes(skyU, pxPerUnit, U, { clumped = true } = {}) {
   const continuum = Fn(() => {
     const F = clusterFrame(U);
     const glow = profileAt(ellipseRadius(clusterLocal(skyU, U), F.sq), F, U);
-    return U.uCluTint.mul(glow.mul(U.uCluLum)).add(membersWith(skyU, pxPerUnit, U, F, clumped));
+    const mem = membersWith(skyU, pxPerUnit, U, F, clumped).toVar();
+    /* The fused glow is unresolved light, so only the members reach alpha */
+    return vec4(U.uCluTint.mul(glow.mul(U.uCluLum)).add(mem.rgb), mem.a);
   })();
   return { continuum };
 }

@@ -49,8 +49,9 @@ export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
     const ifnCol = vec3(0.16, 0.14, 0.12).mul(ifn.mul(U.uIfnAmp));
 
     /* The star grids belong to the stars entity and only ride here because they
-       share the RT, so a duplicate IFN must not stamp a second copy of them. */
-    if (!faint) return vec4(ifnCol, 1.0);
+       share the RT, so a duplicate IFN must not stamp a second copy of them.
+       Alpha is the star-luminance stamp compose twinkles from; gas writes none. */
+    if (!faint) return vec4(ifnCol, 0.0);
 
     /* Galactic-plane gradient + fbm clumping; uniform scatter is the tell */
     const bandD = abs(skyU.y.sub(skyU.x.mul(U.uBandTilt)).sub(U.uBandY));
@@ -58,15 +59,14 @@ export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
     const clump = fbm3o2(vec3(skyU.mul(2.6), 0.0).add(U.uClumpOff)).mul(0.9).add(0.55);
     const density = U.uStarDensity.mul(grad).mul(clump).min(1.0);
 
-    const twHalf = U.uTwinkleDepth.mul(0.5);
     const cellsA = U.uStarDensity.mul(0.0).add(42.0).toVar();
     const scaleA = U.uStarDensity.mul(0.0).add(1.7).toVar();
     const cellsB = U.uStarDensity.mul(0.0).add(14.0).toVar();
     const scaleB = U.uStarDensity.mul(0.0).add(4.0).toVar();
-    const stars = faintStarLayer(skyU, pxPerUnit, cellsA, density, scaleA, U.uStarOffA, U.uTwinklePhase, twHalf)
-      .add(faintStarLayer(skyU, pxPerUnit, cellsB, density.mul(0.55), scaleB, U.uStarOffB, U.uTwinklePhase, twHalf));
+    const stars = faintStarLayer(skyU, pxPerUnit, cellsA, density, scaleA, U.uStarOffA)
+      .add(faintStarLayer(skyU, pxPerUnit, cellsB, density.mul(0.55), scaleB, U.uStarOffB));
 
-    return vec4(ifnCol.add(stars), 1.0);
+    return vec4(ifnCol.add(stars.rgb), stars.a);
   })();
 }
 

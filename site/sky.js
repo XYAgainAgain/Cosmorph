@@ -53,17 +53,17 @@ async function tryEngine(config, forceGL) {
   const baked = bakedOverride ?? !LIVE;
   if (forceGL) {
     return createSky2D({
-      canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW, baked,
+      canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW, baked, crossfade: true,
     });
   }
   try {
     return await createSky2D({
-      canvas: freshCanvas(), config, maxParallaxPx: MAX_THROW, baked,
+      canvas: freshCanvas(), config, maxParallaxPx: MAX_THROW, baked, crossfade: true,
     });
   } catch (err) {
     console.warn('Cosmorph: WebGPU path failed, retrying on WebGL2.', err);
     return createSky2D({
-      canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW, baked,
+      canvas: freshCanvas(), config, forceWebGL: true, maxParallaxPx: MAX_THROW, baked, crossfade: true,
     });
   }
 }
@@ -109,6 +109,7 @@ function resizeNow() {
 function bursting(now) {
   return (now - lastInput) < STILL_MS
     || fadesActive > 0
+    || sky?.fadeActive
     || Math.hypot(target.x - cursor.x, target.y - cursor.y) > SETTLE_PX;
 }
 

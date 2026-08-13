@@ -557,6 +557,13 @@ function renderEntityDetail() {
     <button class="icon-btn" type="button" data-act="remove" aria-label="Remove ${name} from the scene">${TRASH}</button>
   </div>`;
 
+  /* Say the demotion out loud: only two galaxies swirl live in the composite,
+     and the rest turn in steps whenever their plane next rebakes. */
+  const bag = host.instances?.[entity.type]?.[k];
+  const demoted = bag?.gxSpins && !bag.gxSwirl
+    ? '<p class="hint">Spin frozen into the bake: two galaxies swirl live at most, so this one turns in visible steps on rebake, at a floored interval.</p>'
+    : '';
+
   const byGroup = new Map(spec.groups.map((g) => [g, []]));
   for (const param of spec.params) {
     if (param.tier > ui.tier) continue;
@@ -602,7 +609,7 @@ function renderEntityDetail() {
     </details>`;
   }).join('');
 
-  keepScroll(() => { dom.detail.innerHTML = head + groups; });
+  keepScroll(() => { dom.detail.innerHTML = head + demoted + groups; });
 }
 
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };

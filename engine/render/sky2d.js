@@ -35,6 +35,32 @@ import { buildDustPass } from './dustpass.js';
 import { buildComposeNodes } from '../shaders/tsl/compose.js';
 import { buildBakedComposeNodes } from '../shaders/tsl/compose-baked.js';
 import { PLANE_NAMES, planeFor, RATE_FLOOR, REBAKE_EPS } from './planes.js';
+import {
+  SPIN_CLOCK_H, SPIN_MAX_LAYERS, SPIN_REBAKE_PX, SPIN_SAT_H,
+  spinDriftPx, spinPhaseAt, spinWrap,
+} from '../shaders/tsl/spin.js';
+
+/* Real milliseconds of blend after a scheduled rebake. It hides morph steps
+   while finishing well inside the fastest useful rebake cadence. */
+const CROSSFADE_MS = 2000;
+const MAX_FADE_STEP = 1 / 6;
+/* The rate lattice spans the raw spin clock, independent of tevWrap. */
+const SPIN_STEP = (Math.PI * 2) / SPIN_CLOCK_H;
+
+const snapSpinRate = (rate) => Math.round(rate / SPIN_STEP) * SPIN_STEP;
+const wrapSpinPhase = (phase) => ((phase + Math.PI) % (Math.PI * 2) + Math.PI * 2)
+  % (Math.PI * 2) - Math.PI;
+
+function spinRateUniform(rate) {
+  const node = uniform(snapSpinRate(rate));
+  let snapped = node.value;
+  Object.defineProperty(node, 'value', {
+    configurable: true,
+    get: () => snapped,
+    set: (next) => { snapped = snapSpinRate(next); },
+  });
+  return node;
+}
 
 /* Narrowband palettes as mat3 rows R/G/B over vec3(Hα, OIII, SII).
    Community default is natural HOO; SHO reads dated to many eyes now. */
@@ -66,6 +92,7 @@ const DEFAULTS = {
     density: 0.75, bandY: 0.32, bandTilt: -0.28, bandGain: 0.45, bandWidth: 0.55,
     count: 84, twinkleDepth: 0.3, twinkleRate: 1800, spikeAngle: 0.35,
     spikeJitter: 0.6, spikeThreshold: 0.82, gain: 1.0,
+    twinkleFieldDepth: 0.3, twinkleWave: 12,
   },
   darkDust: {
     freq: 4.6, angle: 0.62, aniso: 6.0, warp: 0.3, detail: 0.45,
@@ -123,7 +150,6 @@ const RATE_PARAMS = {
   reflection: ['morph'],
   searchlight: ['morphRate', 'spin'],
   shadowFan: ['morphRate', 'rotRate'],
-  galaxies: ['morphRate', 'spin', 'starsSpin'],
 };
 
 /* Marched dust carries its own defaults object rather than a DEFAULTS entry,
@@ -142,6 +168,10 @@ const planeRate = (type, e) => {
 /* Must match the overscan default in entities/stars.js: the bright tier tiles
    at exactly the generation span, so a mismatch would show a seam under pan. */
 const BRIGHT_OVERSCAN = 0.06;
+
+/* Temporal twinkle octaves. Golden and silver ratios: irrational multiples of
+   the base rate never re-align, so the scintillation never visibly loops. */
+const TWINKLE_RATES = [1, 1.6180339887, 2.4142135624];
 
 /* Normalizes a readback to tight, top-down rows, which is what ImageData and
    every encoder expect. WebGPU pads each row to 256 bytes; WebGL2 hands back
@@ -178,6 +208,7 @@ function offsetFrom(seed, salt) {
 
 export async function createSky2D({
   canvas, config, forceWebGL = false, maxParallaxPx = 14, baked = false,
+  crossfade = false,
 }) {
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, forceWebGL });
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
@@ -275,6 +306,10 @@ export async function createSky2D({
     return new THREE.Vector3(Math.cos(theta) * rad, Math.sin(theta) * rad, 0.5 + lensRng.next());
   });
 
+  /* uTev's wrap scales with evolution rate so saturation stays open; the
+     pattern-speed lattice still spans the raw 4096 h clock. */
+  const tevWrap = spinWrap(config.evolution?.rate ?? 1);
+
   const U = {
     uResolution: uniform(new THREE.Vector2(1, 1)),
     uAspect: uniform(1),
@@ -283,6 +318,7 @@ export async function createSky2D({
     uParallax: uniform(new THREE.Vector2(0, 0)),
     uCamera: uniform(new THREE.Vector2(camX, camY)),
     uTev: uniform(0),
+    uTevWrap: uniform(tevWrap),
 
     uStarDensity: uniform(P.stars.density),
     uBandY: uniform(P.stars.bandY),
@@ -293,7 +329,11 @@ export async function createSky2D({
     uStarOffA: uniform(offsetFrom(byType.stars?.seed ?? config.seed, 37)),
     uStarOffB: uniform(offsetFrom(byType.stars?.seed ?? config.seed, 41)),
     uTwinkleDepth: uniform(P.stars.twinkleDepth),
-    uTwinklePhase: uniform(0),
+    uTwinkleFieldDepth: uniform(P.stars.twinkleFieldDepth),
+    uTwinkleWave: uniform(P.stars.twinkleWave),
+    /* Three independently CPU-wrapped phases, not one scaled three ways: an
+       incommensurate rate applied in the shader would jump at every wrap. */
+    uTwinklePhase: uniform(new THREE.Vector3(0, 0, 0)),
     uSpikeAngle: uniform(P.stars.spikeAngle),
     uSpikeJitter: uniform(P.stars.spikeJitter),
     uSpikeThreshold: uniform(P.stars.spikeThreshold),
@@ -1115,7 +1155,17 @@ export async function createSky2D({
       uGxPa: uniform(g.pa),
       uGxWind: uniform(g.wind),
       uGxPhase: uniform(g.phase),
-      uGxSpin: uniform(g.spin),
+      /* Silent engine-side snapping keeps the 4096 h wrap on a full-turn lattice. */
+      uGxSpin: spinRateUniform(g.spin),
+      uGxLead: uniform(g.lead),
+      uGxLeadR: uniform(Math.max(g.leadR, 1e-3)),
+      /* Ωp·T wrapped to (−π, π] on the CPU each frame, and its value at this
+         galaxy's last bake. The raw product overruns float32 at a high rate. */
+      uGxSpinPhase: uniform(0),
+      uGxBakeSpinPhase: uniform(0),
+      /* The uTev this galaxy's plane was last baked at; compose warps the
+         saturation term against it, so a fresh bake is the identity. */
+      uGxBakeTev: uniform(0),
       uGxArmCount: uniform(Math.min(Math.max(armCount, 1), ARM_MAX)),
       uGxArmAsym: uniform(clamp01(armAsym)),
       uGxArmAmt: uniform(clamp01(g.armAmt)),
@@ -1207,9 +1257,6 @@ export async function createSky2D({
       uGxsWind: uniform(g.starsWind),
       /* A circular orbit set has no arms to crowd into; 1 is the honest off */
       uGxsAxis: uniform(Math.min(Math.max(g.starsAxis, 0.05), 1)),
-      uGxsSpin: uniform(g.starsSpin),
-      /* Negative would speed the outside up and unwind the pattern backwards */
-      uGxsRotExp: uniform(Math.max(g.starsRotExp, 0)),
       uGxsZH: uniform(Math.max(g.starsZH, 1e-4)),
       uGxsSize: uniform(Math.max(g.starsSize, 0.05)),
       uGxsGain: uniform(Math.max(g.starsGain, 0)),
@@ -1217,23 +1264,28 @@ export async function createSky2D({
       /* Sprite sizes are device pixels, so this is what resize pokes instead of
          rebuilding every instance buffer the way the bright tier has to. */
       uGxsDpr: uniform(1),
+      /* 1 only where a frame is composed live. A bake must stay amplitude-only,
+         so a baked sprite's twinkle comes from compose via its Astar stamp. */
+      uGxsTwinkle: uniform(baked ? 0 : 1),
     }, (b, aspect) => {
       b.uGxCenter.value.set(g.center[0] * aspect, g.center[1]);
       b.uGxfAt.value.set(g.clusterAt[0] * aspect, g.clusterAt[1]);
     });
     /* look.bar is derived, not stored: the bar chain is a build gate, so a scene
        at the barAmt=0 default compiles a graph with no bar math in it at all. */
+    const spiral = g.showpiece !== false && !look.ring && !look.shell;
+    const spins = spiral && (bag.uGxSpin.value !== 0 || bag.uGxLead.value !== 0);
     bag.gxOpts = {
       field: g.field !== false,
       showpiece: g.showpiece !== false,
+      spins,
       look: {
         ...look, bar: g.barAmt > 0, spurs: g.spurAmt > 0,
         fil: g.laneFil > 0 || g.laneWob > 0,
       },
     };
-    /* Sprite tier follows the spiral gates: nested ellipses describe a disk,
-       not a shell or a detached ring. */
-    const spiral = bag.gxOpts.showpiece && !look.ring && !look.shell;
+    /* Nested sprite ellipses describe a spiral disk, not a shell or ring. */
+    bag.gxSpins = spins;
     bag.gxsCount = spiral ? Math.max(0, Math.round(g.starsN) || 0) : 0;
     /* Linked sprite arms take pitch, phase, and rotation from the glow's
        pattern uniforms; a build gate, since it swaps the tilt chain. */
@@ -1245,6 +1297,21 @@ export async function createSky2D({
         count: bag.gxsCount, bulgeFrac: clamp01(g.starsBulgeFrac),
       })
       : null;
+    bag.gxSpinOffset = 0;
+    bag.gxSpinTev = 0;
+    const spinNode = bag.uGxSpin;
+    let snapped = spinNode.value;
+    Object.defineProperty(spinNode, 'value', {
+      configurable: true,
+      get: () => snapped,
+      set: (next) => {
+        const previous = snapped;
+        snapped = snapSpinRate(next);
+        if (snapped === previous) return;
+        bag.gxSpinOffset = wrapSpinPhase(bag.gxSpinOffset
+          + spinPhaseAt(previous, bag.gxSpinTev) - spinPhaseAt(snapped, bag.gxSpinTev));
+      },
+    });
     return bag;
   }
 
@@ -1460,6 +1527,12 @@ export async function createSky2D({
   const wrbInst = featureEnts.wrbubble.map((e, k) => wrbubbleBag(e, k));
   const cluInst = featureEnts.clusters.map((e, k) => clustersBag(e, k));
   const gxInst = featureEnts.galaxies.map((e, k) => galaxiesBag(e, k));
+  /* A third spinning showpiece keeps its law in the bake and turns on rebakes. */
+  let swirlBudget = SPIN_MAX_LAYERS;
+  for (const bag of gxInst) {
+    bag.gxSwirl = bag.gxSpins && swirlBudget > 0;
+    if (bag.gxSwirl) swirlBudget -= 1;
+  }
   const ionInst = featureEnts.ionCloud.map((e, k) => ionCloudBag(e, k));
   const shapeInst = featureEnts.shape.map((e, i) => shapeBag(e, shapeIdx[i]));
   const dustInst = dustEnts.map((e, k) => dustBag(e, k));
@@ -1493,6 +1566,18 @@ export async function createSky2D({
     return scene;
   }
 
+  /* Additive in color AND alpha. THREE.AdditiveBlending scales src RGB by the
+     fragment's alpha, which now carries star amplitude instead of a flat 1. */
+  function starAdditive(mat) {
+    mat.blending = THREE.CustomBlending;
+    mat.blendEquation = THREE.AddEquation;
+    mat.blendSrc = THREE.OneFactor;
+    mat.blendDst = THREE.OneFactor;
+    mat.blendEquationAlpha = THREE.AddEquation;
+    mat.blendSrcAlpha = THREE.OneFactor;
+    mat.blendDstAlpha = THREE.OneFactor;
+  }
+
   function disposePass(scene) {
     const quad = scene?.userData.quad;
     if (!quad) return;
@@ -1506,6 +1591,24 @@ export async function createSky2D({
     magFilter: THREE.LinearFilter,
     depthBuffer: false,
   };
+  /* Single-channel and point-sampled: the bright tier wants the conservative max
+     a lane's tau was reduced with, not a filtered average across its edge. */
+  const occOpts = {
+    type: THREE.HalfFloatType,
+    format: THREE.RedFormat,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    depthBuffer: false,
+  };
+  /* One scene-wide spare pair bounds peak fade cost at two full-span targets;
+     every plane not holding it keeps uFade at 1 and discards its read. */
+  const fadeRT = crossfade && baked
+    ? { a: new THREE.RenderTarget(2, 2, rtOpts), b: new THREE.RenderTarget(2, 2, rtOpts) }
+    : null;
+  let fadeSrc = null;
+  let fadeScene = null;
+  let fading = null;
+  let fadeStart = 0;
   const lineRT = new THREE.RenderTarget(2, 2, rtOpts);
   const contRT = new THREE.RenderTarget(2, 2, rtOpts);
   const brightRT = new THREE.RenderTarget(2, 2, rtOpts);
@@ -1554,10 +1657,12 @@ export async function createSky2D({
     lineNode = lineNode.add(vec4(buildEchoNodes(skyAtDepth(bag.uDepthEcho, U.uDepthLine), bag, bag.echoOpts).line, 0.0));
   }
 
+  /* Alpha across this whole sum is the star-luminance stamp compose twinkles
+     from. Only the faint-star IFN stamps it; a duplicate returns alpha 0. */
   let contNode = buildContinuumNodes(skyU, U.uPxPerUnit, ifnInst[0], ifnInst[0].ifnOpts);
   for (const bag of ifnInst.slice(1)) {
-    contNode = contNode.add(vec4(buildContinuumNodes(
-      skyAtDepth(bag.uDepthIfn, U.uDepthCont), U.uPxPerUnit, bag, bag.ifnOpts).rgb, 0.0));
+    contNode = contNode.add(buildContinuumNodes(
+      skyAtDepth(bag.uDepthIfn, U.uDepthCont), U.uPxPerUnit, bag, bag.ifnOpts));
   }
   for (const bag of reflInst) {
     contNode = contNode.add(vec4(buildReflectionNodes(skyAtDepth(bag.uDepthRefl, U.uDepthCont), bag).continuum, 0.0));
@@ -1587,9 +1692,11 @@ export async function createSky2D({
   /* Starlight, resolved or not, carries no line signature: both of these write
      continuum only, and the band's rift reaches compose as optical depth. */
   for (const bag of cluInst) {
-    contNode = contNode.add(vec4(buildClusterNodes(
-      skyAtDepth(bag.uDepthClu, U.uDepthCont), U.uPxPerUnit, bag, bag.cluOpts).continuum, 0.0));
+    contNode = contNode.add(buildClusterNodes(
+      skyAtDepth(bag.uDepthClu, U.uDepthCont), U.uPxPerUnit, bag, bag.cluOpts).continuum);
   }
+  /* Alpha 0 deliberately: a starcloud is unresolved integrated light, and
+     extended sources do not scintillate. */
   for (const bag of scInst) {
     contNode = contNode.add(vec4(buildStarcloudNodes(
       skyAtDepth(bag.uDepthSC, U.uDepthCont), bag, bag.scOpts).continuum, 0.0));
@@ -1608,7 +1715,7 @@ export async function createSky2D({
     mat.positionNode = nodes.positionNode;
     mat.fragmentNode = nodes.fragmentNode;
     mat.transparent = true;
-    mat.blending = THREE.AdditiveBlending;
+    starAdditive(mat);
     mat.depthTest = false;
     mat.depthWrite = false;
 
@@ -1835,10 +1942,6 @@ export async function createSky2D({
     /* Same filter and order the live sprite meshes were built in, which is how
        a baked sprite mesh finds the geometry to share. */
     const gxSpriteBags = gxInst.filter((bag) => bag.gxsCount > 0);
-    /* Twinkle stays a live-tier effect: baked into a plane it would hard-snap
-       the whole faint field to an uncorrelated phase on every rebake. */
-    const bakedTwinkle = uniform(0);
-    nameUniforms({ uBakedTwinkle: bakedTwinkle }, 0);
     /* A render target samples back v-flipped, so reading the dust MRT from
        inside a bake has to undo that to land on the same overscanned texel. */
     const bakeUV = vec2(uv().x, uv().y.oneMinus());
@@ -1847,12 +1950,54 @@ export async function createSky2D({
        plane owns it; a second claimant would double-count its tau. */
     const dustIdx = groups.findIndex((g) => (g.by.dustMarch?.length ?? 0) > 0);
 
+    /* Compose warps a whole plane texture, so a bucket-shared swirl galaxy
+       would co-rotate its plane-mates and double-swirl. Each swirl galaxy
+       therefore gets its own plane, sharing the bucket's depth uniform: plane
+       count is buckets plus swirl layers, not a fixed four. */
+    const specs = [];
     groups.forEach((g, idx) => {
       if (g.count === 0) return;
-      const by = g.by;
-      const uDepth = planeU[idx];
-      uDepth.value = g.sum / g.count;
-      const hasDust = idx === dustIdx;
+      planeU[idx].value = g.sum / g.count;
+      const gx = g.by.galaxies ?? [];
+      const sharedOpts = new Map();
+      for (const bag of gx) {
+        if (!bag.gxSwirl) continue;
+        const k = gxInst.indexOf(bag);
+        specs.push({
+          name: `${PLANE_NAMES[idx]}Swirl${k}`,
+          idx,
+          by: { galaxies: [bag] },
+          /* The warp turns the whole plane, and the background field is
+             sky-fixed, so only the showpiece may ride the swirl plane. */
+          gxOpts: new Map([[bag, { ...bag.gxOpts, field: false }]]),
+          score: planeRate('galaxies', featureEnts.galaxies[k] ?? {}),
+          hasDust: false,
+        });
+      }
+      const shared = { ...g.by };
+      /* A swirl bag stays here for its field alone; its showpiece left. */
+      const rest = gx.filter((bag) => !bag.gxSwirl || bag.gxOpts.field);
+      for (const bag of rest) {
+        if (bag.gxSwirl) sharedOpts.set(bag, { ...bag.gxOpts, showpiece: false });
+      }
+      if (rest.length > 0) shared.galaxies = rest;
+      else delete shared.galaxies;
+      if (Object.keys(shared).length === 0) return;
+      specs.push({
+        name: PLANE_NAMES[idx],
+        idx,
+        by: shared,
+        gxOpts: sharedOpts,
+        score: g.score,
+        hasDust: idx === dustIdx,
+      });
+    });
+
+    specs.forEach((spec) => {
+      const by = spec.by;
+      const uDepth = planeU[spec.idx];
+      const hasDust = spec.hasDust;
+      const gxOptsOn = (bag) => spec.gxOpts?.get(bag) ?? bag.gxOpts;
 
       /* Plain skyU, never skyAtDepth: a bake has to be valid at any parallax,
          and the composite is what applies this plane's coefficient. */
@@ -1864,7 +2009,7 @@ export async function createSky2D({
       for (const bag of by.jets ?? []) lineSum = lineSum.add(buildJetNodes(skyU, bag, bag.jetOpts).line);
       for (const bag of by.wrbubble ?? []) lineSum = lineSum.add(buildWrBubbleNodes(skyU, bag, bag.wrbOpts).line);
       for (const bag of by.galaxies ?? []) {
-        const nodes = buildGalaxyNodes(skyU, bag, bag.gxOpts);
+        const nodes = buildGalaxyNodes(skyU, bag, gxOptsOn(bag));
         if (nodes.line) lineSum = lineSum.add(nodes.line);
       }
       for (const bag of by.ionCloud ?? []) lineSum = lineSum.add(buildIonCloudNodes(skyU, bag, bag.ionOpts).line);
@@ -1890,10 +2035,13 @@ export async function createSky2D({
       }
 
       let contSum = vec3(0.0);
+      /* Amplitude, never phase: the bake stores raw star luminance and compose
+         owns the modulation, so a rebake cannot snap the field's twinkle. */
+      let starSum = float(0.0);
       for (const bag of by.ifn ?? []) {
-        const steady = Object.create(bag);
-        steady.uTwinklePhase = bakedTwinkle;
-        contSum = contSum.add(buildContinuumNodes(skyU, U.uPxPerUnit, steady, bag.ifnOpts).rgb);
+        const c = buildContinuumNodes(skyU, U.uPxPerUnit, bag, bag.ifnOpts).toVar();
+        contSum = contSum.add(c.rgb);
+        starSum = starSum.add(c.a);
       }
       for (const bag of by.reflection ?? []) contSum = contSum.add(buildReflectionNodes(skyU, bag).continuum);
       for (const bag of by.echo ?? []) contSum = contSum.add(buildEchoNodes(skyU, bag, bag.echoOpts).continuum);
@@ -1902,26 +2050,45 @@ export async function createSky2D({
       for (const bag of by.searchlight ?? []) contSum = contSum.add(buildSearchlightNodes(skyU, bag, bag.beamOpts).continuum);
       for (const bag of by.planetary ?? []) contSum = contSum.add(buildPlanetaryNodes(skyU, bag, bag.pnOpts).continuum);
       for (const bag of by.wrbubble ?? []) contSum = contSum.add(buildWrBubbleNodes(skyU, bag, bag.wrbOpts).continuum);
-      for (const bag of by.galaxies ?? []) contSum = contSum.add(buildGalaxyNodes(skyU, bag, bag.gxOpts).continuum);
+      for (const bag of by.galaxies ?? []) contSum = contSum.add(buildGalaxyNodes(skyU, bag, gxOptsOn(bag)).continuum);
       for (const bag of by.clusters ?? []) {
-        contSum = contSum.add(buildClusterNodes(skyU, U.uPxPerUnit, bag, bag.cluOpts).continuum);
+        const c = buildClusterNodes(skyU, U.uPxPerUnit, bag, bag.cluOpts).continuum.toVar();
+        contSum = contSum.add(c.rgb);
+        starSum = starSum.add(c.a);
       }
       for (const bag of by.starcloud ?? []) contSum = contSum.add(buildStarcloudNodes(skyU, bag, bag.scOpts).continuum);
 
-      /* RT B's alpha carries only the occluding wisps: the bright tier reads it
-         back per star, and it must not see the rest of the plane's tau. */
+      /* Occluding-wisp tau rides its own quarter-res target so RT B's alpha can
+         carry star amplitude, which needs full res as the ~169 vertex taps do not. */
       const occluding = (by.darkDust ?? []).filter((bag) => bag.wispOcclude);
-      let occTau = float(0);
-      for (const bag of occluding) occTau = occTau.add(wispTau(skyU, bag));
+      let occRT = null;
+      let occScene = null;
+      if (occluding.length > 0) {
+        /* MAX over center plus four stratified taps prevents bright PSF leaks;
+           over-occluding a lane edge is harmless. */
+        const sub = float(1.0).div(U.uPxPerUnit);
+        const tauAt = (at) => {
+          let t = wispTau(at, occluding[0]);
+          for (const bag of occluding.slice(1)) t = t.add(wispTau(at, bag));
+          return t;
+        };
+        let occTau = tauAt(skyU);
+        for (const [ox, oy] of [[-3, -1], [1, -3], [3, 1], [-1, 3]]) {
+          occTau = occTau.max(tauAt(skyU.add(vec2(sub.mul(ox), sub.mul(oy)))));
+        }
+        occRT = new THREE.RenderTarget(2, 2, occOpts);
+        occScene = fullscreenPass(vec4(occTau, 0.0, 0.0, 1.0));
+      }
 
       const rtA = new THREE.RenderTarget(2, 2, rtOpts);
       const rtB = new THREE.RenderTarget(2, 2, rtOpts);
       const sceneA = fullscreenPass(vec4(lineSum, tauSum));
-      const sceneB = fullscreenPass(vec4(contSum, occTau));
+      const sceneB = fullscreenPass(vec4(contSum, starSum));
       const gxsMeshes = [];
 
       for (const bag of by.galaxies ?? []) {
-        if (!bag.gxsCount) continue;
+        /* Sprites belong to the showpiece, so a field-only re-entry skips them. */
+        if (!bag.gxsCount || !gxOptsOn(bag).showpiece) continue;
         /* No parallax pre-shift in a bake, or the sprites shear against the
            glow every time the plane rebakes at a new pointer offset. */
         const nodes = buildGalaxyStarNodes(bag, { ...bag.gxsOpts, preShift: false });
@@ -1929,15 +2096,7 @@ export async function createSky2D({
         mat.positionNode = nodes.positionNode;
         mat.fragmentNode = nodes.fragmentNode;
         mat.transparent = true;
-        /* Additive color like the live tier, but alpha passes through
-           untouched: sprite alpha would otherwise corrupt the occluder tau. */
-        mat.blending = THREE.CustomBlending;
-        mat.blendEquation = THREE.AddEquation;
-        mat.blendSrc = THREE.OneFactor;
-        mat.blendDst = THREE.OneFactor;
-        mat.blendEquationAlpha = THREE.AddEquation;
-        mat.blendSrcAlpha = THREE.ZeroFactor;
-        mat.blendDstAlpha = THREE.OneFactor;
+        starAdditive(mat);
         mat.depthTest = false;
         mat.depthWrite = false;
         const mesh = new THREE.Mesh(gxStarMeshes[gxSpriteBags.indexOf(bag)].geometry, mat);
@@ -1965,20 +2124,29 @@ export async function createSky2D({
       }
 
       builtPlanes.push({
-        name: PLANE_NAMES[idx],
+        name: spec.name,
         uDepth,
+        /* 1 is "no previous generation": compose collapses to the current bake. */
+        uFade: uniform(1),
         rtA,
         rtB,
         rimRT,
+        occRT,
         sceneA,
         sceneB,
         rimScene,
+        occScene,
         gxsMeshes,
+        /* Swirl-carried here, spin-priced in both lists: a demoted galaxy still
+           has to trip its plane's rebake or its spin simply stops. */
+        swirl: (by.galaxies ?? []).filter((bag) => bag.gxSwirl && gxOptsOn(bag).showpiece),
+        spinBags: (by.galaxies ?? []).filter((bag) => bag.gxSpins && gxOptsOn(bag).showpiece),
         hasDust,
-        hasOccluder: occluding.length > 0,
-        score: g.score,
+        hasOccluder: occRT !== null,
+        score: spec.score,
         types: Object.keys(by),
         bakedTev: null,
+        lastSoftBake: -Infinity,
         dirty: true,
       });
     });
@@ -1993,11 +2161,11 @@ export async function createSky2D({
           .sub(0.5).div(U.uMarginScale).add(0.5);
         const at = vec2(p.x, p.y.oneMinus());
         /* level() clones the node and drops the name, so it is set last */
-        const bName = (pl) => `texPlaneB${builtPlanes.indexOf(pl)}`;
-        let tau = texture(occPlanes[0].rtB.texture, at)
-          .level(float(0)).setName(bName(occPlanes[0])).a;
+        const oName = (pl) => `texPlaneOcc${builtPlanes.indexOf(pl)}`;
+        let tau = texture(occPlanes[0].occRT.texture, at)
+          .level(float(0)).setName(oName(occPlanes[0])).r;
         for (const pl of occPlanes.slice(1)) {
-          tau = tau.add(texture(pl.rtB.texture, at).level(float(0)).setName(bName(pl)).a);
+          tau = tau.add(texture(pl.occRT.texture, at).level(float(0)).setName(oName(pl)).r);
         }
         return exp(tau.negate().mul(WISP_SIGMA));
       };
@@ -2011,6 +2179,24 @@ export async function createSky2D({
       bakedBrightMat.depthWrite = false;
     }
 
+    if (fadeRT && builtPlanes.length > 0) {
+      /* The outgoing generation keeps its own bake reference, or the warp would
+         turn it by the incoming generation's delta and the blend would ghost. */
+      for (const bag of gxInst) {
+        if (!bag.gxSwirl) continue;
+        bag.uGxBakeTev2 = uniform(bag.uGxBakeTev.value);
+        bag.uGxBakeSpinPhase2 = uniform(bag.uGxBakeSpinPhase.value);
+        const view = Object.create(bag);
+        view.uGxBakeTev = bag.uGxBakeTev2;
+        view.uGxBakeSpinPhase = bag.uGxBakeSpinPhase2;
+        bag.prevView = view;
+      }
+      /* Same v-flip the dust MRT read needs: a render target sampled from inside
+         another render target pass comes back upside down. */
+      fadeSrc = texture(builtPlanes[0].rtA.texture, vec2(uv().x, uv().y.oneMinus()));
+      fadeScene = fullscreenPass(fadeSrc);
+    }
+
     const dustPlane = builtPlanes.find((pl) => pl.hasDust) ?? null;
     bakedComposeScene = fullscreenPass(buildBakedComposeNodes({
       planes: builtPlanes.map((pl) => ({
@@ -2018,6 +2204,15 @@ export async function createSky2D({
         texB: pl.rtB.texture,
         texRim: pl.rimRT ? pl.rimRT.texture : null,
         uDepth: pl.uDepth,
+        swirl: pl.swirl,
+        fade: fadeRT
+          ? {
+            texA2: fadeRT.a.texture,
+            texB2: fadeRT.b.texture,
+            uFade: pl.uFade,
+            swirlPrev: pl.swirl.map((bag) => bag.prevView),
+          }
+          : null,
       })),
       brightTex: brightRT.texture,
       U,
@@ -2062,8 +2257,13 @@ export async function createSky2D({
       pl.rtA.setSize(w, h);
       pl.rtB.setSize(w, h);
       pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)));
+      pl.occRT?.setSize(Math.max(1, Math.ceil(w / 4)), Math.max(1, Math.ceil(h / 4)));
+      pl.uFade.value = 1;
       pl.dirty = true;
     }
+    fadeRT?.a.setSize(w, h);
+    fadeRT?.b.setSize(w, h);
+    fading = null;
 
     const aspect = cssW / cssH;
     U.uResolution.value.set(w, h);
@@ -2078,11 +2278,31 @@ export async function createSky2D({
     rebuildBright();
   }
 
+  /* Real session time, not tev: twinkle is atmospheric, and a high evolution
+     rate would strobe it. Each octave wraps on its own so sin arguments stay
+     small and no rate discontinuity survives the wrap. */
+  function tickTwinkle() {
+    const t = (performance.now() / 3.6e6) * P.stars.twinkleRate;
+    U.uTwinklePhase.value.set(
+      (t * TWINKLE_RATES[0]) % 1, (t * TWINKLE_RATES[1]) % 1, (t * TWINKLE_RATES[2]) % 1);
+  }
+
+  /* Delivered prewrapped so the shader never multiplies a rate by a six-figure
+     clock; the phase is only ever applied through a 2π-periodic rotation. */
+  function tickSpin(tevHours) {
+    for (const bag of gxInst) {
+      bag.gxSpinTev = tevHours;
+      if (bag.gxSpins) {
+        bag.uGxSpinPhase.value = wrapSpinPhase(
+          spinPhaseAt(bag.uGxSpin.value, tevHours) + bag.gxSpinOffset);
+      }
+    }
+  }
+
   function renderTo(target, tevHours, parallaxCssX, parallaxCssY) {
     U.uTev.value = tevHours;
-    /* Real session time, not tev: twinkle is atmospheric, and a high evolution
-       rate would strobe it. Wrapped CPU-side so the sin argument stays small. */
-    U.uTwinklePhase.value = ((performance.now() / 3.6e6) * P.stars.twinkleRate) % 1;
+    tickTwinkle();
+    tickSpin(tevHours);
     U.uParallax.value.set(parallaxCssX * dpr, parallaxCssY * dpr);
 
     renderer.setRenderTarget(lineRT);
@@ -2108,15 +2328,56 @@ export async function createSky2D({
      the composite are the only per-frame work once the planes hold still. */
   function renderBaked(tevHours, parallaxCssX, parallaxCssY) {
     U.uTev.value = tevHours;
-    U.uTwinklePhase.value = ((performance.now() / 3.6e6) * P.stars.twinkleRate) % 1;
+    tickTwinkle();
+    tickSpin(tevHours);
     U.uParallax.value.set(parallaxCssX * dpr, parallaxCssY * dpr);
 
+    const wall = performance.now();
+    if (fading) {
+      const targetFade = Math.min((wall - fadeStart) / CROSSFADE_MS, 1);
+      fading.uFade.value = Math.min(fading.uFade.value + MAX_FADE_STEP, targetFade, 1);
+      if (fading.uFade.value >= 1) fading = null;
+    }
+
+    let softWinner = null;
+    if (fadeRT && !fading) {
+      for (const pl of builtPlanes) {
+        const spun = pl.bakedTev !== null && pl.spinBags.some((bag) => spinDriftPx(
+          bag, tevHours, pl.bakedTev, U.uPxPerUnit.value, !bag.gxSwirl,
+        ) >= SPIN_REBAKE_PX);
+        const stale = pl.bakedTev === null
+          || Math.abs(tevHours - pl.bakedTev) * pl.score >= REBAKE_EPS;
+        if (!pl.dirty && (stale || spun)
+          && (!softWinner || pl.lastSoftBake < softWinner.lastSoftBake)) softWinner = pl;
+      }
+    }
+
     for (const pl of builtPlanes) {
-      /* A field morph has no displacement to measure, so staleness is elapsed
-         evolution times the plane's fastest morph rate. */
+      /* Field morphs price elapsed evolution; spin prices predicted displacement. */
+      const spun = pl.bakedTev !== null && pl.spinBags.some((bag) => spinDriftPx(
+        bag, tevHours, pl.bakedTev, U.uPxPerUnit.value, !bag.gxSwirl,
+      ) >= SPIN_REBAKE_PX);
       const stale = pl.bakedTev === null
         || Math.abs(tevHours - pl.bakedTev) * pl.score >= REBAKE_EPS;
-      if (!pl.dirty && !stale) continue;
+      if (!pl.dirty && !stale && !spun) continue;
+      /* Scheduled rebakes wait for the spare pair; dirty planes bake hard. */
+      if (fadeRT && !pl.dirty && pl !== softWinner) continue;
+      const soft = fadeRT !== null && !pl.dirty;
+      if (soft) {
+        for (const bag of pl.swirl) {
+          bag.uGxBakeTev2.value = bag.uGxBakeTev.value;
+          bag.uGxBakeSpinPhase2.value = bag.uGxBakeSpinPhase.value;
+        }
+        fadeSrc.value = pl.rtA.texture;
+        renderer.setRenderTarget(fadeRT.a);
+        renderer.render(fadeScene, camera);
+        fadeSrc.value = pl.rtB.texture;
+        renderer.setRenderTarget(fadeRT.b);
+        renderer.render(fadeScene, camera);
+      } else if (fading === pl) {
+        fading = null;
+        pl.uFade.value = 1;
+      }
 
       if (pl.hasDust && dust) {
         renderer.setRenderTarget(dust.rt);
@@ -2130,8 +2391,22 @@ export async function createSky2D({
         renderer.setRenderTarget(pl.rimRT);
         renderer.render(pl.rimScene, camera);
       }
+      if (pl.occRT) {
+        renderer.setRenderTarget(pl.occRT);
+        renderer.render(pl.occScene, camera);
+      }
       pl.bakedTev = tevHours;
+      for (const bag of pl.swirl) {
+        bag.uGxBakeTev.value = tevHours;
+        bag.uGxBakeSpinPhase.value = bag.uGxSpinPhase.value;
+      }
       pl.dirty = false;
+      if (soft) {
+        pl.uFade.value = 0;
+        fading = pl;
+        fadeStart = wall;
+        pl.lastSoftBake = wall;
+      }
       bakedStats.bakes += 1;
       bakedStats.planeBakes[pl.name] = (bakedStats.planeBakes[pl.name] ?? 0) + 1;
     }
@@ -2171,6 +2446,9 @@ export async function createSky2D({
   function dispose() {
     lineRT.dispose();
     contRT.dispose();
+    fadeRT?.a.dispose();
+    fadeRT?.b.dispose();
+    disposePass(fadeScene);
     brightRT.dispose();
     dust?.dispose();
     disposePass(lineScene);
@@ -2190,9 +2468,11 @@ export async function createSky2D({
       pl.rtA.dispose();
       pl.rtB.dispose();
       pl.rimRT?.dispose();
+      pl.occRT?.dispose();
       disposePass(pl.sceneA);
       disposePass(pl.sceneB);
       disposePass(pl.rimScene);
+      disposePass(pl.occScene);
     }
     disposePass(bakedComposeScene);
     /* Geometry only ever belongs to the live mesh, hence material-only here */
@@ -2235,6 +2515,16 @@ export async function createSky2D({
       targetScale: 1,
       draw: drawTo(pl.rtB, pl.sceneB),
     }));
+    if (pl.occScene) {
+      passes.push({
+        id: `plane${i}.occ`,
+        scene: pl.occScene,
+        mesh: pl.occScene.userData.quad,
+        target: pl.occRT,
+        targetScale: 0.25,
+        draw: drawTo(pl.occRT, pl.occScene),
+      });
+    }
     if (!pl.rimScene) return;
     passes.push({
       id: `plane${i}.rim`,
@@ -2276,19 +2566,39 @@ export async function createSky2D({
   });
 
   const backend = isWebGPU ? 'webgpu' : 'webgl2';
-  /* `uniforms` is the editor hook Firmament pokes live; resize() re-seats
-     framed positions from build params, so a live editor re-applies after. */
-  /* `instances` holds every duplicate's own bag; `uniforms` stays the
-     instance-0 view. Base layers always list an instance 0, even if unnamed. */
+  /* Firmament pokes `uniforms` live; `instances` holds each duplicate's bag,
+     while resize() re-seats framed positions from build parameters. */
   return {
     render, resize, dispose, backend, capture, setCamera, uniforms: U, passes,
     /* Null on a live build, so a host can dispatch on it without knowing the mode */
     renderBaked: baked ? renderBaked : null,
+    get fadeActive() { return fading !== null; },
     bakedStats,
-    /* Hosts floor their idle cadence when the live star tier actually twinkles */
-    twinkleActive: P.stars.twinkleDepth > 0 && P.stars.twinkleRate > 0,
+    /* Hosts floor their idle cadence when either star tier actually twinkles */
+    twinkleActive: (P.stars.twinkleDepth > 0 || P.stars.twinkleFieldDepth > 0)
+      && P.stars.twinkleRate > 0,
     planesInfo: builtPlanes.map((pl) => ({
       name: pl.name, depth: pl.uDepth.value, score: pl.score, types: pl.types,
+      /* A swirl plane shares its bucket's depth uniform, so this can no longer
+         be derived from the plane's name. */
+      depthUniform: pl.uDepth.name,
+      /* The dumper needs these driven per frame from this plane's bake clock;
+         a static value would freeze the native host's swirl. */
+      bakeTevUniforms: pl.swirl.map((bag) => bag.uGxBakeTev.name),
+      /* Spin pricing for the native scheduler, which builds cadence from scores
+         alone: without it a demoted galaxy's plane bakes once and freezes. */
+      spin: pl.spinBags.map((bag) => ({
+        radius: bag.uGxSize.value * Math.max(bag.uGxCutOut.value, 1e-3),
+        rigid: Math.abs(bag.uGxSpin.value),
+        /* Signed, and named: the host wraps rate × its own clock into these. */
+        rate: bag.uGxSpin.value,
+        phaseUniform: bag.uGxSpinPhase.name,
+        ...(bag.gxSwirl ? { bakePhaseUniform: bag.uGxBakeSpinPhase.name } : {}),
+        lead: Math.abs(bag.uGxLead.value),
+        satRamp: SPIN_SAT_H,
+        wrap: bag.uTevWrap.value,
+        swirl: bag.gxSwirl,
+      })),
     })),
     instances: {
       emission: emisInst.slice(),

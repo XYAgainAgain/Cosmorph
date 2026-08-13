@@ -214,7 +214,7 @@ export function deserialize(raw) {
   const scene = createScene(seed);
   scene.name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim().slice(0, 80) : 'Untitled Sky';
   scene.palette = PALETTES.has(raw.palette) ? raw.palette : 'hooNatural';
-  scene.evolutionRate = clamp(num(raw.evolution?.rate, 1), 0, 100);
+  scene.evolutionRate = Math.round(clamp(num(raw.evolution?.rate, 1), 0, 300));
   scene.camera = {
     x: clamp(num(raw.camera?.x, 0), -CAMERA_RANGE, CAMERA_RANGE),
     y: clamp(num(raw.camera?.y, 0), -CAMERA_RANGE, CAMERA_RANGE),

@@ -3,11 +3,14 @@
    light; this tier is only the grain the references string along the arms. */
 
 import {
-  Fn, float, vec2, vec3, vec4, cos, dot, exp, length, mix, pow,
-  sin, smoothstep, sqrt, step, attribute, positionLocal, varyingProperty,
+  Fn, float, vec2, vec3, vec4, cos, dot, exp, floor, length, mix, pow,
+  sign, sin, smoothstep, sqrt, step, attribute, positionLocal, varyingProperty,
 } from 'three/tsl';
 import { rot2 } from './sdf.js';
+import { hash1 } from './noise.js';
 import { armHarmonic, extentCut } from './galaxy-showpiece.js';
+import { spinAngle } from './spin.js';
+import { twinkleMod } from './twinkle.js';
 
 /* Moffat beta 2 wings sit at 0.35% of peak by 4 alpha, under the dither floor
    at default gain; 5 bought nothing but ~56% more additive fill per sprite. */
@@ -33,22 +36,17 @@ export function buildGalaxyStarNodes(U, { linked = true, preShift = true } = {})
        radius or the disk falloff carries the sprites with the light. */
     const diskR = float(1).div(U.uGxDiskFall.max(0.05)).toVar();
     const semi = iA.x.mul(mix(diskR, U.uGxBulgeR, iA.w)).toVar();
-
     /* The spiral IS this: nested ellipses tilted progressively with radius, so
        the arms are wherever they crowd. Nothing assigns a star to an arm. */
     const tilt = (linked
       /* Linked: pitch from the glow's winding (mid-disk match, m-arm scaled),
          and the crowding pattern co-rotates with the glow's phase and spin. */
       ? semi.mul(U.uGxWind.mul(2.0 * LINK_PITCH).div(U.uGxArmCount.max(1.0)))
-        .sub(U.uGxPhase.add(U.uTev.mul(U.uGxSpin)).div(U.uGxArmCount.max(1.0)))
-      : semi.mul(U.uGxsWind)
+        .sub(U.uGxPhase.div(U.uGxArmCount.max(1.0)))
+      : semi.mul(U.uGxsWind).mul(sign(U.uGxWind))
     ).toVar();
-    /* Solid-body inside the bulge, like a real inner rotation curve — and the
-       floor keeps unbounded uTev from running sin's argument past float32. */
     const core = U.uGxBulgeR.max(0.09).toVar();
-    const psi = iA.y.sub(
-      U.uGxsSpin.mul(U.uTev).div(pow(semi.max(core), U.uGxsRotExp)),
-    ).toVar();
+    const psi = iA.y.toVar();
     const ex = semi.mul(cos(psi)).toVar();
     /* Axis ratio eases to round at both ends: a real bulge is a spheroid, and
        the outskirts relax into halo instead of ending on an elliptical edge. */
@@ -59,13 +57,15 @@ export function buildGalaxyStarNodes(U, { linked = true, preShift = true } = {})
     const ct = cos(tilt).toVar();
     const st = sin(tilt).toVar();
     const pn = vec2(ct.mul(ex).sub(st.mul(ey)), st.mul(ex).add(ct.mul(ey))).toVar();
-    const rad = length(pn).toVar();
 
     const height = iA.z.mul(mix(U.uGxsZH.max(1e-4), U.uGxBulgeR, iA.w)).toVar();
     const sinI = sqrt(float(1).sub(U.uGxCosI.mul(U.uGxCosI)).max(0.0)).toVar();
-    /* A proper rotation about the major axis: the in-plane minor axis shortens
-       by cos i while height leans along it by sin i. */
-    const app = vec2(pn.x, pn.y.mul(U.uGxCosI).add(height.mul(sinI))).toVar();
+    /* Compose can only recover apparent disc position, so bake the orbit in
+       that same deprojected frame, including the star's projected height. */
+    const disc = vec2(pn.x, pn.y.add(height.mul(sinI).div(U.uGxCosI))).toVar();
+    const rad = length(disc).toVar();
+    const spun = rot2(disc, spinAngle(U, rad)).toVar();
+    const app = vec2(spun.x, spun.y.mul(U.uGxCosI)).toVar();
     const sky = rot2(app.mul(U.uGxSize), U.uGxPa).add(U.uGxCenter).toVar();
 
     /* PSF width rides luminosity — the photographic magnitude ladder is
@@ -79,9 +79,10 @@ export function buildGalaxyStarNodes(U, { linked = true, preShift = true } = {})
 
     /* The showpiece's lane phase recomputed per star: it is closed form, so
        this is four trig calls instead of a texture read in the vertex stage. */
-    const A = rad.max(1e-3).log().mul(U.uGxWind)
-      .sub(U.uGxPhase).sub(U.uTev.mul(U.uGxSpin)).toVar();
-    const dir = pn.div(rad.max(1e-4)).toVar();
+    /* The lane stays in the pre-spin disc frame, matching the glow before its
+       sky projection turns the complete pattern. */
+    const A = rad.max(1e-3).log().mul(U.uGxWind).sub(U.uGxPhase).toVar();
+    const dir = disc.div(rad.max(1e-4)).toVar();
     const m = mix(armHarmonic(dir, U.uGxArmCount), dir, U.uGxArmAsym).toVar();
     const ca = cos(A).toVar();
     const sa = sin(A).toVar();
@@ -97,6 +98,19 @@ export function buildGalaxyStarNodes(U, { linked = true, preShift = true } = {})
     const hz = U.uGxsZH.max(1e-4).mul(0.5).toVar();
     const behind = float(1).sub(smoothstep(hz.negate(), hz, height)).toVar();
     flux.mulAssign(exp(dust.mul(behind).mul(U.uGxsLaneTau).negate()));
+
+    /* Live-path twinkle, shared law with both other star tiers. Per instance
+       rather than per texel: uGxsTwinkle is 0 in a bake, where the Astar stamp
+       below carries this sprite's scintillation through compose instead. */
+    const point = U.uGxsDpr.mul(0.7).div(aC).clamp(0.0, 1.0).toVar();
+    /* Instance data floored onto a lattice first, so the hash stays integer-based
+       and lands identically on WebGPU, WebGL2, and GLES. */
+    const twPh = hash1(floor(vec3(
+      iA.x.mul(4096.0), iA.y.mul(651.0), iB.w.mul(997.0),
+    ))).toVar();
+    flux.mulAssign(twinkleMod(
+      U.uTwinklePhase, twPh, U.uTwinkleFieldDepth.mul(point).mul(U.uGxsTwinkle),
+    ));
 
     vLit.assign(vec4(iB.xyz, flux));
     vAlpha.assign(aC);
@@ -131,7 +145,13 @@ export function buildGalaxyStarNodes(U, { linked = true, preShift = true } = {})
     /* Clipped-core read: the few standouts saturate white while everything
        below keeps its blackbody color, the way a real exposure records it. */
     const tint = mix(vLit.xyz, vec3(1.0), smoothstep(0.55, 1.6, lit)).toVar();
-    return vec4(tint.mul(lit), 1.0);
+
+    /* Extended sources do not scintillate. Alpha is the twinkle amplitude, cut
+       by apparent size, so sprites at the sub-pixel floor shimmer and the
+       resolved ones read steady. Zeroed on the live path, which twinkles this
+       sprite in the vertex stage and would otherwise modulate it twice. */
+    const point = U.uGxsDpr.mul(0.7).div(aC).clamp(0.0, 1.0).toVar();
+    return vec4(tint.mul(lit), lit.mul(point).mul(U.uGxsTwinkle.oneMinus()));
   })();
 
   return { positionNode, fragmentNode };

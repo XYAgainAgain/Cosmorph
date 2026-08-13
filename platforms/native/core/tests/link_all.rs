@@ -133,8 +133,8 @@ fn the_whole_pass_graph_links_binds_and_draws() {
     let planes = parsed.manifest.planes.len();
     let target_count = parsed.manifest.targets.len();
     let program_count = parsed.manifest.programs.len();
-    assert_eq!(program_count, 9, "hero program count");
-    assert_eq!(target_count, 7, "hero target count");
+    assert_eq!(program_count, 12, "hero program count");
+    assert_eq!(target_count, 10, "hero target count");
 
     let mut engine = unsafe { Engine::new(&gl, &manifest, &blobs) }
         .unwrap_or_else(|e| panic!("Engine::new: {e}"));
@@ -192,8 +192,8 @@ fn the_whole_pass_graph_links_binds_and_draws() {
     }
 
     let input = FrameInput {
-        tev: parsed.manifest.scene.saved_t as f32 / 3600.0,
-        twinkle_phase: 0.25,
+        tev: parsed.manifest.scene.saved_t / 3600.0,
+        twinkle_phase: [0.25, 0.4, 0.6],
         parallax: [3.0, -2.0],
         active_rects: FrameInput::ALL_RECTS,
     };

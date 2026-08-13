@@ -6,6 +6,7 @@ import {
   Fn, float, vec2, vec3, vec4, texture, uv, exp, mix, min, max,
 } from 'three/tsl';
 import { ign, asinh3 } from './noise.js';
+import { twinkled } from './twinkle.js';
 import { wispTau, WISP_SIGMA } from './dust.js';
 import { globuleTauAndRim } from './globules.js';
 import { reflectionTau } from './reflection.js';
@@ -43,19 +44,19 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
     /* Tangential 3-tap, weights 2:1:1. A lens magnifies along the arc, so
        averaging that way is the blur that removes a thin arc's hatching. */
     const off = warp ? warp.tang.mul(warp.smear).toVar() : null;
-    const smear3 = (tex, depth) => {
-      return texture(tex, sampleAt(depth, warp.at)).rgb.mul(2.0)
-        .add(texture(tex, sampleAt(depth, warp.at.add(off).clamp(0.0, 1.0))).rgb)
-        .add(texture(tex, sampleAt(depth, warp.at.sub(off).clamp(0.0, 1.0))).rgb)
-        .mul(0.25);
-    };
+    /* Whole vec4, so the star-amplitude alpha rides the same footprint its own
+       light does. The center tap is the caller's; a second one would cost a fetch. */
+    const smear3 = (tex, depth, center) => center.mul(2.0)
+      .add(texture(tex, sampleAt(depth, warp.at.add(off).clamp(0.0, 1.0))))
+      .add(texture(tex, sampleAt(depth, warp.at.sub(off).clamp(0.0, 1.0))))
+      .mul(0.25);
 
-    const lineRaw = warp
-      ? smear3(lineTex, U.uDepthLine)
-      : texture(lineTex, sampleAt(U.uDepthLine)).rgb;
-    let contRaw = warp
-      ? smear3(contTex, U.uDepthCont)
-      : texture(contTex, sampleAt(U.uDepthCont)).rgb;
+    const at = warp ? warp.at : screen;
+    const lineTap = texture(lineTex, sampleAt(U.uDepthLine, at)).toVar();
+    const lineRaw = warp ? smear3(lineTex, U.uDepthLine, lineTap).rgb : lineTap.rgb;
+    const contTap = texture(contTex, sampleAt(U.uDepthCont, at)).toVar();
+    const contSm = warp ? smear3(contTex, U.uDepthCont, contTap).toVar() : contTap;
+    let contRaw = contSm.rgb;
 
     /* Dispersion is continuum-only: the line RT's channels are Hα/OIII/SII, where
        an R-out/B-in split would throw two adjacent red lines opposite ways. */
@@ -70,6 +71,8 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
 
     const line = warp ? lineRaw.mul(warp.gain).add(warp.ring) : lineRaw;
     const cont = warp ? contRaw.mul(warp.gain) : contRaw;
+    /* Same gain the continuum takes, or W drifts wherever the lens magnifies */
+    const starRaw = warp ? contSm.a.mul(warp.gain) : contSm.a;
     const bright = texture(brightTex, screen).rgb;
 
     /* Sky y increases downward, the way the layer RTs and the baked shape frames
@@ -141,7 +144,16 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
         .add(texture(dust.contTex, sampleAt(U.uDepthDust)).rgb);
     }
 
-    const scene = lit.add(bright).mul(U.uExposure);
+    /* Star amplitude walks the same extinction as the light it describes, or a
+       lane-buried star reads W = 1 and twinkles the gas in front of it. One
+       channel, since W is a scalar ratio; green is the middle of WISP_SIGMA. */
+    const aStar = starRaw.mul(T3.g).toVar();
+
+    const px = screen.mul(U.uResolution);
+    /* The phase field keys on the plane's own parallax-shifted coordinate, so
+       stars carry their phase instead of sliding across a screen-locked lattice. */
+    const starPx = sampleAt(U.uDepthCont, at).mul(U.uResolution);
+    const scene = twinkled(lit, aStar, starPx, U).add(bright).mul(U.uExposure);
 
     /* Color-preserving stretch: scale by the stretched luminance ratio.
        Per-channel asinh hue-shifts crimson toward rust. */
@@ -151,7 +163,6 @@ export function buildComposeNodes({ lineTex, contTex, brightTex, U, layers = {},
     const lifted = max(stretched.sub(U.uBlack), 0.0);
 
     /* Per-channel spatial dither; near-black gradients band without it */
-    const px = screen.mul(U.uResolution);
     const noise = vec3(
       ign(px),
       ign(px.add(vec2(17.0, 41.0))),
