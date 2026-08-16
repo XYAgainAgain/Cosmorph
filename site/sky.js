@@ -4,23 +4,23 @@
 import { heroScene, HERO_SEED } from '/site/hero-scene.js';
 import { createEvolutionClock } from '/engine/core/evolution.js';
 
-/* 30 divides evenly into 60/120/240 Hz refreshes; 24 judders against them */
-const FRAME_MS = 1000 / 30;
+/* 60 FPS is the project-wide floor for anything visible; divides 120/240 evenly */
+const FRAME_MS = 1000 / 60;
 const MAX_THROW = 14; // css px of cursor parallax at full deflection
 
 /* Burst cadence: full rAF while anything is moving, idle ticks once it settles.
    The spec's optional "half refresh" burst rate is deferred to a later chunk. */
 const STILL_MS = 1000;
 const SETTLE_PX = 0.05;
-/* A twinkling star tier is motion, so it floors the idle cadence at 30 FPS and
-   prefers half the measured panel refresh; 2 FPS is only for a static sky. */
-const IDLE_STATIC_MS = 500;
-let idleMs = 1000 / 30;
+/* Every visible cadence floors at 60 FPS on all hardware (slower reads as
+   strobing); a twinkling sky still prefers half the measured panel refresh. */
+const IDLE_STATIC_MS = 1000 / 60;
+let idleMs = 1000 / 60;
 let refreshHz = 0;
 
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
-/* Baked is the default; ?live=1 keeps the old live render at the 30 FPS cap */
+/* Baked is the default; ?live=1 keeps the old live render at the 60 FPS cap */
 const LIVE = params.get('live') === '1';
 let bakedOverride = null; // debug hotkey C flips this past the URL flag
 
@@ -78,7 +78,7 @@ const tev = () => (clock.now() / 3600) * evolutionRate;
 
 function computeIdle() {
   const twinkling = sky?.twinkleActive ?? true;
-  idleMs = twinkling ? 1000 / Math.max(30, (refreshHz || 60) / 2) : IDLE_STATIC_MS;
+  idleMs = twinkling ? 1000 / Math.max(60, (refreshHz || 60) / 2) : IDLE_STATIC_MS;
 }
 
 /* Median of 40 rAF deltas; the panel's true refresh, robust to one-off stalls */
@@ -116,7 +116,7 @@ function bursting(now) {
 function frame(now) {
   rafId = requestAnimationFrame(frame);
   /* Cap follows the engine's actual mode, so the debug C-toggle can override
-     the URL flag either way; the live path keeps its own 30 FPS cap. */
+     the URL flag either way; the live path keeps its own 60 FPS cap. */
   const cap = sky.renderBaked ? (bursting(now) ? 0 : idleMs) : FRAME_MS;
   if (cap > 0 && now - lastFrame < cap) return;
   const dt = Math.min((now - lastNow) / 1000, 0.25);

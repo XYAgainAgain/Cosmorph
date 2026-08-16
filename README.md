@@ -70,7 +70,7 @@ Have you any thoughts, problems, typos, unexpected wormholes, or bugs to report?
 
 Questions, commercial licensing, cool screenshots/space pics, or anything else:
 
-- Discord: **XYAgain**
+- Discord: ~~**XYAgain**~~ (not right now, in account recovery process lmao)
 - Email: **sam@tkb.band**
 
 ## Shameless Self Promotion

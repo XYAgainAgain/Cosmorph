@@ -5,7 +5,7 @@ import { heroScene, HERO_SEED } from '/site/hero-scene.js';
 import { createEvolutionClock } from '/engine/core/evolution.js';
 import { createSky2D } from '/engine/render/sky2d.js';
 
-const FRAME_MS = 1000 / 30;
+const FRAME_MS = 1000 / 60;
 /* Safe to raise: the margin is a remap costing sampling density, not fill rate */
 const WALLPAPER_THROW = 25;
 const CURSOR_EVENT = 'cosmorph://cursor-position';
@@ -15,7 +15,8 @@ const CURSOR_EVENT = 'cosmorph://cursor-position';
 const BURST_MS = 1000 / 60;
 const STILL_MS = 1000;
 const SETTLE_PX = 0.05;
-const IDLE_STATIC_MS = 500;
+/* 60 FPS is the floor for every visible cadence, which is also this host's ceiling */
+const IDLE_STATIC_MS = 1000 / 60;
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('sky');
@@ -28,7 +29,7 @@ const useAuthored = !Number.isFinite(urlSeed);
 /* WebGL2 is the shipping desktop renderer; WebKitGTK and WebView2 WebGPU
    support both vary by runtime, so it is opt-in via ?gpu=1 until a probe says otherwise. */
 const wantsWebGPU = params.get('gpu') === '1';
-/* Baked is the default exactly like the homepage; ?live=1 keeps the 30 FPS live path */
+/* Baked is the default exactly like the homepage; ?live=1 keeps the 60 FPS live path */
 const LIVE = params.get('live') === '1';
 
 let sky = null;
@@ -37,7 +38,7 @@ let rate = 1;
 let lastFrame = 0;
 let lastNow = performance.now();
 let lastInput = 0;
-let idleMs = 1000 / 30;
+let idleMs = 1000 / 60;
 let refreshHz = 0;
 let unlistenCursor = null;
 
@@ -90,8 +91,7 @@ async function sceneFor() {
 }
 
 function computeIdle() {
-  const twinkling = sky?.twinkleActive ?? true;
-  idleMs = twinkling ? 1000 / Math.min(60, Math.max(30, (refreshHz || 60) / 2)) : IDLE_STATIC_MS;
+  idleMs = IDLE_STATIC_MS;
 }
 
 /* Median of 40 rAF deltas; the panel's true refresh, robust to one-off stalls */

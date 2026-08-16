@@ -48,9 +48,10 @@ fn cadence_bursts_on_input_and_falls_back_to_the_twinkle_rate() {
     let idle =
         cadence::state(9_000.0, 0.0, cadence::settled((0.0, 0.0), (0.01, 0.01)), true, false);
     assert_eq!(idle.interval_ms(), TWINKLE_MS);
+    // Pinned literal: 60 FPS is the visible floor, so even a still sky ticks at it.
     assert_eq!(
         cadence::state(9_000.0, 0.0, true, false, false).interval_ms(),
-        500.0
+        1_000.0 / 60.0
     );
 
     // A buried span heartbeats even while the pointer is live, and draws nothing.

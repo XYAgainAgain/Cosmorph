@@ -348,7 +348,7 @@ fn run() -> Result<()> {
             target = next;
 
             // Ahead of the cadence gate, and counted as input: a respan dirties every
-            // plane, and rebaking them at the 2 Hz idle rate would take a second and a half.
+            // plane, and bursting drains the full-rebake queue in the fewest frames.
             if pointer_state.take_respan() {
                 layout = pointer_state.layout();
                 rects = layout.monitors.iter().map(|m| span_rect(m.rect)).collect();

@@ -1,9 +1,10 @@
-//! Frame pacing, pure. Burst while the pointer is live, twinkle rate while it
-//! idles, near-stop when nothing moves at all, heartbeat when nothing is visible.
+//! Frame pacing, pure. Burst while the pointer is live, a flat 60 FPS floor for
+//! every visible idle state, heartbeat only when nothing is visible at all.
 
 pub const BURST_MS: f64 = 1000.0 / 60.0;
-pub const TWINKLE_MS: f64 = 1000.0 / 30.0;
-pub const STATIC_MS: f64 = 500.0;
+/* 60 FPS is the hard floor for anything visible, on all hardware; slower strobes. */
+pub const TWINKLE_MS: f64 = 1000.0 / 60.0;
+pub const STATIC_MS: f64 = 1000.0 / 60.0;
 pub const HEARTBEAT_MS: f64 = 1000.0;
 pub const STILL_MS: f64 = 1000.0;
 pub const SETTLE_PX: f32 = 0.05;
