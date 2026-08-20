@@ -123,7 +123,6 @@ function draw(px, py) {
 
 function bursting(now) {
   return (now - lastInput) < STILL_MS
-    || sky?.fadeActive
     || Math.hypot(target.x - cursor.x, target.y - cursor.y) > SETTLE_PX;
 }
 

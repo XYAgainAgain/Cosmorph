@@ -1673,6 +1673,22 @@ function restoreAutosave() {
   }
 }
 
+/* First visit, no session, no pasted seed: open on the authored homepage sky,
+   so the default view shows how a full layer stack fits together. */
+async function loadAuthoredDefault() {
+  try {
+    const res = await fetch('/site/hero.cosmos');
+    if (!res.ok) return false;
+    const { scene: next, savedT } = deserialize(await res.json());
+    scene = next;
+    host.setTime(savedT);
+    return true;
+  } catch (err) {
+    console.warn('Firmament: homepage default failed to load, using the procedural default.', err);
+    return false;
+  }
+}
+
 async function boot() {
   loadUi();
   wire();
@@ -1684,6 +1700,7 @@ async function boot() {
   syncAlphaControl();
   const restored = restoreAutosave();
   if (restored) syncSeedUrl();
+  if (!restored && !Number.isFinite(urlSeed)) await loadAuthoredDefault();
   if (ui.collapsed) {
     dom.panel.classList.add('is-collapsed');
     dom.panel.inert = true;

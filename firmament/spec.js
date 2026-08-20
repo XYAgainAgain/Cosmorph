@@ -247,7 +247,7 @@ export const ENTITY_TYPES = [
     /* Hiding is a live mute, not a removal: the engine renders the four base
        layers whether or not the scene lists them. */
     mute: { density: 0, gain: 0 },
-    groups: ['Field', 'Bright Tier', 'Optics', 'Galactic Band'],
+    groups: ['Field', 'Bright Tier', 'Optics', 'Band Gradient'],
     params: [
       p('density', 'Faint density', 0, 1, 0.01, 0.75, 'Field', 1, { u: 'uStarDensity' }),
       p('count', 'Bright count', 0, 400, 1, 84, 'Bright Tier', 1, { structural: true }),
@@ -262,10 +262,12 @@ export const ENTITY_TYPES = [
       /* Nonzero default; the decal rationale lives in stars.js */
       p('spikeJitter', 'Spike angle jitter', 0, 1.5708, 0.005, 0.6, 'Optics', 2, { u: 'uSpikeJitter', unit: 'rad' }),
       p('twinkleRate', 'Twinkle rate', 0, 6000, 10, 1800, 'Optics', 3, { structural: true }),
-      p('bandY', 'Band offset', -0.5, 1.5, 0.01, 0.32, 'Galactic Band', 2, { u: 'uBandY' }),
-      p('bandTilt', 'Band tilt', -1, 1, 0.01, -0.28, 'Galactic Band', 2, { u: 'uBandTilt' }),
-      p('bandGain', 'Off-band gain', 0, 1, 0.01, 0.45, 'Galactic Band', 2, { u: 'uBandGain' }),
-      p('bandWidth', 'Band width', 0.05, 2, 0.01, 0.55, 'Galactic Band', 3, { u: 'uBandWidth' }),
+      /* Offset and tilt define the one galactic-plane line the Galactic Band
+         layer also rides; they live here because the star field always exists. */
+      p('bandY', 'Band offset', -0.5, 1.5, 0.01, 0.32, 'Band Gradient', 2, { u: 'uBandY' }),
+      p('bandTilt', 'Band tilt', -1, 1, 0.01, -0.28, 'Band Gradient', 2, { u: 'uBandTilt' }),
+      p('bandGain', 'Off-band gain', 0, 1, 0.01, 0.45, 'Band Gradient', 2, { u: 'uBandGain' }),
+      p('bandWidth', 'Band width', 0.05, 2, 0.01, 0.55, 'Band Gradient', 3, { u: 'uBandWidth' }),
     ],
   },
 
@@ -1404,7 +1406,7 @@ export const ENTITY_TYPES = [
      taken, and normalizeOrder replaces every order with a dense index anyway. */
   {
     type: 'starcloud',
-    label: 'Milky Way band',
+    label: 'Galactic Band',
     salt: 71,
     rank: 0.5,
     depth: 0.1,

@@ -4,8 +4,9 @@
 import { heroScene, HERO_SEED } from '/site/hero-scene.js';
 import { createEvolutionClock } from '/engine/core/evolution.js';
 
-/* 60 FPS is the project-wide floor for anything visible; divides 120/240 evenly */
-const FRAME_MS = 1000 / 60;
+/* The live path is an explicit opt-in (?live=1, debug C), so it runs at panel
+   refresh; only the baked path meters itself down to the idle cadence. */
+const FRAME_MS = 0;
 const MAX_THROW = 14; // css px of cursor parallax at full deflection
 
 /* Burst cadence: full rAF while anything is moving, idle ticks once it settles.
@@ -22,6 +23,8 @@ const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const params = new URLSearchParams(location.search);
 /* Baked is the default; ?live=1 keeps the old live render at the 60 FPS cap */
 const LIVE = params.get('live') === '1';
+/* ?gpu=1: never force WebGL2, and say out loud when WebGPU still won't come up */
+const GPU_ONLY = params.get('gpu') === '1';
 let bakedOverride = null; // debug hotkey C flips this past the URL flag
 
 let canvasEl = document.getElementById('sky');
@@ -35,6 +38,16 @@ let lastInput = 0;
 let fadesActive = 0;
 let rerolling = false;
 let drawnFrames = 0; // mode-agnostic counter; the debug HUD derives FPS from it
+const DEBUG = params.has('debug');
+/* Rolling 2 s of timestamps, kept only under ?debug=1: separates "rAF is slow"
+   from "the cap is skipping draws" when idle FPS reads under its target. */
+const rafTimes = [];
+const drawTimes = [];
+function pulse(arr, now) {
+  arr.push(now);
+  while (arr.length > 0 && now - arr[0] > 2000) arr.shift();
+}
+const hzOf = (arr) => (arr.length > 1 ? (1000 * (arr.length - 1)) / (arr[arr.length - 1] - arr[0]) : 0);
 const lastBoot = { seed: 0, forceGL: false, useAuthored: false };
 
 const target = { x: 0, y: 0 };
@@ -109,14 +122,14 @@ function resizeNow() {
 function bursting(now) {
   return (now - lastInput) < STILL_MS
     || fadesActive > 0
-    || sky?.fadeActive
     || Math.hypot(target.x - cursor.x, target.y - cursor.y) > SETTLE_PX;
 }
 
 function frame(now) {
   rafId = requestAnimationFrame(frame);
+  if (DEBUG) pulse(rafTimes, now);
   /* Cap follows the engine's actual mode, so the debug C-toggle can override
-     the URL flag either way; the live path keeps its own 60 FPS cap. */
+     the URL flag either way; the live path runs uncapped. */
   const cap = sky.renderBaked ? (bursting(now) ? 0 : idleMs) : FRAME_MS;
   if (cap > 0 && now - lastFrame < cap) return;
   const dt = Math.min((now - lastNow) / 1000, 0.25);
@@ -131,6 +144,7 @@ function frame(now) {
 
   draw(cursor.x, cursor.y);
   drawnFrames += 1;
+  if (DEBUG) pulse(drawTimes, now);
 }
 
 function start() {
@@ -242,6 +256,10 @@ async function startEngine(seed, forceGL, useAuthored = false) {
   evolutionRate = config.evolution.rate;
   computeIdle();
   console.info(`Cosmorph: seed ${config.seed ?? seed} on ${sky.backend}`);
+  if (GPU_ONLY && sky.backend !== 'webgpu') {
+    console.error('Cosmorph: ?gpu=1 but the browser exposed no WebGPU adapter; rendering on WebGL2. '
+      + 'Linux Chromium usually needs --enable-unsafe-webgpu --enable-features=Vulkan.');
+  }
 }
 
 /* Debug-only baked↔live flip: same seed, same T, fresh engine on the other path */
@@ -280,7 +298,7 @@ async function reroll() {
     clock.persist();
     sky.dispose();
     sky = null;
-    await startEngine(seed, params.get('gl') === '1');
+    await startEngine(seed, params.get('gl') === '1' && !GPU_ONLY);
     history.replaceState(null, '', `?${params}`);
     renderOnce();
     await veil(false);
@@ -309,7 +327,7 @@ async function boot() {
   }
 
   try {
-    await startEngine(initialSeed, params.get('gl') === '1', useAuthored);
+    await startEngine(initialSeed, params.get('gl') === '1' && !GPU_ONLY, useAuthored);
   } catch (err) {
     console.warn('Cosmorph: engine unavailable, using placeholder starfield.', err);
     freshCanvas();
@@ -328,6 +346,8 @@ async function boot() {
         bursting: rafId ? bursting(performance.now()) : false,
         idleMs,
         refreshHz,
+        rafHz: hzOf(rafTimes),
+        drawHz: hzOf(drawTimes),
         twinkle: sky?.twinkleActive ?? false,
         planes: sky?.planesInfo ?? [],
         stats: sky?.bakedStats ?? null,

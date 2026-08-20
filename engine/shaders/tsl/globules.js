@@ -77,12 +77,14 @@ function clumpProfile(q, rr, U) {
 function bokClumps(p, U) {
   const cell = floor(p);
   const f = fract(p);
-  const cov = float(0).toVar();
+  /* JS-side expression fold, never .assign(): these run outside any Fn stack,
+     where TSL silently drops assigns and the whole clump union vanishes. */
+  let cov = float(0);
 
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       const k = clumpCell(f, vec2(dx, dy), cell, U).toVar();
-      cov.assign(max(cov, clumpProfile(length(k.xy), k.z, U).mul(k.w)));
+      cov = max(cov, clumpProfile(length(k.xy), k.z, U).mul(k.w));
     }
   }
   return cov;
@@ -99,7 +101,8 @@ function cometaryClumps(p, srcP, U) {
   /* The jittered, clustered tail reach may hit ~1.5 cells; past that the 3×3
      search truncates it. The param schema enforces the bound host-side. */
   const invTail = float(1).div(U.uGlobElong.max(1e-3)).toVar();
-  const cov = float(0).toVar();
+  /* Same no-stack constraint as bokClumps: fold, don't assign */
+  let cov = float(0);
 
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
@@ -118,7 +121,7 @@ function cometaryClumps(p, srcP, U) {
          translucent rather than carrying the head's opacity out with it. */
       const thin = mix(float(1.0), U.uGlobTailOp,
         smoothstep(float(0), rr, axis.negate()));
-      cov.assign(max(cov, clumpProfile(d, rr, U).mul(thin).mul(k.w)));
+      cov = max(cov, clumpProfile(d, rr, U).mul(thin).mul(k.w));
     }
   }
   return cov;

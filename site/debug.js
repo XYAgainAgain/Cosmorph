@@ -42,6 +42,7 @@ function update() {
   const rows = [
     line(`${state.mode} · ${state.backend ?? '—'} · ${fps.toFixed(1)} fps`, 'is-mode'),
     line(`cadence ${state.bursting ? 'BURST' : 'idle'} · idle ${idleFps} fps · panel ${hz} Hz`),
+    line(`raf ${state.rafHz?.toFixed(0) ?? '—'} Hz · draws ${state.drawHz?.toFixed(0) ?? '—'} Hz`),
     line(`twinkle ${state.twinkle ? 'on' : 'off'} · [C] baked/live`),
     ...state.planes.map((p) => planeRow(p, state.stats, now)),
   ];

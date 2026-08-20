@@ -40,10 +40,16 @@ import {
   spinDriftPx, spinPhaseAt, spinWrap,
 } from '../shaders/tsl/spin.js';
 
-/* Real milliseconds of blend after a scheduled rebake. It hides morph steps
-   while finishing well inside the fastest useful rebake cadence. */
+/* Blend floor after a scheduled rebake. A perpetually stale plane chains
+   these back-to-back, so the floor is also that plane's bake-cadence floor. */
 const CROSSFADE_MS = 2000;
+/* A slow morph earns a longer blend (up to this) so drift stays continuous;
+   past it the pause between dissolves is too slow for the eye to catch. */
+const FADE_MAX_MS = 12000;
 const MAX_FADE_STEP = 1 / 6;
+/* Bands per sliced rebake: a whole-plane bake in one frame misses vsync and
+   reads as a hitch, so the cost spreads across this many frames. */
+const SLICE_BANDS = 4;
 /* The rate lattice spans the raw spin clock, independent of tevWrap. */
 const SPIN_STEP = (Math.PI * 2) / SPIN_CLOCK_H;
 
@@ -392,7 +398,9 @@ export async function createSky2D({
       /* An already-named node is an alias of one this walk has seen, not a
          second member: instance 0's uDepthNeb IS U.uDepthLine. */
       if (typeof v?.setName !== 'function' || v.name) continue;
-      const name = k === 0 ? key : `${key}__${k}`;
+      /* `_i` separator, never `__`: GLSL ES reserves double-underscore
+         identifiers, so `__k` names failed to link any multi-instance plane. */
+      const name = k === 0 ? key : `${key}_i${k}`;
       if (uniformNames.has(name)) {
         throw new Error(`Cosmorph: duplicate uniform name "${name}"; it would silently alias.`);
       }
@@ -1600,15 +1608,14 @@ export async function createSky2D({
     magFilter: THREE.NearestFilter,
     depthBuffer: false,
   };
-  /* One scene-wide spare pair bounds peak fade cost at two full-span targets;
-     every plane not holding it keeps uFade at 1 and discards its read. */
-  const fadeRT = crossfade && baked
-    ? { a: new THREE.RenderTarget(2, 2, rtOpts), b: new THREE.RenderTarget(2, 2, rtOpts) }
-    : null;
+  /* Per-plane spare pairs: planes fade independently and chain back-to-back,
+     so one hot plane can never starve the rest. */
+  const fadeOn = crossfade && baked;
   let fadeSrc = null;
   let fadeScene = null;
-  let fading = null;
-  let fadeStart = 0;
+  let prevTevWall = null;
+  let tevPerMs = 0;
+  let sliceJob = null;
   const lineRT = new THREE.RenderTarget(2, 2, rtOpts);
   const contRT = new THREE.RenderTarget(2, 2, rtOpts);
   const brightRT = new THREE.RenderTarget(2, 2, rtOpts);
@@ -2128,6 +2135,11 @@ export async function createSky2D({
         uDepth,
         /* 1 is "no previous generation": compose collapses to the current bake. */
         uFade: uniform(1),
+        fadeRT: fadeOn
+          ? { a: new THREE.RenderTarget(2, 2, rtOpts), b: new THREE.RenderTarget(2, 2, rtOpts) }
+          : null,
+        fadeStart: null,
+        fadeMs: CROSSFADE_MS,
         rtA,
         rtB,
         rimRT,
@@ -2146,7 +2158,6 @@ export async function createSky2D({
         score: spec.score,
         types: Object.keys(by),
         bakedTev: null,
-        lastSoftBake: -Infinity,
         dirty: true,
       });
     });
@@ -2179,7 +2190,7 @@ export async function createSky2D({
       bakedBrightMat.depthWrite = false;
     }
 
-    if (fadeRT && builtPlanes.length > 0) {
+    if (fadeOn && builtPlanes.length > 0) {
       /* The outgoing generation keeps its own bake reference, or the warp would
          turn it by the incoming generation's delta and the blend would ghost. */
       for (const bag of gxInst) {
@@ -2205,10 +2216,10 @@ export async function createSky2D({
         texRim: pl.rimRT ? pl.rimRT.texture : null,
         uDepth: pl.uDepth,
         swirl: pl.swirl,
-        fade: fadeRT
+        fade: pl.fadeRT
           ? {
-            texA2: fadeRT.a.texture,
-            texB2: fadeRT.b.texture,
+            texA2: pl.fadeRT.a.texture,
+            texB2: pl.fadeRT.b.texture,
             uFade: pl.uFade,
             swirlPrev: pl.swirl.map((bag) => bag.prevView),
           }
@@ -2258,12 +2269,13 @@ export async function createSky2D({
       pl.rtB.setSize(w, h);
       pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)));
       pl.occRT?.setSize(Math.max(1, Math.ceil(w / 4)), Math.max(1, Math.ceil(h / 4)));
+      pl.fadeRT?.a.setSize(w, h);
+      pl.fadeRT?.b.setSize(w, h);
       pl.uFade.value = 1;
+      pl.fadeStart = null;
       pl.dirty = true;
     }
-    fadeRT?.a.setSize(w, h);
-    fadeRT?.b.setSize(w, h);
-    fading = null;
+    sliceJob = null;
 
     const aspect = cssW / cssH;
     U.uResolution.value.set(w, h);
@@ -2324,6 +2336,56 @@ export async function createSky2D({
     renderTo(null, tevHours, parallaxCssX, parallaxCssY);
   }
 
+  /* One band of an in-flight sliced rebake. The plane's uFade holds 0 the whole
+     time, so compose shows only the snapshot while the RTs fill band by band. */
+  function stepSlice(wall) {
+    const { pl } = sliceJob;
+    const prevTev = U.uTev.value;
+    /* Pinned to the bake instant: bands rendered on later frames at a moved
+       clock would seam at every band edge. */
+    U.uTev.value = sliceJob.tev;
+    const w = pl.rtA.width;
+    const h = pl.rtA.height;
+    const y0 = Math.floor((sliceJob.band * h) / SLICE_BANDS);
+    const y1 = Math.floor(((sliceJob.band + 1) * h) / SLICE_BANDS);
+    const prevAuto = renderer.autoClear;
+    renderer.autoClear = false;
+    for (const rt of [pl.rtA, pl.rtB]) {
+      rt.scissor.set(0, y0, w, y1 - y0);
+      rt.scissorTest = true;
+    }
+    renderer.setRenderTarget(pl.rtA);
+    renderer.render(pl.sceneA, camera);
+    renderer.setRenderTarget(pl.rtB);
+    renderer.render(pl.sceneB, camera);
+    pl.rtA.scissorTest = false;
+    pl.rtB.scissorTest = false;
+    renderer.autoClear = prevAuto;
+    sliceJob.band += 1;
+    if (sliceJob.band >= SLICE_BANDS) {
+      if (pl.rimRT) {
+        renderer.setRenderTarget(pl.rimRT);
+        renderer.render(pl.rimScene, camera);
+      }
+      if (pl.occRT) {
+        renderer.setRenderTarget(pl.occRT);
+        renderer.render(pl.occScene, camera);
+      }
+      pl.bakedTev = sliceJob.tev;
+      /* Fade over the plane's predicted time-to-stale, so the next bake lands
+         exactly as the blend finishes: continuous drift, no stop-start. */
+      pl.fadeMs = CROSSFADE_MS;
+      if (tevPerMs > 0) {
+        pl.fadeMs = Math.min(Math.max(REBAKE_EPS / (pl.score * tevPerMs), CROSSFADE_MS), FADE_MAX_MS);
+      }
+      pl.fadeStart = wall;
+      bakedStats.bakes += 1;
+      bakedStats.planeBakes[pl.name] = (bakedStats.planeBakes[pl.name] ?? 0) + 1;
+      sliceJob = null;
+    }
+    U.uTev.value = prevTev;
+  }
+
   /* Baked frame: rebake whatever is stale, then composite. The bright tier and
      the composite are the only per-frame work once the planes hold still. */
   function renderBaked(tevHours, parallaxCssX, parallaxCssY) {
@@ -2333,25 +2395,26 @@ export async function createSky2D({
     U.uParallax.value.set(parallaxCssX * dpr, parallaxCssY * dpr);
 
     const wall = performance.now();
-    if (fading) {
-      const targetFade = Math.min((wall - fadeStart) / CROSSFADE_MS, 1);
-      fading.uFade.value = Math.min(fading.uFade.value + MAX_FADE_STEP, targetFade, 1);
-      if (fading.uFade.value >= 1) fading = null;
+    /* Wall-clock evolution speed, measured rather than configured: the engine
+       never sees the host's rate, only the tev values it is handed. */
+    if (prevTevWall && wall > prevTevWall.wall) {
+      tevPerMs = Math.abs(tevHours - prevTevWall.tev) / (wall - prevTevWall.wall);
+    }
+    prevTevWall = { tev: tevHours, wall };
+    for (const pl of builtPlanes) {
+      if (pl.fadeStart === null) continue;
+      const lin = Math.min((wall - pl.fadeStart) / pl.fadeMs, 1);
+      /* Smoothstep easing: a linear ramp starts and stops with a velocity kick,
+         which reads as a tick when fades chain back-to-back. */
+      const targetFade = lin * lin * (3 - 2 * lin);
+      pl.uFade.value = Math.min(pl.uFade.value + MAX_FADE_STEP, targetFade, 1);
+      if (pl.uFade.value >= 1) pl.fadeStart = null;
     }
 
-    let softWinner = null;
-    if (fadeRT && !fading) {
-      for (const pl of builtPlanes) {
-        const spun = pl.bakedTev !== null && pl.spinBags.some((bag) => spinDriftPx(
-          bag, tevHours, pl.bakedTev, U.uPxPerUnit.value, !bag.gxSwirl,
-        ) >= SPIN_REBAKE_PX);
-        const stale = pl.bakedTev === null
-          || Math.abs(tevHours - pl.bakedTev) * pl.score >= REBAKE_EPS;
-        if (!pl.dirty && (stale || spun)
-          && (!softWinner || pl.lastSoftBake < softWinner.lastSoftBake)) softWinner = pl;
-      }
-    }
-
+    /* One soft bake (or bake band) per frame: several planes going stale
+       together must not stack their bake cost into a single frame hitch. */
+    let softBaked = sliceJob !== null;
+    if (sliceJob) stepSlice(wall);
     for (const pl of builtPlanes) {
       /* Field morphs price elapsed evolution; spin prices predicted displacement. */
       const spun = pl.bakedTev !== null && pl.spinBags.some((bag) => spinDriftPx(
@@ -2360,23 +2423,43 @@ export async function createSky2D({
       const stale = pl.bakedTev === null
         || Math.abs(tevHours - pl.bakedTev) * pl.score >= REBAKE_EPS;
       if (!pl.dirty && !stale && !spun) continue;
-      /* Scheduled rebakes wait for the spare pair; dirty planes bake hard. */
-      if (fadeRT && !pl.dirty && pl !== softWinner) continue;
-      const soft = fadeRT !== null && !pl.dirty;
+      /* A dirty plane abandons its half-written slice; the hard bake below
+         refills both RTs whole, so the collapsed blend cannot show a seam. */
+      if (pl.dirty && sliceJob?.pl === pl) {
+        sliceJob = null;
+        pl.uFade.value = 1;
+      }
+      /* A scheduled rebake waits for this plane's own blend to land (which is
+         what throttles bake cadence) and for a free frame; dirty bakes hard. */
+      if (!pl.dirty && (pl.fadeStart !== null || softBaked)) continue;
+      const soft = fadeOn && !pl.dirty;
       if (soft) {
         for (const bag of pl.swirl) {
           bag.uGxBakeTev2.value = bag.uGxBakeTev.value;
           bag.uGxBakeSpinPhase2.value = bag.uGxBakeSpinPhase.value;
         }
         fadeSrc.value = pl.rtA.texture;
-        renderer.setRenderTarget(fadeRT.a);
+        renderer.setRenderTarget(pl.fadeRT.a);
         renderer.render(fadeScene, camera);
         fadeSrc.value = pl.rtB.texture;
-        renderer.setRenderTarget(fadeRT.b);
+        renderer.setRenderTarget(pl.fadeRT.b);
         renderer.render(fadeScene, camera);
-      } else if (fading === pl) {
-        fading = null;
+      } else if (pl.fadeStart !== null) {
+        pl.fadeStart = null;
         pl.uFade.value = 1;
+      }
+
+      /* Spin-carrying planes bake whole: their glow reads the live spin phase,
+         and bands rendered on different frames would shear at every seam. */
+      if (soft && pl.spinBags.length === 0 && pl.swirl.length === 0) {
+        pl.uFade.value = 0;
+        if (pl.hasDust && dust) {
+          renderer.setRenderTarget(dust.rt);
+          renderer.render(dust.scene, camera);
+        }
+        sliceJob = { pl, band: 0, tev: tevHours };
+        softBaked = true;
+        continue;
       }
 
       if (pl.hasDust && dust) {
@@ -2403,9 +2486,13 @@ export async function createSky2D({
       pl.dirty = false;
       if (soft) {
         pl.uFade.value = 0;
-        fading = pl;
-        fadeStart = wall;
-        pl.lastSoftBake = wall;
+        pl.fadeMs = CROSSFADE_MS;
+        if (pl.spinBags.length === 0 && tevPerMs > 0) {
+          const staleMs = REBAKE_EPS / (pl.score * tevPerMs);
+          pl.fadeMs = Math.min(Math.max(staleMs, CROSSFADE_MS), FADE_MAX_MS);
+        }
+        pl.fadeStart = wall;
+        softBaked = true;
       }
       bakedStats.bakes += 1;
       bakedStats.planeBakes[pl.name] = (bakedStats.planeBakes[pl.name] ?? 0) + 1;
@@ -2446,8 +2533,6 @@ export async function createSky2D({
   function dispose() {
     lineRT.dispose();
     contRT.dispose();
-    fadeRT?.a.dispose();
-    fadeRT?.b.dispose();
     disposePass(fadeScene);
     brightRT.dispose();
     dust?.dispose();
@@ -2469,6 +2554,8 @@ export async function createSky2D({
       pl.rtB.dispose();
       pl.rimRT?.dispose();
       pl.occRT?.dispose();
+      pl.fadeRT?.a.dispose();
+      pl.fadeRT?.b.dispose();
       disposePass(pl.sceneA);
       disposePass(pl.sceneB);
       disposePass(pl.rimScene);
@@ -2572,7 +2659,7 @@ export async function createSky2D({
     render, resize, dispose, backend, capture, setCamera, uniforms: U, passes,
     /* Null on a live build, so a host can dispatch on it without knowing the mode */
     renderBaked: baked ? renderBaked : null,
-    get fadeActive() { return fading !== null; },
+    get fadeActive() { return builtPlanes.some((pl) => pl.fadeStart !== null); },
     bakedStats,
     /* Hosts floor their idle cadence when either star tier actually twinkles */
     twinkleActive: (P.stars.twinkleDepth > 0 || P.stars.twinkleFieldDepth > 0)
