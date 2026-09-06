@@ -29,6 +29,6 @@ Cosmorph is licensed under [PolyForm Noncommercial 1.0.0](LICENSE.md), and paid 
 ## Contact (If You Dare)
 
 - Discord: **XYAgain**
-- Email: **sam@tkb.band**
+- Email: **sam@xyagain.dev**
 
 <p align="center">✨🧡🌌</p>
