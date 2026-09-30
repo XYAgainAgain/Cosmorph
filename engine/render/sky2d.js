@@ -214,13 +214,17 @@ function offsetFrom(seed, salt) {
 
 export async function createSky2D({
   canvas, config, forceWebGL = false, maxParallaxPx = 14, baked = false,
-  crossfade = false,
+  crossfade = false, renderer: reused = null,
 }) {
-  const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, forceWebGL });
+  /* Internal: disposing a WebGL2 renderer loses the canvas context, so a rebuild reuses it */
+  /* No pass tests depth, and compileAsync keys pipelines on the renderer's depth
+     flag even for targets, so it must match their depthBuffer: false to hit. */
+  const renderer = reused
+    ?? new THREE.WebGPURenderer({ canvas, antialias: false, depth: false, forceWebGL });
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
   renderer.setClearColor(0x000000, 1);
-  await renderer.init();
+  if (!reused) await renderer.init();
   const isWebGPU = renderer.backend?.isWebGPUBackend === true;
 
   /* Every entity type but `stars` may repeat: each instance gets its own uniform
@@ -1608,17 +1612,28 @@ export async function createSky2D({
     magFilter: THREE.NearestFilter,
     depthBuffer: false,
   };
-  /* Per-plane spare pairs: planes fade independently and chain back-to-back,
-     so one hot plane can never starve the rest. */
+  /* Planes fade independently and chain back-to-back, so one hot plane can
+     never starve the rest. */
   const fadeOn = crossfade && baked;
-  let fadeSrc = null;
-  let fadeScene = null;
   let prevTevWall = null;
   let tevPerMs = 0;
   let sliceJob = null;
   const lineRT = new THREE.RenderTarget(2, 2, rtOpts);
   const contRT = new THREE.RenderTarget(2, 2, rtOpts);
   const brightRT = new THREE.RenderTarget(2, 2, rtOpts);
+
+  const hasRim = (by) => (by.globules?.length ?? 0) + (by.shape?.length ?? 0) > 0;
+
+  /* WebGPU caps textures and samplers separately; 16 is the floor every backend guarantees */
+  function stageTextureLimit() {
+    const { device, gl } = renderer.backend;
+    if (device) {
+      return Math.min(
+        device.limits.maxSampledTexturesPerShaderStage, device.limits.maxSamplersPerShaderStage,
+      );
+    }
+    return gl ? gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) : 16;
+  }
 
   /* Filled by the baked block below; empty on the live path, which is what
      lets resize() and dispose() walk it unconditionally. */
@@ -2000,6 +2015,19 @@ export async function createSky2D({
       });
     });
 
+    /* One sampler per texture, and a fragment stage gets 16 on D3D (WebGPU and
+       ANGLE alike); past that the pipeline dies silently black, so rebuild live. */
+    const texturesNeeded = specs.reduce((n, spec) => n + 2 + (hasRim(spec.by) ? 1 : 0), 0)
+      + 1 + (dust && dustIdx >= 0 ? 2 : 0);
+    const textureLimit = stageTextureLimit();
+    if (texturesNeeded > textureLimit) {
+      console.warn(`Cosmorph: the baked composite needs ${texturesNeeded} textures and this GPU allows ${textureLimit} per pass; rendering live instead.`);
+      disposeScene();
+      return createSky2D({
+        canvas, config, forceWebGL, maxParallaxPx, baked: false, crossfade, renderer,
+      });
+    }
+
     specs.forEach((spec) => {
       const by = spec.by;
       const uDepth = planeU[spec.idx];
@@ -2087,8 +2115,11 @@ export async function createSky2D({
         occScene = fullscreenPass(vec4(occTau, 0.0, 0.0, 1.0));
       }
 
-      const rtA = new THREE.RenderTarget(2, 2, rtOpts);
-      const rtB = new THREE.RenderTarget(2, 2, rtOpts);
+      /* A fading plane holds both generations as layers of one target, so the
+         blend needs no extra texture bindings and a rebake swaps layers. */
+      const planeOpts = fadeOn ? { ...rtOpts, depth: 2 } : rtOpts;
+      const rtA = new THREE.RenderTarget(2, 2, planeOpts);
+      const rtB = new THREE.RenderTarget(2, 2, planeOpts);
       const sceneA = fullscreenPass(vec4(lineSum, tauSum));
       const sceneB = fullscreenPass(vec4(contSum, starSum));
       const gxsMeshes = [];
@@ -2118,7 +2149,7 @@ export async function createSky2D({
          each pass needs its own graph, and the cost is paid only on a bake. */
       let rimRT = null;
       let rimScene = null;
-      if ((by.globules?.length ?? 0) + (by.shape?.length ?? 0) > 0) {
+      if (hasRim(by)) {
         let rimSum = vec3(0.0);
         for (const bag of by.globules ?? []) {
           rimSum = rimSum.add(globuleTauAndRim(skyU, bag, bag.cometary).rim);
@@ -2135,9 +2166,9 @@ export async function createSky2D({
         uDepth,
         /* 1 is "no previous generation": compose collapses to the current bake. */
         uFade: uniform(1),
-        fadeRT: fadeOn
-          ? { a: new THREE.RenderTarget(2, 2, rtOpts), b: new THREE.RenderTarget(2, 2, rtOpts) }
-          : null,
+        /* Layer holding the generation on screen, and the one the next bake fills */
+        uFront: uniform(0, 'int'),
+        uBack: uniform(1, 'int'),
         fadeStart: null,
         fadeMs: CROSSFADE_MS,
         rtA,
@@ -2202,10 +2233,6 @@ export async function createSky2D({
         view.uGxBakeSpinPhase = bag.uGxBakeSpinPhase2;
         bag.prevView = view;
       }
-      /* Same v-flip the dust MRT read needs: a render target sampled from inside
-         another render target pass comes back upside down. */
-      fadeSrc = texture(builtPlanes[0].rtA.texture, vec2(uv().x, uv().y.oneMinus()));
-      fadeScene = fullscreenPass(fadeSrc);
     }
 
     const dustPlane = builtPlanes.find((pl) => pl.hasDust) ?? null;
@@ -2216,10 +2243,10 @@ export async function createSky2D({
         texRim: pl.rimRT ? pl.rimRT.texture : null,
         uDepth: pl.uDepth,
         swirl: pl.swirl,
-        fade: pl.fadeRT
+        fade: fadeOn
           ? {
-            texA2: pl.fadeRT.a.texture,
-            texB2: pl.fadeRT.b.texture,
+            uFront: pl.uFront,
+            uBack: pl.uBack,
             uFade: pl.uFade,
             swirlPrev: pl.swirl.map((bag) => bag.prevView),
           }
@@ -2265,12 +2292,11 @@ export async function createSky2D({
     if (dust) dust.setSize(w, h);
     /* Rims are soft by nature, so their target rides at half res */
     for (const pl of builtPlanes) {
-      pl.rtA.setSize(w, h);
-      pl.rtB.setSize(w, h);
+      /* setSize resets the layer count to 1 unless it is passed */
+      pl.rtA.setSize(w, h, pl.rtA.depth);
+      pl.rtB.setSize(w, h, pl.rtB.depth);
       pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)));
       pl.occRT?.setSize(Math.max(1, Math.ceil(w / 4)), Math.max(1, Math.ceil(h / 4)));
-      pl.fadeRT?.a.setSize(w, h);
-      pl.fadeRT?.b.setSize(w, h);
       pl.uFade.value = 1;
       pl.fadeStart = null;
       pl.dirty = true;
@@ -2336,8 +2362,19 @@ export async function createSky2D({
     renderTo(null, tevHours, parallaxCssX, parallaxCssY);
   }
 
-  /* One band of an in-flight sliced rebake. The plane's uFade holds 0 the whole
-     time, so compose shows only the snapshot while the RTs fill band by band. */
+  /* The freshly baked back layer becomes the one on screen; uFade restarts at 0,
+     which shows the outgoing layer alone, so the swap itself is invisible. */
+  function beginFade(pl, wall, fadeMs) {
+    const front = pl.uBack.value;
+    pl.uBack.value = pl.uFront.value;
+    pl.uFront.value = front;
+    pl.uFade.value = 0;
+    pl.fadeMs = fadeMs;
+    pl.fadeStart = wall;
+  }
+
+  /* One band of an in-flight sliced rebake, written to the back layer while
+     compose keeps showing the front. */
   function stepSlice(wall) {
     const { pl } = sliceJob;
     const prevTev = U.uTev.value;
@@ -2348,18 +2385,18 @@ export async function createSky2D({
     const h = pl.rtA.height;
     const y0 = Math.floor((sliceJob.band * h) / SLICE_BANDS);
     const y1 = Math.floor(((sliceJob.band + 1) * h) / SLICE_BANDS);
+    const back = pl.uBack.value;
     const prevAuto = renderer.autoClear;
     renderer.autoClear = false;
-    for (const rt of [pl.rtA, pl.rtB]) {
-      rt.scissor.set(0, y0, w, y1 - y0);
-      rt.scissorTest = true;
-    }
-    renderer.setRenderTarget(pl.rtA);
+    /* The renderer's switch is what arms a target's scissor; the target's own flag is never read */
+    renderer.setScissorTest(true);
+    pl.rtA.scissor.set(0, y0, w, y1 - y0);
+    pl.rtB.scissor.set(0, y0, w, y1 - y0);
+    renderer.setRenderTarget(pl.rtA, back);
     renderer.render(pl.sceneA, camera);
-    renderer.setRenderTarget(pl.rtB);
+    renderer.setRenderTarget(pl.rtB, back);
     renderer.render(pl.sceneB, camera);
-    pl.rtA.scissorTest = false;
-    pl.rtB.scissorTest = false;
+    renderer.setScissorTest(false);
     renderer.autoClear = prevAuto;
     sliceJob.band += 1;
     if (sliceJob.band >= SLICE_BANDS) {
@@ -2374,11 +2411,9 @@ export async function createSky2D({
       pl.bakedTev = sliceJob.tev;
       /* Fade over the plane's predicted time-to-stale, so the next bake lands
          exactly as the blend finishes: continuous drift, no stop-start. */
-      pl.fadeMs = CROSSFADE_MS;
-      if (tevPerMs > 0) {
-        pl.fadeMs = Math.min(Math.max(REBAKE_EPS / (pl.score * tevPerMs), CROSSFADE_MS), FADE_MAX_MS);
-      }
-      pl.fadeStart = wall;
+      beginFade(pl, wall, tevPerMs > 0
+        ? Math.min(Math.max(REBAKE_EPS / (pl.score * tevPerMs), CROSSFADE_MS), FADE_MAX_MS)
+        : CROSSFADE_MS);
       bakedStats.bakes += 1;
       bakedStats.planeBakes[pl.name] = (bakedStats.planeBakes[pl.name] ?? 0) + 1;
       sliceJob = null;
@@ -2423,12 +2458,9 @@ export async function createSky2D({
       const stale = pl.bakedTev === null
         || Math.abs(tevHours - pl.bakedTev) * pl.score >= REBAKE_EPS;
       if (!pl.dirty && !stale && !spun) continue;
-      /* A dirty plane abandons its half-written slice; the hard bake below
-         refills both RTs whole, so the collapsed blend cannot show a seam. */
-      if (pl.dirty && sliceJob?.pl === pl) {
-        sliceJob = null;
-        pl.uFade.value = 1;
-      }
+      /* A dirty plane abandons its slice, which only ever touched the hidden
+         back layer; the hard bake below refills the front whole. */
+      if (pl.dirty && sliceJob?.pl === pl) sliceJob = null;
       /* A scheduled rebake waits for this plane's own blend to land (which is
          what throttles bake cadence) and for a free frame; dirty bakes hard. */
       if (!pl.dirty && (pl.fadeStart !== null || softBaked)) continue;
@@ -2438,12 +2470,6 @@ export async function createSky2D({
           bag.uGxBakeTev2.value = bag.uGxBakeTev.value;
           bag.uGxBakeSpinPhase2.value = bag.uGxBakeSpinPhase.value;
         }
-        fadeSrc.value = pl.rtA.texture;
-        renderer.setRenderTarget(pl.fadeRT.a);
-        renderer.render(fadeScene, camera);
-        fadeSrc.value = pl.rtB.texture;
-        renderer.setRenderTarget(pl.fadeRT.b);
-        renderer.render(fadeScene, camera);
       } else if (pl.fadeStart !== null) {
         pl.fadeStart = null;
         pl.uFade.value = 1;
@@ -2452,7 +2478,6 @@ export async function createSky2D({
       /* Spin-carrying planes bake whole: their glow reads the live spin phase,
          and bands rendered on different frames would shear at every seam. */
       if (soft && pl.spinBags.length === 0 && pl.swirl.length === 0) {
-        pl.uFade.value = 0;
         if (pl.hasDust && dust) {
           renderer.setRenderTarget(dust.rt);
           renderer.render(dust.scene, camera);
@@ -2466,9 +2491,11 @@ export async function createSky2D({
         renderer.setRenderTarget(dust.rt);
         renderer.render(dust.scene, camera);
       }
-      renderer.setRenderTarget(pl.rtA);
+      /* A hard bake overwrites what is on screen; a soft one fills the hidden layer */
+      const layer = soft ? pl.uBack.value : pl.uFront.value;
+      renderer.setRenderTarget(pl.rtA, layer);
       renderer.render(pl.sceneA, camera);
-      renderer.setRenderTarget(pl.rtB);
+      renderer.setRenderTarget(pl.rtB, layer);
       renderer.render(pl.sceneB, camera);
       if (pl.rimRT) {
         renderer.setRenderTarget(pl.rimRT);
@@ -2485,13 +2512,10 @@ export async function createSky2D({
       }
       pl.dirty = false;
       if (soft) {
-        pl.uFade.value = 0;
-        pl.fadeMs = CROSSFADE_MS;
-        if (pl.spinBags.length === 0 && tevPerMs > 0) {
-          const staleMs = REBAKE_EPS / (pl.score * tevPerMs);
-          pl.fadeMs = Math.min(Math.max(staleMs, CROSSFADE_MS), FADE_MAX_MS);
-        }
-        pl.fadeStart = wall;
+        const staleMs = pl.spinBags.length === 0 && tevPerMs > 0
+          ? REBAKE_EPS / (pl.score * tevPerMs)
+          : CROSSFADE_MS;
+        beginFade(pl, wall, Math.min(Math.max(staleMs, CROSSFADE_MS), FADE_MAX_MS));
         softBaked = true;
       }
       bakedStats.bakes += 1;
@@ -2530,10 +2554,10 @@ export async function createSky2D({
     }
   }
 
-  function dispose() {
+  /* Everything but the renderer, which the over-budget rebuild keeps */
+  function disposeScene() {
     lineRT.dispose();
     contRT.dispose();
-    disposePass(fadeScene);
     brightRT.dispose();
     dust?.dispose();
     disposePass(lineScene);
@@ -2554,8 +2578,6 @@ export async function createSky2D({
       pl.rtB.dispose();
       pl.rimRT?.dispose();
       pl.occRT?.dispose();
-      pl.fadeRT?.a.dispose();
-      pl.fadeRT?.b.dispose();
       disposePass(pl.sceneA);
       disposePass(pl.sceneB);
       disposePass(pl.rimScene);
@@ -2565,24 +2587,30 @@ export async function createSky2D({
     /* Geometry only ever belongs to the live mesh, hence material-only here */
     for (const mesh of bakedGxMeshes) mesh.material.dispose();
     bakedBrightMat?.dispose();
+  }
+
+  function dispose() {
+    disposeScene();
     renderer.dispose();
   }
 
   /* Dev surface for the native bundle dumper; no host reads it. */
-  const drawTo = (target, scene) => () => {
-    renderer.setRenderTarget(target);
+  const drawTo = (target, scene, layer = () => 0) => () => {
+    renderer.setRenderTarget(target, layer());
     renderer.render(scene, camera);
     if (target) renderer.setRenderTarget(null);
   };
   const passes = [];
   builtPlanes.forEach((pl, i) => {
+    /* A fading plane's targets are layered; a draw belongs on the visible one */
+    const front = () => pl.uFront.value;
     passes.push({
       id: `plane${i}.a`,
       scene: pl.sceneA,
       mesh: pl.sceneA.userData.quad,
       target: pl.rtA,
       targetScale: 1,
-      draw: drawTo(pl.rtA, pl.sceneA),
+      draw: drawTo(pl.rtA, pl.sceneA, front),
     });
     passes.push({
       id: `plane${i}.b`,
@@ -2590,7 +2618,7 @@ export async function createSky2D({
       mesh: pl.sceneB.userData.quad,
       target: pl.rtB,
       targetScale: 1,
-      draw: drawTo(pl.rtB, pl.sceneB),
+      draw: drawTo(pl.rtB, pl.sceneB, front),
     });
     /* Sprites are extra draws inside sceneB, so they share its scene and RT
        and differ only in which mesh the shader is asked for. */
@@ -2600,7 +2628,7 @@ export async function createSky2D({
       mesh,
       target: pl.rtB,
       targetScale: 1,
-      draw: drawTo(pl.rtB, pl.sceneB),
+      draw: drawTo(pl.rtB, pl.sceneB, front),
     }));
     if (pl.occScene) {
       passes.push({
@@ -2651,6 +2679,33 @@ export async function createSky2D({
     targetScale: 1,
     draw: drawTo(null, composeSceneUsed),
   });
+
+  /* A pipeline otherwise compiles inside its first draw, which on D3D freezes the
+     page for seconds; compiling here runs off the main thread where the backend can. */
+  if (!brightMesh) rebuildBright();
+  const warmJobs = baked
+    ? [
+      ...builtPlanes.flatMap((pl) => [
+        [pl.rtA, pl.sceneA], [pl.rtB, pl.sceneB], [pl.rimRT, pl.rimScene], [pl.occRT, pl.occScene],
+      ]),
+      [brightRT, bakedBrightScene ?? brightScene], [null, bakedComposeScene],
+    ]
+    : [[lineRT, lineScene], [contRT, contScene], [brightRT, brightScene], [null, composeScene]];
+  if (dust) warmJobs.push([dust.rt, dust.scene]);
+  /* A node build reads whichever target is current when it runs, so only
+     same-format targets compile concurrently; canvas, MRT, and one-channel go alone. */
+  const batchable = ([target]) => target !== null
+    && target.textures.length === 1 && target.texture.format === THREE.RGBAFormat;
+  const warmOne = ([target, scene]) => {
+    renderer.setRenderTarget(target);
+    return renderer.compileAsync(scene, camera);
+  };
+  /* WebGL2 polls compile completion on animation frames, which a hidden tab never
+     delivers; skipped there, the first draw compiles as it always did. */
+  const wanted = globalThis.document?.hidden ? [] : warmJobs.filter(([, scene]) => scene);
+  for (const job of wanted.filter((j) => !batchable(j))) await warmOne(job);
+  await Promise.all(wanted.filter(batchable).map(warmOne));
+  renderer.setRenderTarget(null);
 
   const backend = isWebGPU ? 'webgpu' : 'webgl2';
   /* Firmament pokes `uniforms` live; `instances` holds each duplicate's bag,

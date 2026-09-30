@@ -5,24 +5,20 @@
 import {
   Fn, float, vec2, vec3, dot, length, cos, sin, max, mix, smoothstep,
 } from 'three/tsl';
-import { fbm3o2, ridged2, FBM2_NORM, FBM2_MID } from './noise.js';
+import { fbm3o2, ridged2, batched, FBM2_NORM, FBM2_MID } from './noise.js';
 import { rot2 } from './sdf.js';
 
-/* Three ridged octaves at non-harmonic frequency ratios, combined by max rather
-   than sum: where crests cross they stay separate threads instead of pooling
-   into one filled ribbon, which is what made the old field read as painted. */
-export const ribbonField = /*@__PURE__*/ Fn(([p, sharp, braid]) => {
-  const b = braid.max(0.0).min(1.0).toVar();
-  const r1 = ridged2(p, sharp).toVar();
-  const r2 = ridged2(p.mul(1.43).add(vec3(11.3, 4.7, 21.9)), sharp);
-  const r3 = ridged2(p.mul(2.11).add(vec3(31.7, 17.1, 5.3)), sharp);
-  return mix(r1, max(r1, max(r2, r3)), b);
-});
+/* Three ridged samples at non-harmonic ratios, blended by max rather than sum:
+   crossing crests stay separate threads instead of pooling into a filled ribbon. */
+const ribbonPoints = (p) => [
+  p, p.mul(1.43).add(vec3(11.3, 4.7, 21.9)), p.mul(2.11).add(vec3(31.7, 17.1, 5.3)),
+];
+const ribbonBlend = (r1, r2, r3, braid) => mix(r1, max(r1, max(r2, r3)), braid.max(0.0).min(1.0));
 
 /* Veil-style shock lacework and, at low gain with the ridging flattened, the
    giant faint OIII arc. Both are the same shell: only parameters differ. */
 export function buildFilamentNodes(skyU, U) {
-  const line = Fn(() => {
+  const line = Fn((builder) => {
     const zEvo = U.uTev.mul(U.uFilMorph);
 
     /* Work in the shell's own frame: rotate, then squash one axis so the
@@ -37,7 +33,6 @@ export function buildFilamentNodes(skyU, U) {
        shell snap every ~170 days, accepted. The cap keeps the domain sane. */
     const R = U.uArcRadius.add(U.uTev.mul(U.uArcExpand))
       .min(U.uArcRadius.mul(3.0)).max(1e-3).toVar();
-    const dr = rad.sub(R).toVar();
     const invT = float(1).div(U.uArcThick.max(1e-4)).toVar();
 
     /* Angular extent via the direction dot product, not atan: no branch cut,
@@ -54,20 +49,27 @@ export function buildFilamentNodes(skyU, U) {
     const kR = U.uFilFreq.mul(U.uFilAniso);
     const ring = dirHat.mul(R.mul(kT)).toVar();
 
+    const dr = rad.sub(R).toVar();
+    /* The four fields that need no warp go through one batch */
+    const [sheetRaw, wRaw, kinkRaw, frayRaw] = batched(builder, fbm3o2, [
+      vec3(ring.mul(U.uFilLaceF), zEvo.mul(0.4)).add(U.uFilOff.mul(5.0)),
+      vec3(ring.mul(0.28), zEvo.mul(0.3)).add(U.uFilOff.mul(3.0)),
+      vec3(ring.mul(1.1), zEvo.mul(0.6)).add(U.uFilOff.mul(11.0)),
+      /* Own radial scale, or kR's top speckles it */
+      vec3(ring.mul(U.uFilFrayF), dr.mul(U.uFilFrayF.mul(8.0)).add(zEvo.mul(0.7)))
+        .add(U.uFilOff.mul(17.0)),
+    ]);
     /* One field along the shell drives both the haze amplitude and which species
        leads, so color and glow stay in step around the arc. Its scale is dialed
        rather than fixed: too slow and the whole visible arc is one species. */
-    const sheet = fbm3o2(vec3(ring.mul(U.uFilLaceF), zEvo.mul(0.4)).add(U.uFilOff.mul(5.0)))
-      .mul(FBM2_NORM).toVar();
+    const sheet = sheetRaw.mul(FBM2_NORM).toVar();
 
     /* Warp radially only: strands weaving in and out across the shell is what
        braids them, while a tangential warp would just slide the whole pattern. */
-    const wRaw = fbm3o2(vec3(ring.mul(0.28), zEvo.mul(0.3)).add(U.uFilOff.mul(3.0))).toVar();
     const warp = wRaw.sub(FBM2_MID).mul(U.uFilWarp).toVar();
     /* A second warp four times faster kinks a thread along its length instead
        of sliding it, which is the difference between a ribbon and frayed rope. */
-    const kink = fbm3o2(vec3(ring.mul(1.1), zEvo.mul(0.6)).add(U.uFilOff.mul(11.0)))
-      .sub(FBM2_MID).mul(U.uFilKink).toVar();
+    const kink = kinkRaw.sub(FBM2_MID).mul(U.uFilKink).toVar();
 
     const sep = U.uFilSep.toVar();
     const drO = dr.sub(sep).toVar();
@@ -76,19 +78,19 @@ export function buildFilamentNodes(skyU, U) {
     /* Both species share one warped z, so they are the same threads displaced
        by 2*sep: the offset parallel strands of a real shock front. */
     const zW = warp.add(kink).add(zEvo).toVar();
-    const pO = vec3(ring, drO.mul(kR).add(zW)).add(U.uFilOff);
-    const pH = vec3(ring, drH.mul(kR).add(zW)).add(U.uFilOff);
-    const fO = ribbonField(pO, U.uFilSharp, U.uFilBraid).toVar();
-    const fH = ribbonField(pH, U.uFilSharp, U.uFilBraid).toVar();
+    const pO = vec3(ring, drO.mul(kR).add(zW)).add(U.uFilOff).toVar();
+    const pH = vec3(ring, drH.mul(kR).add(zW)).add(U.uFilOff).toVar();
+    const ridges = batched(builder, (q) => ridged2(q, U.uFilSharp),
+      [...ribbonPoints(pO), ...ribbonPoints(pH)]);
+    const fO = ribbonBlend(ridges[0], ridges[1], ridges[2], U.uFilBraid).toVar();
+    const fH = ribbonBlend(ridges[3], ridges[4], ridges[5], U.uFilBraid).toVar();
 
     const envO = float(1).sub(smoothstep(0.0, 1.0, drO.mul(invT).abs())).mul(ext).toVar();
     const envH = float(1).sub(smoothstep(0.0, 1.0, drH.mul(invT).abs())).mul(ext).toVar();
 
     /* Strand ends must fray, not stop where the mask stops: lifts the threshold
-       only where the envelope fades. Own radial scale, or kR's top speckles it. */
-    const fray = fbm3o2(vec3(ring.mul(U.uFilFrayF),
-      dr.mul(U.uFilFrayF.mul(8.0)).add(zEvo.mul(0.7)))
-      .add(U.uFilOff.mul(17.0))).mul(FBM2_NORM).mul(U.uFilFray).toVar();
+       only where the envelope fades. */
+    const fray = frayRaw.mul(FBM2_NORM).mul(U.uFilFray).toVar();
     const eO = float(1).sub(envO).toVar();
     const eH = float(1).sub(envH).toVar();
 

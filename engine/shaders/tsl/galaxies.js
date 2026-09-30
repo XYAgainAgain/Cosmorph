@@ -3,10 +3,10 @@
    the HII knots strung along arms and rings reach the line RT. */
 
 import {
-  Fn, float, vec2, vec3, clamp, exp, floor, fract, length,
-  max, mix, pow, smoothstep, step,
+  Fn, If, float, vec2, vec3, clamp, exp, floor, fract, length,
+  max, mix, pow, smoothstep,
 } from 'three/tsl';
-import { hash1, hash3 } from './noise.js';
+import { hash1, hash3, eachNeighbor } from './noise.js';
 import { rot2, sdEllipse, sdfEnvelope, remapRange } from './sdf.js';
 import { showpieceGalaxy, DEV_K } from './galaxy-showpiece.js';
 
@@ -22,22 +22,22 @@ export function fieldGalaxies(sky, U) {
   const f = fract(g).toVar();
   const acc = vec3(0).toVar();
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      const o = vec2(dx, dy);
-      const c = base.add(o).toVar();
-      const h1 = hash3(vec3(c, 5.0).add(U.uGxfOff)).toVar();
+  eachNeighbor((o) => {
+    const c = base.add(o).toVar();
+    const h1 = hash3(vec3(c, 5.0).add(U.uGxfOff)).toVar();
+
+    /* Cluster mode: a Plummer-like radial profile multiplies the occupancy
+       roll, turning a flat deep field into a centrally concentrated Abell. */
+    const at = c.add(h1.xy).div(U.uGxfCells).toVar();
+    const rc = length(at.sub(U.uGxfAt)).div(U.uGxfClusterR.max(1e-3)).toVar();
+    const clump = float(1).div(rc.mul(rc).add(1.0)).toVar();
+    const dens = U.uGxfDensity
+      .mul(mix(float(1.0), clump.mul(U.uGxfClusterPeak), U.uGxfCluster)).toVar();
+
+    /* Occupancy is constant across a cell, so this branch is coherent: an empty
+       cell skips the redshift pows, the ellipse, and both profiles. */
+    If(h1.z.lessThanEqual(dens), () => {
       const h2 = hash3(vec3(c, 71.0).add(U.uGxfOff)).toVar();
-
-      /* Cluster mode: a Plummer-like radial profile multiplies the occupancy
-         roll, turning a flat deep field into a centrally concentrated Abell. */
-      const at = c.add(h1.xy).div(U.uGxfCells).toVar();
-      const rc = length(at.sub(U.uGxfAt)).div(U.uGxfClusterR.max(1e-3)).toVar();
-      const clump = float(1).div(rc.mul(rc).add(1.0)).toVar();
-      const dens = U.uGxfDensity
-        .mul(mix(float(1.0), clump.mul(U.uGxfClusterPeak), U.uGxfCluster)).toVar();
-
-      const present = step(h1.z, dens).toVar();
       /* h1.z is the occupancy roll, and among surviving cells it is still
          uniform on [0, dens) — a free brightness variate, no extra hash. */
       const rel = h1.z.div(dens.max(1e-4)).toVar();
@@ -91,9 +91,9 @@ export function fieldGalaxies(sky, U) {
       ).toVar();
       const tint = mix(baseTint, zCol, U.uGxfZTint);
       const L = mix(0.3, 1.0, rel.mul(rel)).mul(U.uGxfLum).mul(zDim);
-      acc.addAssign(tint.mul(carved).mul(L).mul(present));
-    }
-  }
+      acc.addAssign(tint.mul(carved).mul(L));
+    });
+  });
   return acc;
 }
 

@@ -3,13 +3,18 @@
    bit-parity never depends on a baked-path edit. */
 
 import {
-  Fn, float, vec2, vec3, vec4, texture, uv, exp, mix, min, max,
+  Fn, If, float, vec2, vec3, vec4, texture, uv, exp, mix, min, max,
 } from 'three/tsl';
-import { ign, asinh3 } from './noise.js';
+import { ign } from './noise.js';
 import { twinkled } from './twinkle.js';
 import { WISP_SIGMA } from './dust.js';
 import { lensWarp } from './lensing.js';
 import { spinConst, spinWarpUV } from './spin.js';
+
+/* Under these a lens tap lands within a sliver of a texel, or of an output
+   code, of the center tap, so its whole group is skipped. */
+const LENS_SMEAR_MIN_PX = 1 / 16;
+const LENS_CHROMA_MIN = 1 / 256;
 
 /* planes: deep → close, built planes only, each { texA, texB, texRim, uDepth,
    swirl, fade }. RT A is line rgb + summed tau in alpha, RT B is continuum rgb + star
@@ -20,14 +25,19 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     const screen = uv();
     const par = U.uParallax.mul(vec2(1.0, -1.0));
 
+    /* One parallax offset per depth uniform, however many taps walk it */
+    const offs = new Map();
     const sampleAt = (depthU, at = screen) => {
-      const offUV = par.mul(depthU).div(U.uResolution);
-      return at.sub(0.5).sub(offUV).div(U.uMarginScale).add(0.5);
+      if (!offs.has(depthU)) offs.set(depthU, par.mul(depthU).div(U.uResolution).toVar());
+      return at.sub(0.5).sub(offs.get(depthU)).div(U.uMarginScale).add(0.5);
     };
+
+    /* Explicit LOD 0: the bakes carry no mips, so this is the same texel without
+       the derivative path, and it stays legal inside a branch. */
+    const lod0 = (read) => read.level(float(0.0));
 
     const warp = lens ? lensWarp(screen, U, lens) : null;
     const at = warp ? warp.at : screen;
-    const tang = warp ? warp.tang.mul(warp.smear).toVar() : null;
 
     /* Every tap runs the whole chain: lens destination, then this plane's
        parallax transform, then the galaxy's inverse rotation. Sharing the
@@ -61,63 +71,78 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     let outCont = vec3(0.0);
     let outStar = float(0.0);
     let tTot = vec3(1.0);
-    /* Only the first read of a texture is named. Every read shares one sampler
-       uniform, but two same-named nodes collapse and the later tap loses its uv. */
+    /* Every tap is named: two unnamed reads of one texture collapse into a
+       single node and the later tap silently inherits the first tap's uv. */
+    /* A fading plane's targets are two-layer arrays, current generation in uFront.
+       depth() and level() each clone the node and drop its name, so the name goes last. */
+    const tap = (pl, tex, at, name, layer = pl.fade?.uFront) => lod0(
+      layer ? texture(tex, at).depth(layer) : texture(tex, at)).setName(name);
+    const taps = [];
     for (const [i, pl] of planes.entries()) {
-      /* Hoisted per plane, not per tap: the two saturation terms are the only
-         uniform-only work in the inverse. */
+      /* Hoisted per plane, not per tap: every uniform-only term of the inverse */
       if (pl.swirl?.length) spinK.set(pl, pl.swirl.map((bag) => spinConst(bag)));
       if (pl.fade && pl.swirl?.length) {
-        spinKPrev.set(pl, pl.fade.swirlPrev.map((bag) => spinConst(bag)));
+        spinKPrev.set(pl, pl.fade.swirlPrev.map((bag, j) => spinConst(bag, spinK.get(pl)[j])));
       }
       /* Each distinct tap position resolves its uv once; both RTs reuse it */
       const uvC = tapUV(pl, at);
       /* The outgoing generation gets its own tap: same screen point, its own
          bake reference, so the two are aligned in sky and only the morph fades. */
       const uvP = pl.fade ? tapUV(pl, at, false, true) : null;
-      const uvT = warp
-        ? [tapUV(pl, warp.at.add(tang), true), tapUV(pl, warp.at.sub(tang), true)]
-        : null;
-      /* Tangential 3-tap, weights 2:1:1, as the live compose smears. The center
-         tap is the caller's, since tau reads that same sample. Whole vec4, so the
-         star-amplitude alpha rides the same footprint its own light does.
-         Every tap is named: two unnamed reads of one texture collapse into a
-         single node and the later tap silently inherits the first tap's uv. */
-      const smear3 = (tex, center, tag) => center.mul(2.0)
-        .add(texture(tex, uvT[0]).setName(`${tag}${i}s0`))
-        .add(texture(tex, uvT[1]).setName(`${tag}${i}s1`)).mul(0.25);
 
-      const cur = texture(pl.texA, uvC).setName(`texPlaneA${i}`).toVar();
+      const cur = tap(pl, pl.texA, uvC, `texPlaneA${i}`).toVar();
       /* Only the center tap fades; brief lens-wing ghosting avoids permanently
          doubling every plane's tap count. */
       const a = pl.fade
-        ? mix(texture(pl.fade.texA2, uvP).setName(`texPrevA${i}`), cur, pl.fade.uFade).toVar()
+        ? mix(tap(pl, pl.texA, uvP, `texPrevA${i}`, pl.fade.uBack), cur, pl.fade.uFade).toVar()
         : cur;
-      const lineRaw = warp ? smear3(pl.texA, a, 'texPlaneA').rgb : a.rgb;
-      const curB = texture(pl.texB, uvC).setName(`texPlaneB${i}`).toVar();
+      const curB = tap(pl, pl.texB, uvC, `texPlaneB${i}`).toVar();
       const b = pl.fade
-        ? mix(texture(pl.fade.texB2, uvP).setName(`texPrevB${i}`), curB, pl.fade.uFade).toVar()
+        ? mix(tap(pl, pl.texB, uvP, `texPrevB${i}`, pl.fade.uBack), curB, pl.fade.uFade).toVar()
         : curB;
-      const bSm = warp ? smear3(pl.texB, b, 'texPlaneB').toVar() : b;
-      let contRaw = bSm.rgb;
-      if (warp) {
-        const disp = contRaw.toVar();
-        const rOut = texture(pl.texB, tapUV(pl, warp.at.add(warp.disp), true))
-          .setName(`texPlaneB${i}cr`).r;
-        const bIn = texture(pl.texB, tapUV(pl, warp.at.sub(warp.disp), true))
-          .setName(`texPlaneB${i}cb`).b;
-        disp.r.assign(mix(disp.r, rOut, warp.chroma));
-        disp.b.assign(mix(disp.b, bIn, warp.chroma));
-        contRaw = disp;
-      }
-      const trans = exp(a.a.negate().mul(WISP_SIGMA)).toVar();
-      const emitLine = palette(lineRaw);
+      /* A variable first made inside a branch is scoped to it, so the lens
+         branches below assign into these, declared out here. */
+      taps.push({ a, b, line: warp ? a.rgb.toVar() : a.rgb, bSm: warp ? b.toVar() : b });
+    }
+
+    if (warp) {
+      /* One branch for every plane: away from the critical curve the smear is a
+         sliver of a texel, and those pixels pay the center taps only. */
+      If(warp.smear.mul(U.uResolution.y).greaterThan(LENS_SMEAR_MIN_PX), () => {
+        const tang = warp.tang.mul(warp.smear).toVar();
+        for (const [i, pl] of planes.entries()) {
+          const u0 = tapUV(pl, warp.at.add(tang), true);
+          const u1 = tapUV(pl, warp.at.sub(tang), true);
+          /* Tangential 3-tap, weights 2:1:1, as the live compose smears. Whole
+             vec4, so the star-amplitude alpha rides its own light's footprint. */
+          const smear3 = (tex, center, tag) => center.mul(2.0)
+            .add(tap(pl, tex, u0, `${tag}${i}s0`))
+            .add(tap(pl, tex, u1, `${tag}${i}s1`)).mul(0.25);
+          taps[i].line.assign(smear3(pl.texA, taps[i].a, 'texPlaneA').rgb);
+          taps[i].bSm.assign(smear3(pl.texB, taps[i].b, 'texPlaneB'));
+        }
+      });
+      for (const t of taps) t.cont = t.bSm.rgb.toVar();
+      If(warp.chroma.greaterThan(LENS_CHROMA_MIN), () => {
+        for (const [i, pl] of planes.entries()) {
+          const rOut = tap(pl, pl.texB, tapUV(pl, warp.at.add(warp.disp), true), `texPlaneB${i}cr`).r;
+          const bIn = tap(pl, pl.texB, tapUV(pl, warp.at.sub(warp.disp), true), `texPlaneB${i}cb`).b;
+          taps[i].cont.r.assign(mix(taps[i].cont.r, rOut, warp.chroma));
+          taps[i].cont.b.assign(mix(taps[i].cont.b, bIn, warp.chroma));
+        }
+      });
+    }
+
+    for (const t of taps) {
+      const contRaw = warp ? t.cont : t.bSm.rgb;
+      const trans = exp(t.a.a.negate().mul(WISP_SIGMA)).toVar();
+      const emitLine = palette(t.line);
       outLine = outLine.add(warp ? emitLine.mul(warp.gain) : emitLine).mul(trans);
       outCont = outCont.add(warp ? contRaw.mul(warp.gain) : contRaw).mul(trans);
       /* Star amplitude walks the same extinction as the light it describes, or a
          lane-buried star reads W = 1 and twinkles the gas in front of it. One
          channel, since W is a scalar ratio; green is the middle of WISP_SIGMA. */
-      outStar = outStar.add(warp ? bSm.a.mul(warp.gain) : bSm.a).mul(trans.g);
+      outStar = outStar.add(warp ? t.bSm.a.mul(warp.gain) : t.bSm.a).mul(trans.g);
       tTot = tTot.mul(trans);
     }
 
@@ -126,8 +151,8 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     /* The march front-attenuated its emission internally and its tau already
        rode into its owning plane's alpha, so this lands after the walk. */
     if (dust) {
-      const dl = texture(dust.lineTex, sampleAt(dust.uDepth, at)).setName('texDustLine').rgb;
-      const dc = texture(dust.contTex, sampleAt(dust.uDepth, at)).setName('texDustCont').rgb;
+      const dl = lod0(texture(dust.lineTex, sampleAt(dust.uDepth, at))).setName('texDustLine').rgb;
+      const dc = lod0(texture(dust.contTex, sampleAt(dust.uDepth, at))).setName('texDustCont').rgb;
       lit = lit.add(scnr(palette(dl))).add(dc);
     }
 
@@ -135,7 +160,7 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     let rimRaw = null;
     for (const [i, pl] of planes.entries()) {
       if (!pl.texRim) continue;
-      const rim = texture(pl.texRim, sampleAt(pl.uDepth, at)).setName(`texRim${i}`).rgb;
+      const rim = lod0(texture(pl.texRim, sampleAt(pl.uDepth, at))).setName(`texRim${i}`).rgb;
       rimRaw = rimRaw ? rimRaw.add(rim) : rim;
     }
     if (rimRaw) lit = lit.add(scnr(palette(rimRaw)));
@@ -143,7 +168,7 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     /* Drawn ring emission, extinguished by the whole walk's transmittance. */
     if (warp) lit = lit.add(scnr(palette(warp.ring)).mul(tTot));
 
-    const bright = texture(brightTex, screen).setName('texBright').rgb;
+    const bright = lod0(texture(brightTex, screen)).setName('texBright').rgb;
     const px = screen.mul(U.uResolution);
     /* Every plane shares one outStar, so the phase field anchors to the deepest
        plane's parallax: one stated approximation instead of a screen-locked lattice. */
@@ -153,7 +178,9 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     /* Color-preserving stretch: scale by the stretched luminance ratio.
        Per-channel asinh hue-shifts crimson toward rust. */
     const lum = max(scene.r, max(scene.g, scene.b)).max(1e-5);
-    const target = asinh3(vec3(lum.mul(U.uStretchK))).x.mul(U.uStretchNorm);
+    /* asinh(x) = ln(x + sqrt(x² + 1)) on the one lane the stretch reads */
+    const lumK = lum.mul(U.uStretchK).toVar();
+    const target = lumK.add(lumK.mul(lumK).add(1.0).sqrt()).log().mul(U.uStretchNorm);
     const stretched = scene.mul(target.div(lum));
     const lifted = max(stretched.sub(U.uBlack), 0.0);
 

@@ -2,7 +2,8 @@
    Seeds become CPU-chosen integer domain offsets, never hash perturbation. */
 
 import {
-  Fn, float, vec2, vec3, uint, uvec3, fract, floor, dot, mix, mul,
+  Fn, Loop, array, float, int, vec2, vec3, vec4, uint, uvec2, uvec3, uvec4,
+  fract, floor, dot, mix, mul,
 } from 'three/tsl';
 
 /* pcg3d (Jarzynski & Olano) — the workhorse integer hash */
@@ -18,47 +19,58 @@ export const pcg3d = /*@__PURE__*/ Fn(([vIn]) => {
   v.y.addAssign(v.z.mul(v.x));
   v.z.addAssign(v.x.mul(v.y));
   return v;
-});
+}).setLayout({ name: 'pcg3d', type: 'uvec3', inputs: [{ name: 'vIn', type: 'uvec3' }] });
 
-/* Lattice point → three floats in [0,1). +1024 keeps practical domains
-   positive before the uint conversion, so WGSL and GLSL agree. */
+/* Lattice point → three floats in [0,1). A negative float to uint is undefined
+   in GLSL, so the clamp pins everything below −1024 to lattice 0 on every backend. */
 export const hash3 = /*@__PURE__*/ Fn(([ip]) => {
-  const q = ip.add(vec3(1024.0));
+  const q = ip.add(vec3(1024.0)).max(0.0);
   const h = pcg3d(uvec3(uint(q.x), uint(q.y), uint(q.z)));
   return vec3(h.x.toFloat(), h.y.toFloat(), h.z.toFloat()).mul(2.3283064365386963e-10);
-});
+}).setLayout({ name: 'hash3', type: 'vec3', inputs: [{ name: 'ip', type: 'vec3' }] });
 
 /* Single-lane PCG for scalar lattice values — a third of the hash work of
    pcg3d when only one channel is consumed */
 export const hash1 = /*@__PURE__*/ Fn(([ip]) => {
-  const q = ip.add(vec3(1024.0));
+  const q = ip.add(vec3(1024.0)).max(0.0);
   const n = uint(q.x).add(uint(q.y).mul(uint(198491317))).add(uint(q.z).mul(uint(6542989)));
   const s = n.mul(uint(747796405)).add(uint(2891336453));
   const w = s.shiftRight(s.shiftRight(uint(28)).add(uint(4))).bitXor(s).mul(uint(277803737));
   return w.shiftRight(uint(22)).bitXor(w).toFloat().mul(2.3283064365386963e-10);
-});
+}).setLayout({ name: 'hash1', type: 'float', inputs: [{ name: 'ip', type: 'vec3' }] });
 
-/* 3D value noise in [0,1] — trilinear blend of hashed lattice values */
+/* hash1's lattice mix constants, shared so the lane hash matches it bit for bit */
+const LATTICE_Y = 198491317;
+const LATTICE_Z = 6542989;
+const lanes = (v) => uvec4(uint(v), uint(v), uint(v), uint(v));
+
+/* hash1's finisher on four mixed lattice integers at once: the same bits per
+   lane in a quarter of the code the shader compiler has to chew through. */
+const hashLanes = /*@__PURE__*/ Fn(([n]) => {
+  const s = n.mul(uint(747796405)).add(lanes(2891336453));
+  const w = s.shiftRight(s.shiftRight(lanes(28)).add(lanes(4))).bitXor(s).mul(uint(277803737));
+  return vec4(w.shiftRight(lanes(22)).bitXor(w)).mul(2.3283064365386963e-10);
+}).setLayout({ name: 'hashLanes', type: 'vec4', inputs: [{ name: 'n', type: 'uvec4' }] });
+
+/* 3D value noise in [0,1] — trilinear blend of hashed lattice values.
+   Both corners convert from float, as hash1 does, so out-of-window lattices clamp alike. */
 export const valueNoise3 = /*@__PURE__*/ Fn(([p]) => {
   const i = floor(p);
   const f = fract(p);
   const u = f.mul(f).mul(f.mul(-2.0).add(3.0));
 
-  const n000 = hash1(i);
-  const n100 = hash1(i.add(vec3(1, 0, 0)));
-  const n010 = hash1(i.add(vec3(0, 1, 0)));
-  const n110 = hash1(i.add(vec3(1, 1, 0)));
-  const n001 = hash1(i.add(vec3(0, 0, 1)));
-  const n101 = hash1(i.add(vec3(1, 0, 1)));
-  const n011 = hash1(i.add(vec3(0, 1, 1)));
-  const n111 = hash1(i.add(vec3(1, 1, 1)));
+  const lo = uvec3(i.add(vec3(1024.0)).max(0.0)).toVar();
+  const hi = uvec3(i.add(vec3(1.0)).add(vec3(1024.0)).max(0.0)).toVar();
+  const xy = uvec4(lo.x, hi.x, lo.x, hi.x)
+    .add(uvec4(lo.y, lo.y, hi.y, hi.y).mul(uint(LATTICE_Y)));
+  const h0 = hashLanes(xy.add(lo.z.mul(uint(LATTICE_Z))));
+  const h1 = hashLanes(xy.add(hi.z.mul(uint(LATTICE_Z))));
 
-  return mix(
-    mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
-    mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
-    u.z,
-  );
-});
+  /* Blend order is x, y, z per lane, so the bits match eight hash1 calls */
+  const x0 = mix(h0.xz, h0.yw, u.x);
+  const x1 = mix(h1.xz, h1.yw, u.x);
+  return mix(mix(x0.x, x0.y, u.y), mix(x1.x, x1.y, u.y), u.z);
+}).setLayout({ name: 'valueNoise3', type: 'float', inputs: [{ name: 'p', type: 'vec3' }] });
 
 /* 2D value noise in [0,1] — half the lattice hashes of valueNoise3 with z = 0 */
 export const valueNoise2 = /*@__PURE__*/ Fn(([p]) => {
@@ -66,25 +78,35 @@ export const valueNoise2 = /*@__PURE__*/ Fn(([p]) => {
   const f = fract(p);
   const u = f.mul(f).mul(f.mul(-2.0).add(3.0));
 
-  const n00 = hash1(vec3(i, 0.0));
-  const n10 = hash1(vec3(i.add(vec2(1, 0)), 0.0));
-  const n01 = hash1(vec3(i.add(vec2(0, 1)), 0.0));
-  const n11 = hash1(vec3(i.add(vec2(1, 1)), 0.0));
+  const lo = uvec2(i.add(vec2(1024.0)).max(0.0)).toVar();
+  const hi = uvec2(i.add(vec2(1.0)).add(vec2(1024.0)).max(0.0)).toVar();
+  const h = hashLanes(uvec4(lo.x, hi.x, lo.x, hi.x)
+    .add(uvec4(lo.y, lo.y, hi.y, hi.y).mul(uint(LATTICE_Y)))
+    .add(uint((1024 * LATTICE_Z) % 4294967296)));
 
-  return mix(mix(n00, n10, u.x), mix(n01, n11, u.x), u.y);
-});
+  const x0 = mix(h.xz, h.yw, u.x);
+  return mix(x0.x, x0.y, u.y);
+}).setLayout({ name: 'valueNoise2', type: 'float', inputs: [{ name: 'p', type: 'vec2' }] });
 
-/* JS-unrolled octave count, no runtime loop. Gain 0.5 suits gas. */
+/* A shader loop compiles faster through WebGPU's translator and slower through
+   ANGLE's on D3D, so only a WebGPU build loops; WebGL2 unrolls here in JS. */
+const loops = (builder) => builder.renderer.backend.isWebGPUBackend === true;
+const repeat = (builder, count, body) => {
+  if (loops(builder)) Loop(count, body);
+  else for (let k = 0; k < count; k++) body();
+};
+
+/* Gain 0.5 suits gas */
 export function makeFbm3(octaves) {
-  return Fn(([pIn]) => {
+  return Fn(([pIn], builder) => {
     const p = pIn.toVar();
     const sum = float(0).toVar();
     const amp = float(0.5).toVar();
-    for (let o = 0; o < octaves; o++) {
+    repeat(builder, octaves, () => {
       sum.addAssign(valueNoise3(p).mul(amp));
       p.mulAssign(2.02);
       amp.mulAssign(0.5);
-    }
+    });
     return sum;
   });
 }
@@ -102,11 +124,11 @@ const ROT_S = Math.sin(2.39996322972865332) * 2.02;
    phase slid: aligned octaves share seam axes, and those seams read as soft
    rectangles — or, through any gradient or pow, a maze. */
 export function makeFbm3Rot(octaves) {
-  return Fn(([pIn]) => {
+  return Fn(([pIn], builder) => {
     const p = pIn.toVar();
     const sum = float(0).toVar();
     const amp = float(0.5).toVar();
-    for (let o = 0; o < octaves; o++) {
+    repeat(builder, octaves, () => {
       sum.addAssign(valueNoise3(p).mul(amp));
       /* vec3 constructor args evaluate before the assign lands, so reading p
          on the right side is safe in both GLSL and WGSL. */
@@ -116,7 +138,7 @@ export function makeFbm3Rot(octaves) {
         p.z.mul(2.02).add(17.7),
       ));
       amp.mulAssign(0.5);
-    }
+    });
     return sum;
   });
 }
@@ -131,8 +153,8 @@ export const FBM4_NORM = 1 / 0.9375;
 export const FBM5_NORM = 1 / 0.96875;
 export const FBM2_MID = 0.375;
 
-/* Domain bias for cell grids centered on a point: indices go negative and
-   outrun hash3's internal +1024, wrapping the uint cast. Grids add this first. */
+/* Domain bias for cell grids centered on a point: without it, indices below −1024
+   all clamp to one lattice in hash3. Grids add this first. */
 export const CELL_BIAS = 65536.0;
 
 /* Ridged noise in [0,1]: 1 - |2n-1| turns mid-level iso-contours into thin
@@ -151,10 +173,31 @@ export function makeRidged(octaves) {
   });
 }
 
-/* Shared instances: one ridge wrapper body in the generated shader, however
-   many modules ride it. makeRidged stays exported for odd octave counts. */
+/* Shared instances for the common octave counts; makeRidged is exported for odd ones */
 export const ridged2 = /*@__PURE__*/ makeRidged(2);
 export const ridged4 = /*@__PURE__*/ makeRidged(4);
+
+/* 3×3 neighborhood as one shader loop, dx outer and dy inner, so the body
+   compiles once. Flat on purpose: a two-index Loop rendered wrong through FXC. */
+export function eachNeighbor(body) {
+  Loop({ start: 0, end: 9, name: 'cell' }, ({ cell }) => {
+    const row = cell.div(int(3)).toVar();
+    body(vec2(float(row.sub(int(1))), float(cell.sub(row.mul(int(3))).sub(int(1)))), cell);
+  });
+}
+
+/* Runs fn over every point in one shader loop where the backend loops. The compiler
+   inlines each call site, so N sites of a noise would otherwise emit N bodies. */
+export function batched(builder, fn, points) {
+  if (!loops(builder)) return points.map((pt) => fn(pt).toVar());
+  const pts = array(points).toVar();
+  const res = array('float', points.length).toVar();
+  /* Named: fn may carry its own loop, and an inner default index would shadow this one */
+  Loop({ start: 0, end: points.length, name: 'site' }, ({ site }) => {
+    res.element(site).assign(fn(pts.element(site)));
+  });
+  return points.map((_, k) => res.element(int(k)));
+}
 
 /* Jimenez interleaved gradient noise. Takes pixel coordinates, never uv. */
 export const ign = /*@__PURE__*/ Fn(([px]) => {

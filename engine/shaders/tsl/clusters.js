@@ -3,9 +3,9 @@
    Globular and open are the same code under different parameters. */
 
 import {
-  Fn, float, vec2, vec3, vec4, clamp, dot, floor, mix, smoothstep, step,
+  Fn, If, float, vec2, vec3, vec4, clamp, dot, floor, mix, smoothstep, step,
 } from 'three/tsl';
-import { hash3, fbm3o2, CELL_BIAS } from './noise.js';
+import { hash3, fbm3o2, eachNeighbor, CELL_BIAS } from './noise.js';
 import { rot2 } from './sdf.js';
 
 /* fbm3o2 means 0.375; the rescale keeps mean member density fixed as
@@ -73,38 +73,39 @@ function membersWith(sky, pxPerUnit, U, F, clumped = true) {
      so they stamp the same twinkle amplitude the faint field does. */
   const acc = vec4(0.0).toVar();
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      const c = base.add(vec2(dx, dy));
-      const h1 = hash3(vec3(c, 5.0).add(U.uCluOff).add(CELL_BIAS));
-      const h2 = hash3(vec3(c, 83.0).add(U.uCluOff).add(CELL_BIAS));
+  eachNeighbor((o) => {
+    const c = base.add(o);
+    const h1 = hash3(vec3(c, 5.0).add(U.uCluOff).add(CELL_BIAS)).toVar();
 
-      const starG = c.add(h1.xy).toVar();
+    const starG = c.add(h1.xy).toVar();
+
+    /* Presence is sampled at the member's OWN position: reading the profile
+       at the fragment cuts a star's footprint wherever the threshold crosses. */
+    const starLocal = starG.div(cells).toVar();
+    const rs = ellipseRadius(starLocal, F.sq);
+    const prof = profileAt(rs, F, U);
+
+    /* Inside the resolution radius crowding is total: individual points
+       would read as sprite pileup on top of the fused glow. */
+    const resolved = smoothstep(float(0), U.uCluResolve.max(1e-4), rs);
+    /* Probability modulation, so multiply is correct (remap would carve).
+       Build-time gated: at clump 0 the in-loop fbm is 9 dead calls/fragment. */
+    const clump = clumped
+      ? mix(float(1.0),
+          fbm3o2(vec3(starLocal.mul(U.uCluClumpFreq), 0.0).add(U.uCluOff)).mul(CLUMP_GAIN),
+          U.uCluClump)
+      : float(1.0);
+
+    const dens = prof.max(1e-6).pow(U.uCluMemFall.max(0.05))
+      .mul(U.uCluRich).mul(resolved).mul(clump).toVar();
+
+    /* Membership is constant across a cell and nearly every cell outside the
+       cluster is empty, so this coherent branch skips the PSF where nothing lands. */
+    If(h1.z.lessThanEqual(dens), () => {
+      const h2 = hash3(vec3(c, 83.0).add(U.uCluOff).add(CELL_BIAS));
       const dPx = g.sub(starG).mul(pxScale);
 
-      /* Presence is sampled at the member's OWN position: reading the profile
-         at the fragment cuts a star's footprint wherever the threshold crosses. */
-      const starLocal = starG.div(cells).toVar();
-      const rs = ellipseRadius(starLocal, F.sq);
-      const prof = profileAt(rs, F, U);
-
-      /* Inside the resolution radius crowding is total: individual points
-         would read as sprite pileup on top of the fused glow. */
-      const resolved = smoothstep(float(0), U.uCluResolve.max(1e-4), rs);
-      /* Probability modulation, so multiply is correct (remap would carve).
-         Build-time gated: at clump 0 the in-loop fbm is 9 dead calls/fragment. */
-      const clump = clumped
-        ? mix(float(1.0),
-            fbm3o2(vec3(starLocal.mul(U.uCluClumpFreq), 0.0).add(U.uCluOff)).mul(CLUMP_GAIN),
-            U.uCluClump)
-        : float(1.0);
-
-      const dens = prof.max(1e-6).pow(U.uCluMemFall.max(0.05))
-        .mul(U.uCluRich).mul(resolved).mul(clump);
-      const present = step(h1.z, dens);
-
-      /* pow(x,3) and its square as multiplies: the exponents are compile-time
-         constants, and three transcendentals × 9 taps is real per-fragment cost. */
+      /* pow(x,3) and its square as multiplies: the exponents are compile-time constants */
       const rel = h2.x.mul(h2.x).mul(h2.x).toVar();
       const L = rel.mul(rel).mul(U.uCluMemGain);
 
@@ -123,17 +124,11 @@ function membersWith(sky, pxPerUnit, U, F, clumped = true) {
       const col = pop.mul(mix(vec3(1.06, 1.0, 0.94), vec3(0.94, 1.0, 1.06), h2.y));
       const colS = mix(vec3(1.0), col, smoothstep(0.0, 0.12, rel));
 
-      const amp = L.mul(energy).mul(psf).mul(present);
+      const amp = L.mul(energy).mul(psf);
       acc.addAssign(vec4(colS.mul(amp), amp));
-    }
-  }
+    });
+  });
   return acc;
-}
-
-/* Granular sparkle where members start to resolve. Spatially stable by
-   construction: cell-hash positions, no time term anywhere in this module. */
-export function clusterMembers(sky, pxPerUnit, U, clumped = true) {
-  return membersWith(sky, pxPerUnit, U, clusterFrame(U), clumped).rgb;
 }
 
 /* Membership mask in [0,1] for the faint-star layer to fold into its density.

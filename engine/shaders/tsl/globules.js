@@ -6,7 +6,7 @@ import {
   Fn, float, vec2, vec3, vec4, floor, fract, dot, length,
   min, max, mix, exp, clamp, step, smoothstep,
 } from 'three/tsl';
-import { hash1, hash3, fbm3o2, fbm3o4, CELL_BIAS } from './noise.js';
+import { hash1, hash3, fbm3o2, fbm3o4, eachNeighbor, CELL_BIAS } from './noise.js';
 import { remapCombine, sdfSlope } from './sdf.js';
 
 /* Independent slice of the noise domain for the clustering lattice */
@@ -21,14 +21,11 @@ export const worleyF1 = /*@__PURE__*/ Fn(([p, off]) => {
      approaches 8, and a mediump fallback tops out at 65504. */
   const d2 = float(9.0).toVar();
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      const g = vec2(dx, dy);
-      const h = hash3(vec3(cell.add(g).add(off.xy), off.z).add(CELL_BIAS));
-      const r = g.add(h.xy).sub(f);
-      d2.assign(min(d2, dot(r, r)));
-    }
-  }
+  eachNeighbor((g) => {
+    const h = hash3(vec3(cell.add(g).add(off.xy), off.z).add(CELL_BIAS));
+    const r = g.add(h.xy).sub(f);
+    d2.assign(min(d2, dot(r, r)));
+  });
   return d2.sqrt();
 });
 
@@ -75,38 +72,38 @@ function clumpProfile(q, rr, U) {
 /* Bok field: compact round clumps, unioned by max so overlaps do not stack
    into a slab. Returns coverage in [0,1], not optical depth. */
 function bokClumps(p, U) {
-  const cell = floor(p);
-  const f = fract(p);
-  /* JS-side expression fold, never .assign(): these run outside any Fn stack,
-     where TSL silently drops assigns and the whole clump union vanishes. */
-  let cov = float(0);
+  /* Own Fn: callers assemble at module scope, where TSL has no stack and
+     silently drops the loop and its assigns. */
+  return Fn(() => {
+    const cell = floor(p);
+    const f = fract(p);
+    const cov = float(0).toVar();
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      const k = clumpCell(f, vec2(dx, dy), cell, U).toVar();
-      cov = max(cov, clumpProfile(length(k.xy), k.z, U).mul(k.w));
-    }
-  }
-  return cov;
+    eachNeighbor((g) => {
+      const k = clumpCell(f, g, cell, U).toVar();
+      cov.assign(max(cov, clumpProfile(length(k.xy), k.z, U).mul(k.w)));
+    });
+    return cov;
+  })();
 }
 
 /* Cometary field: the same clumps under a distorted distance metric, blunt
    head toward the source and a tapering tail downstream. */
 function cometaryClumps(p, srcP, U) {
-  const cell = floor(p);
-  const f = fract(p);
-  /* One axis for the whole neighborhood: the source is far compared to a cell,
-     which saves eight normalizes per sample. */
-  const L = dirTo(p, srcP).toVar();
-  /* The jittered, clustered tail reach may hit ~1.5 cells; past that the 3×3
-     search truncates it. The param schema enforces the bound host-side. */
-  const invTail = float(1).div(U.uGlobElong.max(1e-3)).toVar();
-  /* Same no-stack constraint as bokClumps: fold, don't assign */
-  let cov = float(0);
+  /* Own Fn for the same no-stack reason as bokClumps */
+  return Fn(() => {
+    const cell = floor(p);
+    const f = fract(p);
+    /* One axis for the whole neighborhood: the source is far compared to a cell,
+       which saves eight normalizes per sample. */
+    const L = dirTo(p, srcP).toVar();
+    /* The jittered, clustered tail reach may hit ~1.5 cells; past that the 3×3
+       search truncates it. The param schema enforces the bound host-side. */
+    const invTail = float(1).div(U.uGlobElong.max(1e-3)).toVar();
+    const cov = float(0).toVar();
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      const k = clumpCell(f, vec2(dx, dy), cell, U).toVar();
+    eachNeighbor((g) => {
+      const k = clumpCell(f, g, cell, U).toVar();
       const rr = k.z.toVar();
       const axis = dot(k.xy, L).toVar();
       const perp = length(k.xy.sub(L.mul(axis)));
@@ -121,10 +118,10 @@ function cometaryClumps(p, srcP, U) {
          translucent rather than carrying the head's opacity out with it. */
       const thin = mix(float(1.0), U.uGlobTailOp,
         smoothstep(float(0), rr, axis.negate()));
-      cov = max(cov, clumpProfile(d, rr, U).mul(thin).mul(k.w));
-    }
-  }
-  return cov;
+      cov.assign(max(cov, clumpProfile(d, rr, U).mul(thin).mul(k.w)));
+    });
+    return cov;
+  })();
 }
 
 /* Coverage field in [0,1]: fbm remapped through the clump silhouette, then

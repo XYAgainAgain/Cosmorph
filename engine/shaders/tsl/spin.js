@@ -1,7 +1,7 @@
-/* The one galaxy angular law. Glow phase, sprite orbits, and the compose-side
-   swirl warp share the contract in .dev/docs/plans/Perf-Plan.md. */
+/* The one galaxy angular law: glow phase, sprite orbits, and the compose-side
+   swirl warp all read it, so a bake and its warp can never disagree. */
 
-import { If, float, vec2, fract, length, sign, smoothstep } from 'three/tsl';
+import { If, cos, float, vec2, fract, length, sign, sin, smoothstep } from 'three/tsl';
 import { rot2 } from './sdf.js';
 
 const TAU = Math.PI * 2;
@@ -69,36 +69,61 @@ export const spinAngle = (U, r) => U.uGxSpinPhase
 /* Two prewrapped phases differ across the seam, so rewrap their delta to [−π, π). */
 const wrapPi = (x) => fract(x.div(TAU).add(0.5)).sub(0.5).mul(TAU);
 
-/* Hoist θ(T) − θ(bakeT) terms once per plane; differencing first preserves
-   small angles without making every lens tap pay a smoothstep. */
-export function spinConst(U) {
+/* Uniform-only, so a lensed swirl plane's taps share one evaluation */
+function spinFrame(U) {
+  const edge = U.uGxCutOut.max(U.uGxCutIn.add(1e-3)).toVar();
+  const paBack = U.uGxPa.negate();
   return {
-    dPhase: wrapPi(U.uGxSpinPhase.sub(U.uGxBakeSpinPhase)).toVar(),
-    dSat: sat(U, U.uTev).sub(sat(U, U.uGxBakeTev)).toVar(),
+    satNow: sat(U, U.uTev).toVar(),
+    cosI: U.uGxCosI.max(0.06).toVar(),
+    size: U.uGxSize.max(1e-4).toVar(),
+    cIn: cos(paBack).toVar(),
+    sIn: sin(paBack).toVar(),
+    cOut: cos(U.uGxPa).toVar(),
+    sOut: sin(U.uGxPa).toVar(),
+    edge,
+    edgeHi: edge.mul(DISC_GUARD).toVar(),
+    leadR: U.uGxLeadR.max(1e-3).toVar(),
+    dir: spinDir(U).toVar(),
   };
 }
 
-/* Inverse warp on a bake's texture uv, per the G4 contract. */
+/* θ(T) − θ(bakeT) once per plane; differencing first preserves small angles.
+   `shared` is the other generation's result: only the bake reference differs. */
+export function spinConst(U, shared = null) {
+  const frame = shared ?? spinFrame(U);
+  return {
+    ...frame,
+    dPhase: wrapPi(U.uGxSpinPhase.sub(U.uGxBakeSpinPhase)).toVar(),
+    dSat: frame.satNow.sub(sat(U, U.uGxBakeTev)).toVar(),
+  };
+}
+
+const turn = (p, c, s) => vec2(c.mul(p.x).sub(s.mul(p.y)), s.mul(p.x).add(c.mul(p.y)));
+
+/* Inverse warp on a bake's texture uv */
 export function spinWarpUV(tuv, U, k) {
-  const cosI = U.uGxCosI.max(0.06).toVar();
-  const size = U.uGxSize.max(1e-4).toVar();
+  const { cosI, size } = k;
   /* Render targets read back v-flipped; rotation exposes the otherwise hidden
      mirror and must account for its inverted turn. */
   const t = vec2(tuv.x, tuv.y.oneMinus()).toVar();
   const sky = t.sub(0.5).mul(U.uMarginScale).add(0.5)
     .mul(vec2(U.uAspect, 1.0)).add(U.uCamera).toVar();
-  const q = rot2(sky.sub(U.uGxCenter), U.uGxPa.negate()).toVar();
+  const q = turn(sky.sub(U.uGxCenter).toVar(), k.cIn, k.sIn).toVar();
   const pn = vec2(q.x, q.y.div(cosI)).div(size).toVar();
   const r = length(pn).toVar();
 
-  const d = k.dPhase.add(leadAt(U, r).mul(k.dSat)).mul(discW(U, r)).mul(spinDir(U)).toVar();
+  const lead = U.uGxLead.div(r.div(k.leadR).add(1.0));
+  const disc = float(1.0).sub(smoothstep(k.edge, k.edgeHi, r));
+  const d = k.dPhase.add(lead.mul(k.dSat)).mul(disc).mul(k.dir).toVar();
 
   const rot = pn.toVar();
   /* Wavefronts share d, so this uniform branch avoids every tap's dead rotation. */
   If(d.abs().greaterThan(1e-7), () => {
     rot.assign(rot2(pn, d.negate()));
   });
-  const back = rot2(vec2(rot.x, rot.y.mul(cosI)).mul(size), U.uGxPa).add(U.uGxCenter).toVar();
+  const flat2 = vec2(rot.x, rot.y.mul(cosI)).mul(size).toVar();
+  const back = turn(flat2, k.cOut, k.sOut).add(U.uGxCenter).toVar();
   const uvOut = back.sub(U.uCamera).div(vec2(U.uAspect, 1.0))
     .sub(0.5).div(U.uMarginScale).add(0.5).toVar();
   return vec2(uvOut.x, uvOut.y.oneMinus());

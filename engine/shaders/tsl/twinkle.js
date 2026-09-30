@@ -33,7 +33,9 @@ export const twinklePhaseField = /*@__PURE__*/ Fn(([px, wave]) => {
 export function twinkled(rgbIn, aStar, px, U) {
   const rgb = rgbIn.toVar();
   const out = rgb.toVar();
-  If(aStar.greaterThan(STAR_EPS), () => {
+  /* Depth 0 makes the modulation exactly 1, so a field with twinkle switched
+     off skips the phase noise and its three sins. */
+  If(aStar.greaterThan(STAR_EPS).and(U.uTwinkleFieldDepth.greaterThan(0.0)), () => {
     const lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722)).max(1e-5);
     const w = aStar.div(lum).clamp(0.0, 1.0);
     const m = twinkleMod(
