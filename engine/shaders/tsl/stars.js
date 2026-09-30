@@ -3,7 +3,7 @@
 
 import {
   Fn, If, float, vec2, vec3, vec4, floor, dot, mix, pow, exp, abs, cos, sin,
-  smoothstep, max, clamp, attribute, positionLocal, varyingProperty,
+  smoothstep, max, min, clamp, attribute, positionLocal, varyingProperty,
 } from 'three/tsl';
 import { hash3, eachNeighbor } from './noise.js';
 import { twinkleMod } from './twinkle.js';
@@ -70,11 +70,17 @@ export const faintStarLayer = /*@__PURE__*/ Fn(([skyU, pxPerUnit, cells, density
   ],
 });
 
+/* Half-width of a spikeless quad, in PSF alphas */
+const PSF_HALF = 22.0;
+
 /* Bright tier. iA = sky xy, brightness, depth; iB = rgb, twinkle phase;
    iC = alpha px, spike len px, quad half px, beta; iD = spike angle jitter,
    arm ratio, halo amp, halo radius. `occlude` maps a star's sky position to a
    dust transmittance — an opt-in, deliberate break with additive-last. */
-export function buildBrightStarNodes(U, { occlude = null } = {}) {
+export function buildBrightStarNodes(U, { occlude = null, wideScale = null } = {}) {
+  /* A low-res target's clip scale: given one, each spikeless quad shrinks to its
+     PSF and its glow moves to a second node pair drawn into that target. */
+  const split = wideScale !== null;
   const iA = attribute('iA', 'vec4');
   const iB = attribute('iB', 'vec4');
   const iC = attribute('iC', 'vec4');
@@ -91,35 +97,47 @@ export function buildBrightStarNodes(U, { occlude = null } = {}) {
   /* Only declared when the gate is on, so an unoccluded build carries no extra varying */
   const vTrans = occlude ? varyingProperty('vec3', 'vTrans') : null;
 
+  /* Diffraction redistributes light; only saturated cores show spikes, and
+     the steep gate is what keeps that to the top of the flux distribution */
+  const spikeGate = () => clamp(iA.z.sub(U.uSpikeThreshold).mul(4.5), 0.0, 1.0);
+  const haloGate = () => smoothstep(0.10, 0.42, iA.z);
+  /* One predicate for both passes, so a live threshold change moves a star's
+     glow between them in the same frame. */
+  const spikeless = () => spikeGate().lessThanEqual(0.0);
+
+  /* Instance positions are absolute sky coords; the camera subtracts here so
+     a pan needs no buffer rewrite until the tile block itself moves. */
+  const quadClip = (corner, half) => {
+    const uvStar = vec2(iA.x.sub(U.uCamera.x).div(U.uAspect), iA.y.sub(U.uCamera.y));
+    const clip = uvStar.mul(2.0).sub(1.0);
+    const cornerClip = corner.mul(half).mul(2.0).div(U.uResolution);
+    const parallaxClip = U.uParallax.mul(iA.w).mul(2.0).div(U.uResolution);
+    return vec3(clip.add(cornerClip).add(parallaxClip), 0.0);
+  };
+
   const positionNode = Fn(() => {
     const corner = positionLocal.xy;
-    vCorner.assign(corner);
-    vLocal.assign(corner.mul(iC.z));
+    /* vCorner stays in full-quad units, so the soft window sits outside the shrunken quad */
+    const half = split
+      ? spikeless().select(min(iC.z, iC.x.mul(PSF_HALF)), iC.z).toVar()
+      : iC.z;
+    vCorner.assign(split ? corner.mul(half.div(iC.z)) : corner);
+    vLocal.assign(corner.mul(half));
     vColor.assign(iB.xyz);
     vMisc.assign(vec3(iA.z, iC.x, iC.w));
     const spikeAt = U.uSpikeAngle.add(iD.x.mul(U.uSpikeJitter)).toVar();
     vSpike.assign(vec3(iC.y, iD.y, iD.z));
-    vHalo.assign(vec2(iD.w, smoothstep(0.10, 0.42, iA.z)));
+    vHalo.assign(vec2(iD.w, haloGate()));
     /* The same law compose runs over the baked field, so the two tiers scintillate
        as one sky. Phases arrive pre-wrapped to [0,1) so sin stays small. */
     vStar.assign(vec4(
       twinkleMod(U.uTwinklePhase, iB.w, U.uTwinkleDepth),
-      cos(spikeAt), sin(spikeAt),
-      /* Diffraction redistributes light; only saturated cores show spikes, and
-         the steep gate is what keeps that to the top of the flux distribution */
-      clamp(iA.z.sub(U.uSpikeThreshold).mul(4.5), 0.0, 1.0),
+      cos(spikeAt), sin(spikeAt), spikeGate(),
     ));
     /* Per star, not per fragment: a lane is far wider than one PSF, and the
        vertex path costs four samples instead of a hundred thousand. */
     if (vTrans) vTrans.assign(occlude(iA.xy));
-
-    /* Instance positions are absolute sky coords; the camera subtracts here so
-       a pan needs no buffer rewrite until the tile block itself moves. */
-    const uvStar = vec2(iA.x.sub(U.uCamera.x).div(U.uAspect), iA.y.sub(U.uCamera.y));
-    const clip = uvStar.mul(2.0).sub(1.0);
-    const cornerClip = corner.mul(iC.z).mul(2.0).div(U.uResolution);
-    const parallaxClip = U.uParallax.mul(iA.w).mul(2.0).div(U.uResolution);
-    return vec3(clip.add(cornerClip).add(parallaxClip), 0.0);
+    return quadClip(corner, half);
   })();
 
   const fragmentNode = Fn(() => {
@@ -175,9 +193,53 @@ export function buildBrightStarNodes(U, { occlude = null } = {}) {
        Edges ascend; reversed smoothstep edges are undefined per spec. */
     const edge = float(1).sub(smoothstep(0.86, 1.0, max(abs(vCorner.x), abs(vCorner.y))));
 
-    const lit = colC.mul(coreI).add(spikeRGB).mul(edge).mul(U.uStarGain);
+    const body = colC.mul(coreI).add(spikeRGB);
+    /* Ramped in from the center, where the glow is too sharp for a low-res target;
+       the ramp completes inside the shrunken quad, so nothing is cut at its edge. */
+    const handed = split
+      ? halo.add(wide).mul(smoothstep(0.0, a2.mul(PSF_HALF * PSF_HALF), r2))
+        .mul(vStar.w.greaterThan(0.0).select(0.0, 1.0))
+      : null;
+    /* The whitening above still reads the whole intensity; only the handed-over
+       term leaves, in the spectral color the low-res pass draws it in. */
+    const lit = (split ? body.sub(vColor.mul(L).mul(handed)) : body).mul(edge).mul(U.uStarGain);
     return vec4(vTrans ? lit.mul(vTrans) : lit, 1.0);
   })();
 
-  return { positionNode, fragmentNode };
+  if (!split) return { positionNode, fragmentNode };
+
+  const wLocal = varyingProperty('vec2', 'vWideLocal');
+  const wCorner = varyingProperty('vec2', 'vWideCorner');
+  const wLit = varyingProperty('vec3', 'vWideLit'); // rgb × L × gain
+  /* Wide falloff px², halo falloff px², ramp end px², wide amplitude */
+  const wTerms = varyingProperty('vec4', 'vWideTerms');
+  const wTrans = occlude ? varyingProperty('vec3', 'vWideTrans') : null;
+
+  const widePositionNode = Fn(() => {
+    const corner = positionLocal.xy;
+    /* Zero area unless the full-res quad handed this glow over */
+    const half = spikeless().select(iC.z, 0.0).toVar();
+    wCorner.assign(corner);
+    wLocal.assign(corner.mul(half));
+    wLit.assign(iB.xyz.mul(iA.z)
+      .mul(twinkleMod(U.uTwinklePhase, iB.w, U.uTwinkleDepth)).mul(U.uStarGain));
+    const a2 = iC.x.mul(iC.x).toVar();
+    wTerms.assign(vec4(
+      a2.mul(iD.w).mul(140.0), a2.mul(22.0), a2.mul(PSF_HALF * PSF_HALF),
+      iD.z.mul(0.06).mul(haloGate()),
+    ));
+    if (wTrans) wTrans.assign(occlude(iA.xy));
+    return quadClip(corner, half).mul(vec3(wideScale, 1.0));
+  })();
+
+  const wideFragmentNode = Fn(() => {
+    const r2 = dot(wLocal, wLocal);
+    const wide = pow(r2.div(wTerms.x).add(1.0), -1.35).mul(wTerms.w);
+    const halo = pow(r2.div(wTerms.y).add(1.0), -2.2).mul(0.1);
+    const edge = float(1).sub(smoothstep(0.86, 1.0, max(abs(wCorner.x), abs(wCorner.y))));
+    const lit = wLit.mul(halo.add(wide)).mul(smoothstep(0.0, wTerms.z, r2)).mul(edge);
+    return vec4(wTrans ? lit.mul(wTrans) : lit, 1.0);
+  })();
+
+  return { positionNode, fragmentNode, widePositionNode, wideFragmentNode };
 }

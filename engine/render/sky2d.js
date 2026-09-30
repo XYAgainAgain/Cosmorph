@@ -8,7 +8,9 @@ import { createRng, deriveSeed } from '../core/rng.js';
 import { generateBrightStars } from '../entities/stars.js';
 import { buildBrightStarNodes } from '../shaders/tsl/stars.js';
 import { buildEmissionNodes } from '../shaders/tsl/nebula.js';
-import { buildContinuumNodes, wispTau, WISP_SIGMA } from '../shaders/tsl/dust.js';
+import {
+  buildContinuumNodes, buildFaintStarNodes, FAINT_STAR_UNIFORMS, wispTau, WISP_SIGMA,
+} from '../shaders/tsl/dust.js';
 import { buildReflectionNodes, reflectionTau, REFLECTION_DEFAULTS } from '../shaders/tsl/reflection.js';
 import { buildFilamentNodes, FILAMENT_DEFAULTS } from '../shaders/tsl/filaments.js';
 import { buildEchoNodes, echoTau, ECHO_DEFAULTS } from '../shaders/tsl/echo.js';
@@ -214,7 +216,7 @@ function offsetFrom(seed, salt) {
 
 export async function createSky2D({
   canvas, config, forceWebGL = false, maxParallaxPx = 14, baked = false,
-  crossfade = false, renderer: reused = null,
+  crossfade = false, staticBake = true, splitBright = false, renderer: reused = null,
 }) {
   /* Internal: disposing a WebGL2 renderer loses the canvas context, so a rebuild reuses it */
   /* No pass tests depth, and compileAsync keys pipelines on the renderer's depth
@@ -1615,6 +1617,9 @@ export async function createSky2D({
   /* Planes fade independently and chain back-to-back, so one hot plane can
      never starve the rest. */
   const fadeOn = crossfade && baked;
+  /* Light that never reads the evolution clock keeps its own per-plane target
+     instead of riding every rebake; off, a bake renders every term every time. */
+  const staticOn = staticBake && baked;
   let prevTevWall = null;
   let tevPerMs = 0;
   let sliceJob = null;
@@ -1639,7 +1644,7 @@ export async function createSky2D({
      lets resize() and dispose() walk it unconditionally. */
   const builtPlanes = [];
   const bakedGxMeshes = [];
-  const bakedStats = { bakes: 0, frames: 0, planeBakes: {} };
+  const bakedStats = { bakes: 0, frames: 0, planeBakes: {}, staticBakes: 0 };
 
   /* The glow and its shock filaments are one object in two RTs, so each half
      pre-shifts to its own RT depth in order to land together on screen. */
@@ -1798,16 +1803,30 @@ export async function createSky2D({
       return exp(tau.negate().mul(WISP_SIGMA));
     }
     : null;
+  const starMaterial = (positionNode, fragmentNode) => {
+    const mat = new THREE.MeshBasicNodeMaterial();
+    if (positionNode) mat.positionNode = positionNode;
+    mat.fragmentNode = fragmentNode;
+    mat.transparent = true;
+    mat.blending = THREE.AdditiveBlending;
+    mat.depthTest = false;
+    mat.depthWrite = false;
+    return mat;
+  };
   const brightNodes = buildBrightStarNodes(U, { occlude: starOcclude });
-  const brightMat = new THREE.MeshBasicNodeMaterial();
-  brightMat.positionNode = brightNodes.positionNode;
-  brightMat.fragmentNode = brightNodes.fragmentNode;
-  brightMat.transparent = true;
-  brightMat.blending = THREE.AdditiveBlending;
-  brightMat.depthTest = false;
-  brightMat.depthWrite = false;
+  const brightMat = starMaterial(brightNodes.positionNode, brightNodes.fragmentNode);
   let brightMesh = null;
   let dpr = 1;
+
+  /* A trade, hence opt-in: spikeless stars' glow drawn at quarter res cuts star
+     fill where overdraw is high, and costs one more pass where it is not. */
+  const split = baked && splitBright;
+  /* The target overhangs the frame by a texel or more, so this maps frame clip into it */
+  const uWideScale = split ? uniform(new THREE.Vector2(1, 1)) : null;
+  let wideRT = null;
+  let wideScene = null;
+  let wideMat = null;
+  let wideMesh = null;
 
   /* Second bright tier for the baked path: identical geometry, but its occlude
      callback samples a plane bake instead of re-evaluating wisp noise. */
@@ -1902,8 +1921,9 @@ export async function createSky2D({
       brightScene.remove(brightMesh);
     }
     if (bakedBrightMesh) bakedBrightScene.remove(bakedBrightMesh);
-    /* One geometry, two meshes: the baked bright pass shares it, so the single
-       dispose above covers both. */
+    if (wideMesh) wideScene.remove(wideMesh);
+    /* One geometry, every mesh: the baked bright passes share it, so the single
+       dispose above covers them all. */
     const geo = buildBrightGeometry(U.uAspect.value, dpr);
     brightMesh = new THREE.Mesh(geo, brightMat);
     brightMesh.frustumCulled = false;
@@ -1912,6 +1932,11 @@ export async function createSky2D({
       bakedBrightMesh = new THREE.Mesh(geo, bakedBrightMat);
       bakedBrightMesh.frustumCulled = false;
       bakedBrightScene.add(bakedBrightMesh);
+    }
+    if (wideScene) {
+      wideMesh = new THREE.Mesh(geo, wideMat);
+      wideMesh.frustumCulled = false;
+      wideScene.add(wideMesh);
     }
   }
 
@@ -2028,7 +2053,10 @@ export async function createSky2D({
       });
     }
 
-    specs.forEach((spec) => {
+    const prefixed = (bag, prefix) => Object.keys(bag)
+      .filter((key) => key.startsWith(prefix)).map((key) => bag[key]);
+
+    specs.forEach((spec, i) => {
       const by = spec.by;
       const uDepth = planeU[spec.idx];
       const hasDust = spec.hasDust;
@@ -2073,8 +2101,22 @@ export async function createSky2D({
       /* Amplitude, never phase: the bake stores raw star luminance and compose
          owns the modulation, so a rebake cannot snap the field's twinkle. */
       let starSum = float(0.0);
+      /* The clock-free terms, rgb plus star amplitude, and every uniform they
+         read beyond the shared frame; null when this plane has none. */
+      let stillSum = null;
+      const stillUniforms = [];
+      const still = (node, uniforms) => {
+        stillSum = stillSum ? stillSum.add(node) : node;
+        stillUniforms.push(...uniforms);
+      };
       for (const bag of by.ifn ?? []) {
-        const c = buildContinuumNodes(skyU, U.uPxPerUnit, bag, bag.ifnOpts).toVar();
+        const faintStill = staticOn && bag.ifnOpts.faint;
+        if (faintStill) {
+          still(buildFaintStarNodes(skyU, U.uPxPerUnit, bag),
+            FAINT_STAR_UNIFORMS.map((key) => bag[key]));
+        }
+        const c = buildContinuumNodes(skyU, U.uPxPerUnit, bag,
+          faintStill ? { ...bag.ifnOpts, faint: false } : bag.ifnOpts).toVar();
         contSum = contSum.add(c.rgb);
         starSum = starSum.add(c.a);
       }
@@ -2085,9 +2127,24 @@ export async function createSky2D({
       for (const bag of by.searchlight ?? []) contSum = contSum.add(buildSearchlightNodes(skyU, bag, bag.beamOpts).continuum);
       for (const bag of by.planetary ?? []) contSum = contSum.add(buildPlanetaryNodes(skyU, bag, bag.pnOpts).continuum);
       for (const bag of by.wrbubble ?? []) contSum = contSum.add(buildWrBubbleNodes(skyU, bag, bag.wrbOpts).continuum);
-      for (const bag of by.galaxies ?? []) contSum = contSum.add(buildGalaxyNodes(skyU, bag, gxOptsOn(bag)).continuum);
+      for (const bag of by.galaxies ?? []) {
+        let opts = gxOptsOn(bag);
+        /* The field tier is sky-fixed; only the showpiece morphs and turns */
+        if (staticOn && opts.field) {
+          still(vec4(buildGalaxyNodes(skyU, bag, { ...opts, showpiece: false }).continuum, 0.0),
+            prefixed(bag, 'uGxf'));
+          if (!opts.showpiece) continue;
+          opts = { ...opts, field: false };
+        }
+        contSum = contSum.add(buildGalaxyNodes(skyU, bag, opts).continuum);
+      }
       for (const bag of by.clusters ?? []) {
-        const c = buildClusterNodes(skyU, U.uPxPerUnit, bag, bag.cluOpts).continuum.toVar();
+        const cluster = buildClusterNodes(skyU, U.uPxPerUnit, bag, bag.cluOpts).continuum;
+        if (staticOn) {
+          still(cluster, prefixed(bag, 'uClu'));
+          continue;
+        }
+        const c = cluster.toVar();
         contSum = contSum.add(c.rgb);
         starSum = starSum.add(c.a);
       }
@@ -2121,7 +2178,17 @@ export async function createSky2D({
       const rtA = new THREE.RenderTarget(2, 2, planeOpts);
       const rtB = new THREE.RenderTarget(2, 2, planeOpts);
       const sceneA = fullscreenPass(vec4(lineSum, tauSum));
-      const sceneB = fullscreenPass(vec4(contSum, starSum));
+      /* Single layer, since both generations of a fade share this light; nearest
+         because the B pass reads it texel for texel and a linear filter would smear. */
+      const staticRT = stillSum
+        ? new THREE.RenderTarget(2, 2, {
+          ...rtOpts, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+        })
+        : null;
+      const staticScene = stillSum ? fullscreenPass(stillSum) : null;
+      const sceneB = fullscreenPass(staticRT
+        ? vec4(contSum, starSum).add(texture(staticRT.texture, bakeUV).setName(`texPlaneStatic${i}`))
+        : vec4(contSum, starSum));
       const gxsMeshes = [];
 
       for (const bag of by.galaxies ?? []) {
@@ -2175,10 +2242,15 @@ export async function createSky2D({
         rtB,
         rimRT,
         occRT,
+        staticRT,
         sceneA,
         sceneB,
         rimScene,
         occScene,
+        staticScene,
+        stillUniforms,
+        /* Uniform values the static target was last rendered with */
+        staticKey: null,
         gxsMeshes,
         /* Swirl-carried here, spin-priced in both lists: a demoted galaxy still
            has to trip its plane's rebake or its spin simply stops. */
@@ -2194,7 +2266,7 @@ export async function createSky2D({
     });
 
     const occPlanes = builtPlanes.filter((pl) => pl.hasOccluder);
-    if (occPlanes.length > 0) {
+    if (occPlanes.length > 0 || split) {
       bakedBrightScene = new THREE.Scene();
       /* Invert skyU to find the star's texel, then undo the render target's
          v-flip; explicit LOD because this samples at the vertex stage. */
@@ -2211,14 +2283,24 @@ export async function createSky2D({
         }
         return exp(tau.negate().mul(WISP_SIGMA));
       };
-      const nodes = buildBrightStarNodes(U, { occlude: bakedOcclude });
-      bakedBrightMat = new THREE.MeshBasicNodeMaterial();
-      bakedBrightMat.positionNode = nodes.positionNode;
-      bakedBrightMat.fragmentNode = nodes.fragmentNode;
-      bakedBrightMat.transparent = true;
-      bakedBrightMat.blending = THREE.AdditiveBlending;
-      bakedBrightMat.depthTest = false;
-      bakedBrightMat.depthWrite = false;
+      const nodes = buildBrightStarNodes(U, {
+        occlude: occPlanes.length > 0 ? bakedOcclude : starOcclude,
+        wideScale: uWideScale,
+      });
+      bakedBrightMat = starMaterial(nodes.positionNode, nodes.fragmentNode);
+      if (split) {
+        wideRT = new THREE.RenderTarget(2, 2, rtOpts);
+        wideScene = new THREE.Scene();
+        wideMat = starMaterial(nodes.widePositionNode, nodes.wideFragmentNode);
+        /* Added inside the bright pass, so the composite binds no extra texture */
+        const haloUV = bakeUV.sub(0.5).mul(uWideScale).add(0.5);
+        const halo = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), starMaterial(null, vec4(
+          texture(wideRT.texture, haloUV).level(float(0)).setName('texBrightWide').rgb, 1.0,
+        )));
+        halo.frustumCulled = false;
+        bakedBrightScene.add(halo);
+        bakedBrightScene.userData.quad = halo;
+      }
     }
 
     if (fadeOn && builtPlanes.length > 0) {
@@ -2289,6 +2371,14 @@ export async function createSky2D({
     lineRT.setSize(w, h);
     contRT.setSize(w, h);
     brightRT.setSize(w, h);
+    if (wideRT) {
+      /* Exactly 4 px per texel with a guard ring: the bilinear tap at a frame edge
+         then blends toward a real texel instead of clamping. */
+      const lw = Math.ceil(w / 4) + 2;
+      const lh = Math.ceil(h / 4) + 2;
+      wideRT.setSize(lw, lh);
+      uWideScale.value.set(w / (4 * lw), h / (4 * lh));
+    }
     if (dust) dust.setSize(w, h);
     /* Rims are soft by nature, so their target rides at half res */
     for (const pl of builtPlanes) {
@@ -2297,6 +2387,7 @@ export async function createSky2D({
       pl.rtB.setSize(w, h, pl.rtB.depth);
       pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)));
       pl.occRT?.setSize(Math.max(1, Math.ceil(w / 4)), Math.max(1, Math.ceil(h / 4)));
+      pl.staticRT?.setSize(w, h);
       pl.uFade.value = 1;
       pl.fadeStart = null;
       pl.dirty = true;
@@ -2371,6 +2462,19 @@ export async function createSky2D({
     pl.uFade.value = 0;
     pl.fadeMs = fadeMs;
     pl.fadeStart = wall;
+  }
+
+  /* Whole and never sliced, and only when the frame or a poked uniform moved
+     it, so every B bake and every band of one reads a finished target. */
+  function bakeStatic(pl) {
+    if (!pl.staticScene) return;
+    const key = pl.stillUniforms
+      .map((u) => (typeof u.value === 'number' ? u.value : u.value.toArray())).join();
+    if (!pl.dirty && key === pl.staticKey) return;
+    pl.staticKey = key;
+    renderer.setRenderTarget(pl.staticRT);
+    renderer.render(pl.staticScene, camera);
+    bakedStats.staticBakes += 1;
   }
 
   /* One band of an in-flight sliced rebake, written to the back layer while
@@ -2474,6 +2578,7 @@ export async function createSky2D({
         pl.fadeStart = null;
         pl.uFade.value = 1;
       }
+      bakeStatic(pl);
 
       /* Spin-carrying planes bake whole: their glow reads the live spin phase,
          and bands rendered on different frames would shear at every seam. */
@@ -2522,6 +2627,10 @@ export async function createSky2D({
       bakedStats.planeBakes[pl.name] = (bakedStats.planeBakes[pl.name] ?? 0) + 1;
     }
 
+    if (wideScene) {
+      renderer.setRenderTarget(wideRT);
+      renderer.render(wideScene, camera);
+    }
     renderer.setRenderTarget(brightRT);
     renderer.render(bakedBrightScene ?? brightScene, camera);
     renderer.setRenderTarget(null);
@@ -2578,6 +2687,8 @@ export async function createSky2D({
       pl.rtB.dispose();
       pl.rimRT?.dispose();
       pl.occRT?.dispose();
+      pl.staticRT?.dispose();
+      disposePass(pl.staticScene);
       disposePass(pl.sceneA);
       disposePass(pl.sceneB);
       disposePass(pl.rimScene);
@@ -2587,6 +2698,9 @@ export async function createSky2D({
     /* Geometry only ever belongs to the live mesh, hence material-only here */
     for (const mesh of bakedGxMeshes) mesh.material.dispose();
     bakedBrightMat?.dispose();
+    wideRT?.dispose();
+    wideMat?.dispose();
+    disposePass(bakedBrightScene);
   }
 
   function dispose() {
@@ -2604,6 +2718,16 @@ export async function createSky2D({
   builtPlanes.forEach((pl, i) => {
     /* A fading plane's targets are layered; a draw belongs on the visible one */
     const front = () => pl.uFront.value;
+    if (pl.staticScene) {
+      passes.push({
+        id: `plane${i}.static`,
+        scene: pl.staticScene,
+        mesh: pl.staticScene.userData.quad,
+        target: pl.staticRT,
+        targetScale: 1,
+        draw: drawTo(pl.staticRT, pl.staticScene),
+      });
+    }
     passes.push({
       id: `plane${i}.a`,
       scene: pl.sceneA,
@@ -2661,6 +2785,16 @@ export async function createSky2D({
     });
   }
   const brightSceneUsed = bakedBrightScene ?? brightScene;
+  if (wideScene) {
+    passes.push({
+      id: 'brightWide',
+      scene: wideScene,
+      get mesh() { return wideMesh; },
+      target: wideRT,
+      targetScale: 0.25,
+      draw: drawTo(wideRT, wideScene),
+    });
+  }
   passes.push({
     id: 'bright',
     scene: brightSceneUsed,
@@ -2670,6 +2804,16 @@ export async function createSky2D({
     targetScale: 1,
     draw: drawTo(brightRT, brightSceneUsed),
   });
+  if (wideScene) {
+    passes.push({
+      id: 'bright.halo',
+      scene: brightSceneUsed,
+      mesh: brightSceneUsed.userData.quad,
+      target: brightRT,
+      targetScale: 1,
+      draw: drawTo(brightRT, brightSceneUsed),
+    });
+  }
   const composeSceneUsed = bakedComposeScene ?? composeScene;
   passes.push({
     id: 'compose',
@@ -2686,9 +2830,10 @@ export async function createSky2D({
   const warmJobs = baked
     ? [
       ...builtPlanes.flatMap((pl) => [
-        [pl.rtA, pl.sceneA], [pl.rtB, pl.sceneB], [pl.rimRT, pl.rimScene], [pl.occRT, pl.occScene],
+        [pl.staticRT, pl.staticScene], [pl.rtA, pl.sceneA], [pl.rtB, pl.sceneB],
+        [pl.rimRT, pl.rimScene], [pl.occRT, pl.occScene],
       ]),
-      [brightRT, bakedBrightScene ?? brightScene], [null, bakedComposeScene],
+      [wideRT, wideScene], [brightRT, bakedBrightScene ?? brightScene], [null, bakedComposeScene],
     ]
     : [[lineRT, lineScene], [contRT, contScene], [brightRT, brightScene], [null, composeScene]];
   if (dust) warmJobs.push([dust.rt, dust.scene]);

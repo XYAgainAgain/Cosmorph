@@ -11,6 +11,29 @@ import { faintStarLayer } from './stars.js';
    the summed tau of every layer; one constant, one reddening law. */
 export const WISP_SIGMA = /*@__PURE__*/ vec3(1.0, 1.35, 1.9);
 
+/* Every uniform faintField reads beyond the shared frame: a baked build holds
+   the field in its own target and watches these to know when to redraw it. */
+export const FAINT_STAR_UNIFORMS = [
+  'uStarDensity', 'uBandY', 'uBandTilt', 'uBandGain', 'uBandWidth',
+  'uClumpOff', 'uStarOffA', 'uStarOffB',
+];
+
+/* Both faint grid scales; rgb is star light, alpha its raw luminance */
+function faintField(skyU, pxPerUnit, U) {
+  /* Galactic-plane gradient + fbm clumping; uniform scatter is the tell */
+  const bandD = abs(skyU.y.sub(skyU.x.mul(U.uBandTilt)).sub(U.uBandY));
+  const grad = mix(1.0, U.uBandGain, smoothstep(0.0, U.uBandWidth, bandD));
+  const clump = fbm3o2(vec3(skyU.mul(2.6), 0.0).add(U.uClumpOff)).mul(0.9).add(0.55);
+  const density = U.uStarDensity.mul(grad).mul(clump).min(1.0);
+
+  const cellsA = U.uStarDensity.mul(0.0).add(42.0).toVar();
+  const scaleA = U.uStarDensity.mul(0.0).add(1.7).toVar();
+  const cellsB = U.uStarDensity.mul(0.0).add(14.0).toVar();
+  const scaleB = U.uStarDensity.mul(0.0).add(4.0).toVar();
+  return faintStarLayer(skyU, pxPerUnit, cellsA, density, scaleA, U.uStarOffA)
+    .add(faintStarLayer(skyU, pxPerUnit, cellsB, density.mul(0.55), scaleB, U.uStarOffB));
+}
+
 /* Continuum pass: IFN wisps at a few percent of range (the dither QA target)
    plus the two faint star grid scales. */
 export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
@@ -53,21 +76,15 @@ export function buildContinuumNodes(skyU, pxPerUnit, U, opts = {}) {
        Alpha is the star-luminance stamp compose twinkles from; gas writes none. */
     if (!faint) return vec4(ifnCol, 0.0);
 
-    /* Galactic-plane gradient + fbm clumping; uniform scatter is the tell */
-    const bandD = abs(skyU.y.sub(skyU.x.mul(U.uBandTilt)).sub(U.uBandY));
-    const grad = mix(1.0, U.uBandGain, smoothstep(0.0, U.uBandWidth, bandD));
-    const clump = fbm3o2(vec3(skyU.mul(2.6), 0.0).add(U.uClumpOff)).mul(0.9).add(0.55);
-    const density = U.uStarDensity.mul(grad).mul(clump).min(1.0);
-
-    const cellsA = U.uStarDensity.mul(0.0).add(42.0).toVar();
-    const scaleA = U.uStarDensity.mul(0.0).add(1.7).toVar();
-    const cellsB = U.uStarDensity.mul(0.0).add(14.0).toVar();
-    const scaleB = U.uStarDensity.mul(0.0).add(4.0).toVar();
-    const stars = faintStarLayer(skyU, pxPerUnit, cellsA, density, scaleA, U.uStarOffA)
-      .add(faintStarLayer(skyU, pxPerUnit, cellsB, density.mul(0.55), scaleB, U.uStarOffB));
-
+    const stars = faintField(skyU, pxPerUnit, U);
     return vec4(ifnCol.add(stars.rgb), stars.a);
   })();
+}
+
+/* The two faint star grids alone: nothing in them reads the evolution clock,
+   so a bake can hold them still while the gas around them drifts. */
+export function buildFaintStarNodes(skyU, pxPerUnit, U) {
+  return Fn(() => faintField(skyU, pxPerUnit, U))();
 }
 
 /* Optical depth of the dark wisp layer, evaluated where compose asks */
