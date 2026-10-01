@@ -14,6 +14,9 @@ pub struct Bake {
     /// The tev this bake started at. Later bands of a banded bake carry the first
     /// band's value, so a plane never blends two evolution moments across a seam.
     pub tev: f64,
+    /// The plane was dirty when this bake started: it refills what is on screen
+    /// instead of the hidden layer, since there is nothing valid to fade from.
+    pub hard: bool,
 }
 
 impl Bake {
@@ -41,6 +44,7 @@ struct Plane {
     baked_tev: Option<f64>,
     band: u32,
     bake_tev: f64,
+    bake_hard: bool,
 }
 
 #[derive(Debug)]
@@ -65,6 +69,7 @@ impl Scheduler {
                     baked_tev: None,
                     band: 0,
                     bake_tev: 0.0,
+                    bake_hard: true,
                 })
                 .collect(),
             bands: bands.max(1),
@@ -85,27 +90,28 @@ impl Scheduler {
 
     /// The stalest plane by `|ΔTev| × score`, or one whose `spin_px` clears
     /// `SPIN_REBAKE_PX` however fresh its score. Advanced one band, at most one per frame.
-    pub fn next(&mut self, tev: f64, spin_px: &[f32]) -> Option<Bake> {
+    /// A `held` plane is mid-crossfade and waits for its blend to land unless dirty.
+    pub fn next(&mut self, tev: f64, spin_px: &[f32], held: &[bool]) -> Option<Bake> {
         let starting = self.active.is_none();
         let index = match self.active {
             Some(index) => index,
-            None => self.stalest(tev, spin_px)?,
+            None => self.stalest(tev, spin_px, held)?,
         };
         let plane = &mut self.planes[index];
-        // Single band while a plane carries live swirl: an intermediate band
-        // would mix strips at the new tev with a plane_baked_tev still holding
-        // the old one, double-displacing the strips already finished. The real
-        // fix is a two-generation handoff.
+        // A swirl plane bakes whole: a hard bake's strips would sit on screen against the old
+        // plane_baked_tev and double-displace, and soft swirl bakes are whole in the browser too.
         let bands = if plane.swirl { 1 } else { self.bands };
         if starting {
             plane.bake_tev = tev;
             plane.band = 0;
+            plane.bake_hard = plane.dirty;
         }
         let bake = Bake {
             plane: index,
             band: plane.band,
             bands,
             tev: plane.bake_tev,
+            hard: plane.bake_hard,
         };
         plane.band += 1;
         let done = plane.band >= bands;
@@ -117,7 +123,7 @@ impl Scheduler {
         Some(bake)
     }
 
-    fn stalest(&self, tev: f64, spin_px: &[f32]) -> Option<usize> {
+    fn stalest(&self, tev: f64, spin_px: &[f32], held: &[bool]) -> Option<usize> {
         self.planes
             .iter()
             .enumerate()
@@ -128,7 +134,9 @@ impl Scheduler {
                 let priority = staleness.max(
                     (spin as f64 / SPIN_REBAKE_PX as f64) * REBAKE_EPS,
                 );
-                (plane.dirty || spun || staleness >= REBAKE_EPS).then_some((index, priority))
+                let held = held.get(index).copied().unwrap_or(false);
+                (plane.dirty || (!held && (spun || staleness >= REBAKE_EPS)))
+                    .then_some((index, priority))
             })
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
@@ -156,6 +164,7 @@ mod tests {
             rate: rigid as f64,
             phase_uniform: String::new(),
             bake_phase_uniform: String::new(),
+            prev_bake_phase_uniform: String::new(),
             lead: 0.0,
             sat_ramp: 512.0,
             wrap: 4096.0,
@@ -172,6 +181,7 @@ mod tests {
                 band,
                 bands: 4,
                 tev: 0.0,
+                hard: false,
             }
             .rows(2561);
             assert_eq!(y, covered);
@@ -183,14 +193,14 @@ mod tests {
     #[test]
     fn a_banded_bake_holds_one_plane_and_one_tev_across_its_frames() {
         let mut scheduler = Scheduler::new(&[0.26, 1.30], &[false, false], 3);
-        let first = scheduler.next(0.5, &[]).unwrap();
+        let first = scheduler.next(0.5, &[], &[]).unwrap();
         for band in 1..3 {
-            let bake = scheduler.next(0.9, &[]).unwrap();
+            let bake = scheduler.next(0.9, &[], &[]).unwrap();
             assert_eq!(bake.plane, first.plane);
             assert_eq!(bake.band, band);
             assert_eq!(bake.tev, first.tev, "a band drifted off the bake's tev");
         }
-        let next = scheduler.next(0.5, &[]).unwrap();
+        let next = scheduler.next(0.5, &[], &[]).unwrap();
         assert_ne!(next.plane, first.plane);
     }
 
@@ -200,7 +210,7 @@ mod tests {
     fn a_demoted_galaxys_spin_still_buys_rebakes_on_a_zero_morph_plane() {
         let spin = demoted(0.024_544);
         let mut scheduler = Scheduler::new(&[0.0], &[false], 1);
-        let first = scheduler.next(0.0, &[0.0]).unwrap();
+        let first = scheduler.next(0.0, &[0.0], &[]).unwrap();
         assert!(first.is_last());
         let mut baked = first.tev;
 
@@ -215,7 +225,7 @@ mod tests {
                 (tev - baked) >= 0.05,
                 "the demoted rebake floor is not holding at tev {tev}"
             );
-            if let Some(bake) = scheduler.next(tev, &[drift]) {
+            if let Some(bake) = scheduler.next(tev, &[drift], &[]) {
                 rebakes += 1;
                 baked = bake.tev;
             }
@@ -226,13 +236,13 @@ mod tests {
     #[test]
     fn spin_only_plane_is_not_starved_by_a_morphing_plane() {
         let mut scheduler = Scheduler::new(&[1.0, 0.0], &[false, false], 1);
-        scheduler.next(0.0, &[0.0, 0.0]).unwrap();
-        scheduler.next(0.0, &[0.0, 0.0]).unwrap();
+        scheduler.next(0.0, &[0.0, 0.0], &[]).unwrap();
+        scheduler.next(0.0, &[0.0, 0.0], &[]).unwrap();
 
         let mut spin_drift = 0.0;
         for step in 1..=100 {
             spin_drift += SPIN_REBAKE_PX * 0.25;
-            let bake = scheduler.next(step as f64 * REBAKE_EPS, &[0.0, spin_drift]);
+            let bake = scheduler.next(step as f64 * REBAKE_EPS, &[0.0, spin_drift], &[]);
             if bake.is_some_and(|bake| bake.plane == 1) {
                 spin_drift = 0.0;
             }
@@ -246,16 +256,36 @@ mod tests {
     #[test]
     fn a_swirl_plane_never_bakes_in_bands() {
         let mut scheduler = Scheduler::new(&[1.0, 1.0], &[true, false], 4);
-        let first = scheduler.next(0.0, &[]).unwrap();
+        let first = scheduler.next(0.0, &[], &[]).unwrap();
         let want = if first.plane == 0 { 1 } else { 4 };
         assert_eq!(first.bands, want);
         // Drain the banded plane's remaining frames before reading the other.
         let mut bake = first;
         while !bake.is_last() {
-            bake = scheduler.next(0.0, &[]).unwrap();
+            bake = scheduler.next(0.0, &[], &[]).unwrap();
         }
-        let other = scheduler.next(0.0, &[]).unwrap();
+        let other = scheduler.next(0.0, &[], &[]).unwrap();
         assert_ne!(other.plane, first.plane);
         assert_eq!(other.bands, if other.plane == 0 { 1 } else { 4 });
+    }
+
+    #[test]
+    fn a_held_plane_waits_out_its_fade_unless_dirty() {
+        let mut scheduler = Scheduler::new(&[1.0, 1.0], &[false, false], 1);
+        let first = scheduler.next(0.0, &[], &[]).unwrap();
+        assert!(first.hard, "a boot bake refills the visible layer");
+        let second = scheduler.next(0.0, &[], &[]).unwrap();
+        assert_ne!(second.plane, first.plane);
+        assert!(scheduler.next(0.0, &[], &[]).is_none());
+
+        let stale = 10.0 * REBAKE_EPS;
+        assert!(scheduler.next(stale, &[], &[true, true]).is_none());
+        let soft = scheduler.next(stale, &[], &[true, false]).unwrap();
+        assert_eq!(soft.plane, 1);
+        assert!(!soft.hard, "a scheduled rebake fills the hidden layer");
+
+        scheduler.mark_all_dirty();
+        let dirty = scheduler.next(stale, &[], &[true, true]).unwrap();
+        assert!(dirty.hard, "dirty outranks a running fade");
     }
 }

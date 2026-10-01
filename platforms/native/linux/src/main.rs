@@ -292,6 +292,7 @@ fn run() -> Result<()> {
         twinkle_phase: [0.0; 3],
         parallax: [0.0, 0.0],
         active_rects: FrameInput::ALL_RECTS,
+        wall_ms: 0.0,
     };
     unsafe { engine.warm_start(&gl, warm) }?;
 
@@ -406,6 +407,7 @@ fn run() -> Result<()> {
                     twinkle_phase: twinkle_phase(elapsed_s, twinkle_rate),
                     parallax: [cursor.0 * dpr, cursor.1 * dpr],
                     active_rects: active,
+                    wall_ms: now_ms,
                 };
                 unsafe { engine.render(&gl, input) }?;
                 if full_damage {

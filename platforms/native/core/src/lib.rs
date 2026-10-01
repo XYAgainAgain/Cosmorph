@@ -4,6 +4,7 @@
 pub mod bundle;
 pub mod cadence;
 pub mod clock;
+pub mod fade;
 pub mod frame;
 pub mod program;
 pub mod scheduler;

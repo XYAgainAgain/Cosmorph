@@ -4,7 +4,8 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 
-use cosmorph_native_core::bundle::Bundle;
+use cosmorph_native_core::bundle::{Bundle, SamplerKind};
+use cosmorph_native_core::scheduler::REBAKE_EPS;
 use cosmorph_native_core::frame::{Engine, FrameInput, Rect};
 use glow::HasContext;
 use khronos_egl as egl;
@@ -196,6 +197,7 @@ fn the_whole_pass_graph_links_binds_and_draws() {
         twinkle_phase: [0.25, 0.4, 0.6],
         parallax: [3.0, -2.0],
         active_rects: FrameInput::ALL_RECTS,
+        wall_ms: 0.0,
     };
     unsafe { engine.warm_start(&gl, input) }.unwrap_or_else(|e| panic!("warm_start: {e}"));
     unsafe { engine.render(&gl, input) }.unwrap_or_else(|e| panic!("render: {e}"));
@@ -271,6 +273,51 @@ fn the_whole_pass_graph_links_binds_and_draws() {
     unsafe { cosmorph_native_core::frame::check_errors(&gl, "banded bakes") }
         .unwrap_or_else(|e| panic!("{e}"));
 
+    // Crossfade: a scheduled rebake fills the hidden layer, swaps it in at weight 0,
+    // and eases over wall time, so no frame differs from the last by more than drift.
+    for (target, spec) in engine.targets().iter().zip(&parsed.manifest.targets) {
+        assert_eq!(target.layers, spec.layers, "{} layers", spec.id);
+    }
+    let compose = parsed.manifest.programs.iter().find(|p| p.id == "compose").expect("compose");
+    let arrays = compose.samplers.iter().filter(|s| s.kind == SamplerKind::Sampler2DArray).count();
+    assert_eq!(arrays, 2 * planes, "compose reads every plane's A and B as two-layer arrays");
+    assert!(parsed.manifest.planes.iter().all(|p| p.fade.is_some()), "a plane carries no fade");
+
+    let hottest = parsed.manifest.planes.iter().map(|p| p.score).fold(0.0f32, f32::max) as f64;
+    // The hottest plane goes stale every two seconds, so fades chain and overlap.
+    let tev_per_frame = REBAKE_EPS / hottest / 120.0;
+    let mut before = read_composite(&gl, SPAN);
+    let mut worst = 0u8;
+    let mut swaps = vec![0u32; planes];
+    for frame in 1..=900u32 {
+        let fades = engine.fades().to_vec();
+        let step = FrameInput {
+            tev: input.tev + frame as f64 * tev_per_frame,
+            wall_ms: frame as f64 * 1000.0 / 60.0,
+            ..input
+        };
+        unsafe { engine.render(&gl, step) }.unwrap_or_else(|e| panic!("fade frame {frame}: {e}"));
+        for (plane, (was, now)) in fades.iter().zip(engine.fades()).enumerate() {
+            if now.front != was.front {
+                swaps[plane] += 1;
+                assert!(!was.active(), "plane {plane} rebaked mid-fade at frame {frame}");
+                assert_eq!(now.back, was.front, "plane {plane} swap lost the outgoing layer");
+                assert_eq!(now.weight, 0.0, "plane {plane} swapped in above weight 0");
+            } else {
+                assert!(now.weight >= was.weight, "plane {plane} fade reversed at frame {frame}");
+            }
+        }
+        let after = read_composite(&gl, SPAN);
+        worst = worst.max(max_delta(&before, &after));
+        before = after;
+    }
+    unsafe { cosmorph_native_core::frame::check_errors(&gl, "crossfade frames") }
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("crossfade: swaps per plane {swaps:?}, worst frame-to-frame delta {worst}/255");
+    assert!(swaps.iter().all(|&n| n >= 1), "a plane never soft-rebaked: {swaps:?}");
+    assert!(swaps.iter().any(|&n| n >= 4), "the hottest plane should chain fades: {swaps:?}");
+    assert!(worst <= 3, "a frame jumped {worst}/255 from the one before it");
+
     // A hotplug reallocates every attachment; the targets have to come back
     // complete at the new span and keep drawing without a GL error.
     const RESPAN: Rect = Rect { x: 0, y: 0, w: 240, h: 96 };
@@ -289,4 +336,25 @@ fn the_whole_pass_graph_links_binds_and_draws() {
         .unwrap_or_else(|e| panic!("{e}"));
 
     unsafe { engine.delete(&gl) };
+}
+
+fn read_composite(gl: &glow::Context, span: Rect) -> Vec<u8> {
+    let mut pixels = vec![0u8; (span.w * span.h * 4) as usize];
+    unsafe {
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.read_pixels(
+            0,
+            0,
+            span.w,
+            span.h,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixels)),
+        )
+    };
+    pixels
+}
+
+fn max_delta(a: &[u8], b: &[u8]) -> u8 {
+    a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
 }

@@ -6,6 +6,7 @@ use glow::HasContext;
 use crate::bundle::{
     spin_phase, Blend, Bundle, GlslType, IndexType, PlaneSpec, ProgramSpec, SamplerSource,
 };
+use crate::fade::{self, PlaneFade, TevRate};
 use crate::program::GpuProgram;
 use crate::scheduler::{Bake, Scheduler};
 use crate::stars;
@@ -39,6 +40,9 @@ pub struct FrameInput {
     /// Bit `i` set draws monitor rect `i` in the composite; a clear bit is a rect
     /// some window covers. Rects past 63 are always drawn.
     pub active_rects: u64,
+    /// Monotonic milliseconds. Crossfades run on wall time, since a blend timed in
+    /// tev would crawl or strobe with the evolution rate.
+    pub wall_ms: f64,
 }
 
 impl FrameInput {
@@ -93,6 +97,20 @@ enum Dyn {
     /// last bake. Carries the galaxy's own signed pattern speed.
     SpinPhase(f64),
     BakeSpinPhase(usize, f64),
+    /// A plane's crossfade: front-layer weight, the layer pair, and the bake
+    /// clocks of the outgoing generation it fades from.
+    FadeWeight(usize),
+    FrontLayer(usize),
+    BackLayer(usize),
+    PrevBakeTev(usize),
+    PrevBakeSpinPhase(usize, f64),
+}
+
+/// Per-plane clock and fade state the dynamic members read.
+struct PlaneState<'a> {
+    baked: &'a [f64],
+    prev_baked: &'a [f64],
+    fades: &'a [PlaneFade],
 }
 
 impl Dyn {
@@ -155,6 +173,45 @@ impl Dyn {
                     })?;
                 Dyn::BakeTev(plane.id)
             }
+            "fadeWeight" | "frontLayer" | "backLayer" | "prevBakeTev" => {
+                let plane = planes
+                    .iter()
+                    .find(|p| {
+                        p.fade.as_ref().is_some_and(|f| match key {
+                            "fadeWeight" => f.fade_uniform == uniform,
+                            "frontLayer" => f.front_uniform == uniform,
+                            "backLayer" => f.back_uniform == uniform,
+                            _ => f.prev_bake_tev_uniforms.iter().any(|u| u == uniform),
+                        })
+                    })
+                    .ok_or_else(|| {
+                        Error::from(format!(
+                            "program '{program}' drives '{uniform}' as {key} but no plane's fade names it"
+                        ))
+                    })?;
+                match key {
+                    "fadeWeight" => Dyn::FadeWeight(plane.id),
+                    "frontLayer" => Dyn::FrontLayer(plane.id),
+                    "backLayer" => Dyn::BackLayer(plane.id),
+                    _ => Dyn::PrevBakeTev(plane.id),
+                }
+            }
+            "prevBakeSpinPhase" => {
+                let (plane, spec) = planes
+                    .iter()
+                    .find_map(|p| {
+                        p.spin
+                            .iter()
+                            .find(|s| s.prev_bake_phase_uniform == uniform)
+                            .map(|s| (p, s))
+                    })
+                    .ok_or_else(|| {
+                        Error::from(format!(
+                            "program '{program}' drives '{uniform}' but no plane's spin list names it"
+                        ))
+                    })?;
+                Dyn::PrevBakeSpinPhase(plane.id, spec.rate)
+            }
             other => {
                 return Err(format!(
                     "program '{program}' member '{uniform}' declares dynamic '{other}', which this host does not drive"
@@ -170,8 +227,9 @@ impl Dyn {
         camera: [f32; 2],
         input: &FrameInput,
         tev: f64,
-        baked: &[f64],
+        planes: &PlaneState,
     ) -> ([f32; 4], usize) {
+        let baked = planes.baked;
         let pair = |a: f32, b: f32| ([a, b, 0.0, 0.0], 2);
         let one = |a: f32| ([a, 0.0, 0.0, 0.0], 1);
         let three = |v: [f32; 3]| ([v[0], v[1], v[2], 0.0], 3);
@@ -189,6 +247,13 @@ impl Dyn {
             Dyn::PxPerUnit => one(view.px_per_unit),
             Dyn::Camera => pair(camera[0], camera[1]),
             Dyn::Depth(depth) => one(depth),
+            Dyn::FadeWeight(plane) => one(planes.fades[plane].weight as f32),
+            Dyn::FrontLayer(plane) => one(planes.fades[plane].front as f32),
+            Dyn::BackLayer(plane) => one(planes.fades[plane].back as f32),
+            Dyn::PrevBakeTev(plane) => one(planes.prev_baked[plane] as f32),
+            Dyn::PrevBakeSpinPhase(plane, rate) => {
+                one(spin_phase(rate, planes.prev_baked[plane]) as f32)
+            }
         }
     }
 }
@@ -261,6 +326,12 @@ pub struct Engine {
     /// The tev each plane's targets currently hold, committed on a bake's last
     /// band. Compose warps galaxy spin against it, so it must never run ahead.
     plane_baked_tev: Vec<f64>,
+    /// The tev the back layer holds while a fade blends it out.
+    plane_prev_baked_tev: Vec<f64>,
+    /// Parallel to the planes; a plane without a fade spec keeps the default and
+    /// bakes straight onto the layer it shows.
+    fades: Vec<PlaneFade>,
+    rate: TevRate,
     camera: [f32; 2],
     view: View,
     scissors: Vec<(i32, i32, i32, i32)>,
@@ -413,6 +484,7 @@ impl Engine {
             .collect();
         let bake_counts = vec![0u32; m.planes.len()];
         let plane_baked_tev = vec![0.0f64; m.planes.len()];
+        let fades = vec![PlaneFade::default(); m.planes.len()];
         let camera = m.scene.camera;
         let span = Rect { x: 0, y: 0, w: 1, h: 1 };
         let view = View::new(span, 1.0, m.scene.max_parallax_px);
@@ -430,7 +502,10 @@ impl Engine {
             frame_passes,
             scheduler: Scheduler::new(&scores, &swirl, 1),
             bake_counts,
+            plane_prev_baked_tev: plane_baked_tev.clone(),
             plane_baked_tev,
+            fades,
+            rate: TevRate::default(),
             camera,
             view,
             scissors: Vec::new(),
@@ -453,6 +528,11 @@ impl Engine {
     /// Parallel to `manifest.planes`. A banded bake counts once, on its last band.
     pub fn bake_counts(&self) -> &[u32] {
         &self.bake_counts
+    }
+
+    /// Parallel to `manifest.planes`.
+    pub fn fades(&self) -> &[PlaneFade] {
+        &self.fades
     }
 
     /// The composite's per-monitor scissors, `(x, y, w, h)` bottom-left origin and
@@ -548,6 +628,10 @@ impl Engine {
             .collect();
 
         self.scheduler.mark_all_dirty();
+        // Every plane refills its front layer whole, so nothing is left to blend from.
+        for fade in &mut self.fades {
+            fade.cancel();
+        }
         self.sized = true;
         Ok(())
     }
@@ -562,7 +646,7 @@ impl Engine {
         let cap = self.plane_passes.len() * self.scheduler.bands().max(1) as usize + 1;
         for _ in 0..cap {
             let spin = self.spin_drift(input.tev);
-            match self.scheduler.next(input.tev, &spin) {
+            match self.scheduler.next(input.tev, &spin, &[]) {
                 Some(bake) => self.run_bake(gl, bake, &input)?,
                 None => break,
             }
@@ -580,8 +664,15 @@ impl Engine {
     /// Requires a current GL context matching `gl`.
     pub unsafe fn render(&mut self, gl: &glow::Context, input: FrameInput) -> Result<()> {
         self.require_span()?;
+        self.rate.observe(input.tev, input.wall_ms);
+        // Fades step before the bake, so a plane swapping layers this frame
+        // composites at weight 0 and the swap itself never shows.
+        for fade in &mut self.fades {
+            fade.advance(input.wall_ms);
+        }
+        let held: Vec<bool> = self.fades.iter().map(PlaneFade::active).collect();
         let spin = self.spin_drift(input.tev);
-        if let Some(bake) = self.scheduler.next(input.tev, &spin) {
+        if let Some(bake) = self.scheduler.next(input.tev, &spin, &held) {
             self.run_bake(gl, bake, &input)?;
         }
         // Dynamics write after the bake, or compose would warp this frame's fresh
@@ -624,10 +715,14 @@ impl Engine {
     fn write_dynamic(&mut self, program: usize, input: &FrameInput, tev: f64) -> Result<()> {
         let view = self.view;
         let camera = self.camera;
-        let baked = &self.plane_baked_tev;
+        let planes = PlaneState {
+            baked: &self.plane_baked_tev,
+            prev_baked: &self.plane_prev_baked_tev,
+            fades: &self.fades,
+        };
         let gpu = &mut self.programs[program];
         for slot in &self.dynamics[program] {
-            let (values, len) = slot.value.values(&view, camera, input, tev, baked);
+            let (values, len) = slot.value.values(&view, camera, input, tev, &planes);
             gpu.blocks[slot.block].write(slot.member, slot.ty, &values[..len])?;
         }
         Ok(())
@@ -691,23 +786,44 @@ impl Engine {
     }
 
     unsafe fn run_bake(&mut self, gl: &glow::Context, bake: Bake, input: &FrameInput) -> Result<()> {
-        for step in 0..self.plane_passes[bake.plane].len() {
-            let pass = self.plane_passes[bake.plane][step];
+        let plane = bake.plane;
+        let soft = !bake.hard && self.bundle.manifest.planes[plane].fade.is_some();
+        if bake.hard && bake.band == 0 {
+            self.fades[plane].cancel();
+        }
+        // A soft bake fills the hidden layer; a hard one overwrites what is on screen.
+        let layer = if soft { self.fades[plane].back } else { self.fades[plane].front };
+        let dust_owned = self.bundle.manifest.planes[plane].has_dust;
+        for step in 0..self.plane_passes[plane].len() {
+            let pass = self.plane_passes[plane][step];
+            // An unlayered target is on screen as it is written, so a soft bake draws it
+            // whole once: a dust pass on the first band, any other on the last.
+            let shown = soft
+                && self.passes[pass].target.is_some_and(|t| self.targets[t].layers == 1);
+            if shown && bake.band != if dust_owned && step == 0 { 0 } else { bake.bands - 1 } {
+                continue;
+            }
             let program = self.passes[pass].program;
             // Later bands reuse the bake's tev so a plane never seams two moments.
             self.write_dynamic(program, input, bake.tev)?;
-            let scissor = if bake.bands > 1 {
+            let scissor = if bake.bands > 1 && !shown {
                 let (width, height) = self.pass_size(pass);
                 let (y, rows) = bake.rows(height);
                 Some((0, y, width, rows))
             } else {
                 None
             };
-            self.draw(gl, pass, scissor)?;
+            self.draw(gl, pass, scissor, layer)?;
         }
         if bake.is_last() {
-            self.bake_counts[bake.plane] += 1;
-            self.plane_baked_tev[bake.plane] = bake.tev;
+            self.bake_counts[plane] += 1;
+            if soft {
+                self.plane_prev_baked_tev[plane] = self.plane_baked_tev[plane];
+                let spec = &self.bundle.manifest.planes[plane];
+                let duration = fade::duration_ms(spec.score, self.rate.per_ms, !spec.spin.is_empty());
+                self.fades[plane].begin(input.wall_ms, duration);
+            }
+            self.plane_baked_tev[plane] = bake.tev;
         }
         Ok(())
     }
@@ -729,10 +845,10 @@ impl Engine {
                         continue;
                     }
                     let scissor = self.scissors[rect];
-                    self.draw(gl, pass, Some(scissor))?;
+                    self.draw(gl, pass, Some(scissor), 0)?;
                 }
             } else {
-                self.draw(gl, pass, None)?;
+                self.draw(gl, pass, None, 0)?;
             }
         }
         Ok(())
@@ -745,10 +861,17 @@ impl Engine {
         }
     }
 
-    unsafe fn draw(&mut self, gl: &glow::Context, pass: usize, scissor: Option<(i32, i32, i32, i32)>) -> Result<()> {
+    /// `layer` picks the generation a layered target receives; 2D targets ignore it.
+    unsafe fn draw(
+        &mut self,
+        gl: &glow::Context,
+        pass: usize,
+        scissor: Option<(i32, i32, i32, i32)>,
+        layer: usize,
+    ) -> Result<()> {
         let plan = self.passes[pass];
         let (width, height) = self.pass_size(pass);
-        let framebuffer = plan.target.map(|t| self.targets[t].framebuffer);
+        let framebuffer = plan.target.map(|t| self.targets[t].framebuffer(layer));
 
         gl.bind_framebuffer(glow::FRAMEBUFFER, framebuffer);
         gl.viewport(0, 0, width, height);
@@ -781,12 +904,15 @@ impl Engine {
             block.bind(gl);
         }
         for bind in &self.samplers[plan.program] {
-            let texture = match bind.source {
-                TexRef::Attachment(target, attachment) => self.targets[target].textures[attachment],
-                TexRef::Texture(index) => self.textures[index],
+            let (kind, texture) = match bind.source {
+                TexRef::Attachment(target, attachment) => {
+                    let target = &self.targets[target];
+                    (target.bind_target(), target.textures[attachment])
+                }
+                TexRef::Texture(index) => (glow::TEXTURE_2D, self.textures[index]),
             };
             gl.active_texture(glow::TEXTURE0 + bind.unit);
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.bind_texture(kind, Some(texture));
         }
 
         let geometry = &self.geometry[plan.program];

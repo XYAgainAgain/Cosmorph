@@ -3,7 +3,7 @@
    entity-array scene config; layer shaders never output RGB directly. */
 
 import * as THREE from 'three/webgpu';
-import { exp, float, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { exp, float, mix, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { createRng, deriveSeed } from '../core/rng.js';
 import { generateBrightStars } from '../entities/stars.js';
 import { buildBrightStarNodes } from '../shaders/tsl/stars.js';
@@ -398,6 +398,13 @@ export async function createSky2D({
   /* A uniform's JS name becomes its std140 member name in extracted GLSL, and
      two nodes sharing one name collapse into one member with no error at all. */
   const uniformNames = new Set();
+  function claimName(node, name) {
+    if (uniformNames.has(name)) {
+      throw new Error(`Cosmorph: duplicate uniform name "${name}"; it would silently alias.`);
+    }
+    uniformNames.add(name);
+    return node.setName(name);
+  }
   function nameUniforms(bag, k) {
     for (const key of Object.keys(bag)) {
       const v = bag[key];
@@ -406,12 +413,7 @@ export async function createSky2D({
       if (typeof v?.setName !== 'function' || v.name) continue;
       /* `_i` separator, never `__`: GLSL ES reserves double-underscore
          identifiers, so `__k` names failed to link any multi-instance plane. */
-      const name = k === 0 ? key : `${key}_i${k}`;
-      if (uniformNames.has(name)) {
-        throw new Error(`Cosmorph: duplicate uniform name "${name}"; it would silently alias.`);
-      }
-      uniformNames.add(name);
-      v.setName(name);
+      claimName(v, k === 0 ? key : `${key}_i${k}`);
     }
   }
   nameUniforms(U, 0);
@@ -2168,12 +2170,12 @@ export async function createSky2D({
         for (const [ox, oy] of [[-3, -1], [1, -3], [3, 1], [-1, 3]]) {
           occTau = occTau.max(tauAt(skyU.add(vec2(sub.mul(ox), sub.mul(oy)))));
         }
-        occRT = new THREE.RenderTarget(2, 2, occOpts);
+        occRT = new THREE.RenderTarget(2, 2, fadeOn ? { ...occOpts, depth: 2 } : occOpts);
         occScene = fullscreenPass(vec4(occTau, 0.0, 0.0, 1.0));
       }
 
-      /* A fading plane holds both generations as layers of one target, so the
-         blend needs no extra texture bindings and a rebake swaps layers. */
+      /* A fading plane holds both generations as layers of one target, rim and occlusion
+         included, so the blend needs no extra texture bindings and a rebake swaps layers. */
       const planeOpts = fadeOn ? { ...rtOpts, depth: 2 } : rtOpts;
       const rtA = new THREE.RenderTarget(2, 2, planeOpts);
       const rtB = new THREE.RenderTarget(2, 2, planeOpts);
@@ -2224,18 +2226,19 @@ export async function createSky2D({
         for (const bag of by.shape ?? []) {
           rimSum = rimSum.add(shapeTauAndRim(skyU, bag, bag.shpMap, bag.shpOpts).rim);
         }
-        rimRT = new THREE.RenderTarget(2, 2, rtOpts);
+        rimRT = new THREE.RenderTarget(2, 2, fadeOn ? { ...rtOpts, depth: 2 } : rtOpts);
         rimScene = fullscreenPass(vec4(rimSum, 0.0));
       }
 
       builtPlanes.push({
         name: spec.name,
         uDepth,
-        /* 1 is "no previous generation": compose collapses to the current bake. */
-        uFade: uniform(1),
+        /* 1 is "no previous generation": compose collapses to the current bake.
+           Named so the native dumper can drive them per plane. */
+        uFade: claimName(uniform(1), `uPlaneFade${i}`),
         /* Layer holding the generation on screen, and the one the next bake fills */
-        uFront: uniform(0, 'int'),
-        uBack: uniform(1, 'int'),
+        uFront: claimName(uniform(0, 'int'), `uPlaneFront${i}`),
+        uBack: claimName(uniform(1, 'int'), `uPlaneBack${i}`),
         fadeStart: null,
         fadeMs: CROSSFADE_MS,
         rtA,
@@ -2274,13 +2277,18 @@ export async function createSky2D({
         const p = skyPos.sub(U.uCamera).div(vec2(U.uAspect, 1.0))
           .sub(0.5).div(U.uMarginScale).add(0.5);
         const at = vec2(p.x, p.y.oneMinus());
-        /* level() clones the node and drops the name, so it is set last */
-        const oName = (pl) => `texPlaneOcc${builtPlanes.indexOf(pl)}`;
-        let tau = texture(occPlanes[0].occRT.texture, at)
-          .level(float(0)).setName(oName(occPlanes[0])).r;
-        for (const pl of occPlanes.slice(1)) {
-          tau = tau.add(texture(pl.occRT.texture, at).level(float(0)).setName(oName(pl)).r);
-        }
+        /* depth() and level() clone the node and drop the name, so it is set last */
+        const tauOf = (pl) => {
+          const i = builtPlanes.indexOf(pl);
+          const read = (layer, name) => (layer
+            ? texture(pl.occRT.texture, at).depth(layer) : texture(pl.occRT.texture, at))
+            .level(float(0)).setName(name).r;
+          const cur = read(fadeOn ? pl.uFront : null, `texPlaneOcc${i}`);
+          /* Fades with its plane, or a rebake steps every star behind the lane */
+          return fadeOn ? mix(read(pl.uBack, `texPlaneOccPrev${i}`), cur, pl.uFade) : cur;
+        };
+        let tau = tauOf(occPlanes[0]);
+        for (const pl of occPlanes.slice(1)) tau = tau.add(tauOf(pl));
         return exp(tau.negate().mul(WISP_SIGMA));
       };
       const nodes = buildBrightStarNodes(U, {
@@ -2308,11 +2316,13 @@ export async function createSky2D({
          turn it by the incoming generation's delta and the blend would ghost. */
       for (const bag of gxInst) {
         if (!bag.gxSwirl) continue;
-        bag.uGxBakeTev2 = uniform(bag.uGxBakeTev.value);
-        bag.uGxBakeSpinPhase2 = uniform(bag.uGxBakeSpinPhase.value);
+        const prevName = (u) => u.name.replace(/^uGxBake/, 'uGxPrevBake');
+        bag.uGxPrevBakeTev = claimName(uniform(bag.uGxBakeTev.value), prevName(bag.uGxBakeTev));
+        bag.uGxPrevBakeSpinPhase = claimName(
+          uniform(bag.uGxBakeSpinPhase.value), prevName(bag.uGxBakeSpinPhase));
         const view = Object.create(bag);
-        view.uGxBakeTev = bag.uGxBakeTev2;
-        view.uGxBakeSpinPhase = bag.uGxBakeSpinPhase2;
+        view.uGxBakeTev = bag.uGxPrevBakeTev;
+        view.uGxBakeSpinPhase = bag.uGxPrevBakeSpinPhase;
         bag.prevView = view;
       }
     }
@@ -2385,8 +2395,8 @@ export async function createSky2D({
       /* setSize resets the layer count to 1 unless it is passed */
       pl.rtA.setSize(w, h, pl.rtA.depth);
       pl.rtB.setSize(w, h, pl.rtB.depth);
-      pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)));
-      pl.occRT?.setSize(Math.max(1, Math.ceil(w / 4)), Math.max(1, Math.ceil(h / 4)));
+      pl.rimRT?.setSize(Math.max(1, Math.ceil(w / 2)), Math.max(1, Math.ceil(h / 2)), pl.rimRT.depth);
+      pl.occRT?.setSize(Math.max(1, Math.ceil(w / 4)), Math.max(1, Math.ceil(h / 4)), pl.occRT.depth);
       pl.staticRT?.setSize(w, h);
       pl.uFade.value = 1;
       pl.fadeStart = null;
@@ -2505,11 +2515,11 @@ export async function createSky2D({
     sliceJob.band += 1;
     if (sliceJob.band >= SLICE_BANDS) {
       if (pl.rimRT) {
-        renderer.setRenderTarget(pl.rimRT);
+        renderer.setRenderTarget(pl.rimRT, back);
         renderer.render(pl.rimScene, camera);
       }
       if (pl.occRT) {
-        renderer.setRenderTarget(pl.occRT);
+        renderer.setRenderTarget(pl.occRT, back);
         renderer.render(pl.occScene, camera);
       }
       pl.bakedTev = sliceJob.tev;
@@ -2571,8 +2581,8 @@ export async function createSky2D({
       const soft = fadeOn && !pl.dirty;
       if (soft) {
         for (const bag of pl.swirl) {
-          bag.uGxBakeTev2.value = bag.uGxBakeTev.value;
-          bag.uGxBakeSpinPhase2.value = bag.uGxBakeSpinPhase.value;
+          bag.uGxPrevBakeTev.value = bag.uGxBakeTev.value;
+          bag.uGxPrevBakeSpinPhase.value = bag.uGxBakeSpinPhase.value;
         }
       } else if (pl.fadeStart !== null) {
         pl.fadeStart = null;
@@ -2603,11 +2613,11 @@ export async function createSky2D({
       renderer.setRenderTarget(pl.rtB, layer);
       renderer.render(pl.sceneB, camera);
       if (pl.rimRT) {
-        renderer.setRenderTarget(pl.rimRT);
+        renderer.setRenderTarget(pl.rimRT, layer);
         renderer.render(pl.rimScene, camera);
       }
       if (pl.occRT) {
-        renderer.setRenderTarget(pl.occRT);
+        renderer.setRenderTarget(pl.occRT, layer);
         renderer.render(pl.occScene, camera);
       }
       pl.bakedTev = tevHours;
@@ -2761,7 +2771,7 @@ export async function createSky2D({
         mesh: pl.occScene.userData.quad,
         target: pl.occRT,
         targetScale: 0.25,
-        draw: drawTo(pl.occRT, pl.occScene),
+        draw: drawTo(pl.occRT, pl.occScene, front),
       });
     }
     if (!pl.rimScene) return;
@@ -2771,7 +2781,7 @@ export async function createSky2D({
       mesh: pl.rimScene.userData.quad,
       target: pl.rimRT,
       targetScale: 0.5,
-      draw: drawTo(pl.rimRT, pl.rimScene),
+      draw: drawTo(pl.rimRT, pl.rimScene, front),
     });
   });
   if (dust) {
@@ -2872,6 +2882,15 @@ export async function createSky2D({
       /* The dumper needs these driven per frame from this plane's bake clock;
          a static value would freeze the native host's swirl. */
       bakeTevUniforms: pl.swirl.map((bag) => bag.uGxBakeTev.name),
+      /* Crossfade state and the outgoing generation's bake clocks; null without a fade */
+      fade: fadeOn
+        ? {
+          fadeUniform: pl.uFade.name,
+          frontUniform: pl.uFront.name,
+          backUniform: pl.uBack.name,
+          prevBakeTevUniforms: pl.swirl.map((bag) => bag.uGxPrevBakeTev.name),
+        }
+        : null,
       /* Spin pricing for the native scheduler, which builds cadence from scores
          alone: without it a demoted galaxy's plane bakes once and freezes. */
       spin: pl.spinBags.map((bag) => ({
@@ -2881,6 +2900,7 @@ export async function createSky2D({
         rate: bag.uGxSpin.value,
         phaseUniform: bag.uGxSpinPhase.name,
         ...(bag.gxSwirl ? { bakePhaseUniform: bag.uGxBakeSpinPhase.name } : {}),
+        ...(bag.gxSwirl && fadeOn ? { prevBakePhaseUniform: bag.uGxPrevBakeSpinPhase.name } : {}),
         lead: Math.abs(bag.uGxLead.value),
         satRamp: SPIN_SAT_H,
         wrap: bag.uTevWrap.value,

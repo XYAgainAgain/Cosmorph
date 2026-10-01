@@ -16,10 +16,9 @@ import { spinConst, spinWarpUV } from './spin.js';
 const LENS_SMEAR_MIN_PX = 1 / 16;
 const LENS_CHROMA_MIN = 1 / 256;
 
-/* planes: deep → close, built planes only, each { texA, texB, texRim, uDepth,
-   swirl, fade }. RT A is line rgb + summed tau in alpha, RT B is continuum rgb + star
-   amplitude in alpha; `swirl` lists the galaxy bags whose spin this plane
-   carries between rebakes. */
+/* planes: deep → close, built planes only, each { texA, texB, texRim, uDepth, swirl, fade }.
+   RT A is line rgb + summed tau in alpha, RT B is continuum rgb + star amplitude in alpha;
+   `swirl` lists the galaxy bags this plane spins between rebakes, `fade` the outgoing generation. */
 export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust = null }) {
   return Fn(() => {
     const screen = uv();
@@ -43,11 +42,14 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
        parallax transform, then the galaxy's inverse rotation. Sharing the
        center tap's displacement smeared a lens offset of many texels. */
     const spinK = new Map();
-    const spinKPrev = new Map();
-    const tapUV = (pl, screenAt, edge = false, prev = false) => {
+    /* The outgoing generation's terms are rebuilt inside each branch that reads them:
+       a variable first emitted in one branch is out of scope in the next. */
+    const prevK = (pl) => (pl.swirl?.length
+      ? pl.fade.swirlPrev.map((bag, j) => spinConst(bag, spinK.get(pl)[j])) : null);
+    const tapUV = (pl, screenAt, edge = false, kPrev = null) => {
       let t = sampleAt(pl.uDepth, screenAt);
-      const k = (prev ? spinKPrev : spinK).get(pl);
-      const bags = prev ? pl.fade.swirlPrev : pl.swirl;
+      const k = kPrev ?? spinK.get(pl);
+      const bags = kPrev ? pl.fade.swirlPrev : pl.swirl;
       if (k) bags.forEach((bag, j) => { t = spinWarpUV(t, bag, k[j]); });
       /* Clamped after the warp, never before: an edge galaxy has to be able to
          read the overscan margin instead of smearing the outermost texel. */
@@ -81,54 +83,71 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     for (const [i, pl] of planes.entries()) {
       /* Hoisted per plane, not per tap: every uniform-only term of the inverse */
       if (pl.swirl?.length) spinK.set(pl, pl.swirl.map((bag) => spinConst(bag)));
-      if (pl.fade && pl.swirl?.length) {
-        spinKPrev.set(pl, pl.fade.swirlPrev.map((bag, j) => spinConst(bag, spinK.get(pl)[j])));
-      }
       /* Each distinct tap position resolves its uv once; both RTs reuse it */
       const uvC = tapUV(pl, at);
-      /* The outgoing generation gets its own tap: same screen point, its own
-         bake reference, so the two are aligned in sky and only the morph fades. */
-      const uvP = pl.fade ? tapUV(pl, at, false, true) : null;
-
-      const cur = tap(pl, pl.texA, uvC, `texPlaneA${i}`).toVar();
-      /* Only the center tap fades; brief lens-wing ghosting avoids permanently
-         doubling every plane's tap count. */
-      const a = pl.fade
-        ? mix(tap(pl, pl.texA, uvP, `texPrevA${i}`, pl.fade.uBack), cur, pl.fade.uFade).toVar()
-        : cur;
-      const curB = tap(pl, pl.texB, uvC, `texPlaneB${i}`).toVar();
-      const b = pl.fade
-        ? mix(tap(pl, pl.texB, uvP, `texPrevB${i}`, pl.fade.uBack), curB, pl.fade.uFade).toVar()
-        : curB;
+      const a = tap(pl, pl.texA, uvC, `texPlaneA${i}`).toVar();
+      const b = tap(pl, pl.texB, uvC, `texPlaneB${i}`).toVar();
+      /* A settled plane skips the outgoing fetch: at weight 1 the mix is the incoming
+         tap. Same screen point, its own bake reference, so only the morph fades. */
+      if (pl.fade) {
+        If(pl.fade.uFade.lessThan(1.0), () => {
+          const uvP = tapUV(pl, at, false, prevK(pl));
+          a.assign(mix(tap(pl, pl.texA, uvP, `texPrevA${i}`, pl.fade.uBack), a, pl.fade.uFade));
+          b.assign(mix(tap(pl, pl.texB, uvP, `texPrevB${i}`, pl.fade.uBack), b, pl.fade.uFade));
+        });
+      }
       /* A variable first made inside a branch is scoped to it, so the lens
          branches below assign into these, declared out here. */
       taps.push({ a, b, line: warp ? a.rgb.toVar() : a.rgb, bSm: warp ? b.toVar() : b });
     }
 
     if (warp) {
+      /* Lens taps fade with their plane like the center tap, or a swap flips the smear in one frame */
+      const lensTaps = (pl, reads) => {
+        const uvAt = (uvs, pt, k) => {
+          if (!uvs.has(pt)) uvs.set(pt, tapUV(pl, pt, true, k));
+          return uvs.get(pt);
+        };
+        const cur = new Map();
+        const out = reads.map(([tex, pt, name]) => tap(pl, tex, uvAt(cur, pt), name).toVar());
+        if (!pl.fade) return out;
+        If(pl.fade.uFade.lessThan(1.0), () => {
+          const k = prevK(pl);
+          /* Without swirl both generations share a uv, already resolved out here */
+          const prevUV = k ? new Map() : cur;
+          reads.forEach(([tex, pt, name], j) => {
+            const prev = tap(pl, tex, uvAt(prevUV, pt, k), `${name}p`, pl.fade.uBack);
+            out[j].assign(mix(prev, out[j], pl.fade.uFade));
+          });
+        });
+        return out;
+      };
       /* One branch for every plane: away from the critical curve the smear is a
          sliver of a texel, and those pixels pay the center taps only. */
       If(warp.smear.mul(U.uResolution.y).greaterThan(LENS_SMEAR_MIN_PX), () => {
         const tang = warp.tang.mul(warp.smear).toVar();
         for (const [i, pl] of planes.entries()) {
-          const u0 = tapUV(pl, warp.at.add(tang), true);
-          const u1 = tapUV(pl, warp.at.sub(tang), true);
+          const p0 = warp.at.add(tang).toVar();
+          const p1 = warp.at.sub(tang).toVar();
+          const [a0, a1, b0, b1] = lensTaps(pl, [
+            [pl.texA, p0, `texPlaneA${i}s0`], [pl.texA, p1, `texPlaneA${i}s1`],
+            [pl.texB, p0, `texPlaneB${i}s0`], [pl.texB, p1, `texPlaneB${i}s1`],
+          ]);
           /* Tangential 3-tap, weights 2:1:1, as the live compose smears. Whole
              vec4, so the star-amplitude alpha rides its own light's footprint. */
-          const smear3 = (tex, center, tag) => center.mul(2.0)
-            .add(tap(pl, tex, u0, `${tag}${i}s0`))
-            .add(tap(pl, tex, u1, `${tag}${i}s1`)).mul(0.25);
-          taps[i].line.assign(smear3(pl.texA, taps[i].a, 'texPlaneA').rgb);
-          taps[i].bSm.assign(smear3(pl.texB, taps[i].b, 'texPlaneB'));
+          taps[i].line.assign(taps[i].a.mul(2.0).add(a0).add(a1).mul(0.25).rgb);
+          taps[i].bSm.assign(taps[i].b.mul(2.0).add(b0).add(b1).mul(0.25));
         }
       });
       for (const t of taps) t.cont = t.bSm.rgb.toVar();
       If(warp.chroma.greaterThan(LENS_CHROMA_MIN), () => {
         for (const [i, pl] of planes.entries()) {
-          const rOut = tap(pl, pl.texB, tapUV(pl, warp.at.add(warp.disp), true), `texPlaneB${i}cr`).r;
-          const bIn = tap(pl, pl.texB, tapUV(pl, warp.at.sub(warp.disp), true), `texPlaneB${i}cb`).b;
-          taps[i].cont.r.assign(mix(taps[i].cont.r, rOut, warp.chroma));
-          taps[i].cont.b.assign(mix(taps[i].cont.b, bIn, warp.chroma));
+          const [rOut, bIn] = lensTaps(pl, [
+            [pl.texB, warp.at.add(warp.disp).toVar(), `texPlaneB${i}cr`],
+            [pl.texB, warp.at.sub(warp.disp).toVar(), `texPlaneB${i}cb`],
+          ]);
+          taps[i].cont.r.assign(mix(taps[i].cont.r, rOut.r, warp.chroma));
+          taps[i].cont.b.assign(mix(taps[i].cont.b, bIn.b, warp.chroma));
         }
       });
     }
@@ -160,7 +179,15 @@ export function buildBakedComposeNodes({ planes, brightTex, U, lens = null, dust
     let rimRaw = null;
     for (const [i, pl] of planes.entries()) {
       if (!pl.texRim) continue;
-      const rim = lod0(texture(pl.texRim, sampleAt(pl.uDepth, at))).setName(`texRim${i}`).rgb;
+      const rimAt = sampleAt(pl.uDepth, at).toVar();
+      const rimTap = tap(pl, pl.texRim, rimAt, `texRim${i}`).toVar();
+      /* No spin warp on a rim, so both generations read the same uv */
+      if (pl.fade) {
+        If(pl.fade.uFade.lessThan(1.0), () => {
+          rimTap.assign(mix(tap(pl, pl.texRim, rimAt, `texRimPrev${i}`, pl.fade.uBack), rimTap, pl.fade.uFade));
+        });
+      }
+      const rim = rimTap.rgb;
       rimRaw = rimRaw ? rimRaw.add(rim) : rim;
     }
     if (rimRaw) lit = lit.add(scnr(palette(rimRaw)));

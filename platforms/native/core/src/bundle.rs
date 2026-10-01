@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{Error, Result};
 
-pub const ARTIFACT_VERSION: u32 = 1;
+pub const ARTIFACT_VERSION: u32 = 2;
 pub const FORMAT: &str = "cosmorph-bundle";
 
 #[derive(Debug, Deserialize)]
@@ -97,10 +97,18 @@ pub struct TargetSpec {
     pub filter: Filter,
     pub scale: f32,
     pub attachments: usize,
+    /// Array layers, apart from MRT attachments: a crossfading plane keeps its
+    /// outgoing and incoming generations as the two layers of one texture.
+    #[serde(default = "one_layer")]
+    pub layers: usize,
 }
 
 fn linear() -> Filter {
     Filter::Linear
+}
+
+fn one_layer() -> usize {
+    1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -281,10 +289,21 @@ pub enum SamplerSource {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum SamplerKind {
+    #[default]
+    #[serde(rename = "sampler2D")]
+    Sampler2D,
+    #[serde(rename = "sampler2DArray")]
+    Sampler2DArray,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SamplerSpec {
     pub name: String,
+    #[serde(default)]
+    pub kind: SamplerKind,
     pub source: SamplerSource,
 }
 
@@ -403,7 +422,22 @@ pub struct PlaneSpec {
     /// demoted. Empty on manifests dumped before spin existed.
     #[serde(default)]
     pub spin: Vec<SpinSpec>,
+    /// The members that blend this plane's two bake generations. A plane whose
+    /// passes draw into a layered target must carry one.
+    #[serde(default)]
+    pub fade: Option<FadeSpec>,
     pub passes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FadeSpec {
+    pub fade_uniform: String,
+    pub front_uniform: String,
+    pub back_uniform: String,
+    /// `uGxBakeTev` twins holding the outgoing generation's bake clock.
+    #[serde(default)]
+    pub prev_bake_tev_uniforms: Vec<String>,
 }
 
 /// The evolution clock's own wrap; `wrap / CLOCK_H` recovers the scene's
@@ -430,6 +464,9 @@ pub struct SpinSpec {
     pub phase_uniform: String,
     #[serde(default)]
     pub bake_phase_uniform: String,
+    /// The bake phase the outgoing generation was baked at; empty without a fade.
+    #[serde(default)]
+    pub prev_bake_phase_uniform: String,
     /// Saturated core lead, rad.
     pub lead: f32,
     pub sat_ramp: f32,
@@ -680,6 +717,14 @@ impl Bundle {
             if !(t.scale.is_finite() && t.scale > 0.0) {
                 return Err(format!("target '{}' has a non-positive scale {}", t.id, t.scale).into());
             }
+            // At most two layers: the front and back generations of one fade.
+            if t.layers == 0 || t.layers > 2 || (t.layers > 1 && t.attachments != 1) {
+                return Err(format!(
+                    "target '{}' declares {} layer(s) over {} attachment(s); only 1 layer, or 2 over one attachment, is handled",
+                    t.id, t.layers, t.attachments
+                )
+                .into());
+            }
         }
 
         for tex in &m.textures {
@@ -736,8 +781,22 @@ impl Bundle {
                             )
                             .into());
                         }
+                        if (s.kind == SamplerKind::Sampler2DArray) != (t.layers > 1) {
+                            return Err(format!(
+                                "program '{}' sampler '{}' is {:?} but target '{}' has {} layer(s)",
+                                p.id, s.name, s.kind, t.id, t.layers
+                            )
+                            .into());
+                        }
                     }
                     SamplerSource::Texture { texture } => {
+                        if s.kind != SamplerKind::Sampler2D {
+                            return Err(format!(
+                                "program '{}' sampler '{}' reads texture '{texture}' as {:?}; bundled textures are 2D",
+                                p.id, s.name, s.kind
+                            )
+                            .into());
+                        }
                         self.texture(texture).map_err(|e| {
                             Error::from(format!(
                                 "program '{}' sampler '{}': {}",
@@ -810,9 +869,34 @@ impl Bundle {
                 return Err(format!("plane id {} is declared twice", plane.id).into());
             }
             for id in &plane.passes {
-                self.pass(id).map_err(|e| {
+                let pass = self.pass(id).map_err(|e| {
                     Error::from(format!("plane {}: {}", plane.id, e.message()))
                 })?;
+                let layered = match &pass.target {
+                    Some(target) => self.target(target)?.layers > 1,
+                    None => false,
+                };
+                if layered && plane.fade.is_none() {
+                    return Err(format!(
+                        "plane {} bakes '{id}' into a layered target but carries no fade members to pick a layer",
+                        plane.id
+                    )
+                    .into());
+                }
+            }
+        }
+
+        // Only a plane's own bake may write a layered target, or nothing says which layer.
+        for pass in &m.passes {
+            let Some(target) = &pass.target else { continue };
+            if self.target(target)?.layers > 1
+                && !m.planes.iter().any(|p| p.passes.contains(&pass.id))
+            {
+                return Err(format!(
+                    "pass '{}' draws into layered target '{target}' but no plane bakes it",
+                    pass.id
+                )
+                .into());
             }
         }
 
@@ -838,7 +922,7 @@ mod tests {
     /// every cross-reference validate() makes.
     fn manifest(patch: &str) -> String {
         let base = r#"{
-          "format": "cosmorph-bundle", "artifactVersion": 1, "dprPinned": [],
+          "format": "cosmorph-bundle", "artifactVersion": 2, "dprPinned": [],
           "scene": { "identity": "t", "seed": 40451906, "savedT": 1736.27,
                      "evolutionRate": 1, "camera": [0, 0], "maxParallaxPx": 25,
                      "twinkleActive": true, "twinkleRate": 1800, "clockKey": "k" },
@@ -916,9 +1000,9 @@ mod tests {
 
     #[test]
     fn rejects_a_stale_artifact_version() {
-        let json = manifest("\"len\": 12").replace("\"artifactVersion\": 1", "\"artifactVersion\": 2");
+        let json = manifest("\"len\": 12").replace("\"artifactVersion\": 2", "\"artifactVersion\": 1");
         let err = Bundle::load(json.as_bytes(), vec![0u8; 12]).unwrap_err();
-        assert!(err.message().contains("artifactVersion 2"), "{err}");
+        assert!(err.message().contains("artifactVersion 1"), "{err}");
     }
 
     #[test]
@@ -971,5 +1055,55 @@ mod tests {
             program.member("uPalette").unwrap().resolve(2.5625, 1.0).unwrap().len(),
             9
         );
+    }
+
+    #[test]
+    fn a_layered_target_needs_an_array_sampler_and_a_fading_plane() {
+        let layered = manifest("\"len\": 12").replace(
+            r#""scale": 1.0, "attachments": 1 }"#,
+            r#""scale": 1.0, "attachments": 1, "layers": 2 }"#,
+        );
+        let err = Bundle::load(layered.as_bytes(), vec![0u8; 12]).unwrap_err();
+        assert!(err.message().contains("Sampler2D but target 'plane0.a' has 2 layer(s)"), "{err}");
+
+        let arrays = layered.replace(
+            r#"{ "name": "texPlaneA0", "source""#,
+            r#"{ "name": "texPlaneA0", "kind": "sampler2DArray", "source""#,
+        );
+        let baked = arrays.replace(
+            r#"{ "id": "compose", "program": "compose", "target": null, "clear": false }"#,
+            r#"{ "id": "compose", "program": "compose", "target": null, "clear": false },
+               { "id": "plane0.a", "program": "compose", "target": "plane0.a", "clear": true }"#,
+        );
+        let err = Bundle::load(baked.as_bytes(), vec![0u8; 12]).unwrap_err();
+        assert!(err.message().contains("layered target 'plane0.a' but no plane bakes it"), "{err}");
+
+        let owned = baked.replace(r#""passes": ["compose"]"#, r#""passes": ["plane0.a"]"#);
+        let err = Bundle::load(owned.as_bytes(), vec![0u8; 12]).unwrap_err();
+        assert!(err.message().contains("carries no fade members"), "{err}");
+
+        let fading = owned.replace(
+            r#""passes": ["plane0.a"]"#,
+            r#""fade": { "fadeUniform": "uPlaneFade0", "frontUniform": "uPlaneFront0",
+                         "backUniform": "uPlaneBack0" }, "passes": ["plane0.a"]"#,
+        );
+        Bundle::load(fading.as_bytes(), vec![0u8; 12]).expect("a fading plane owns its layered target");
+
+        let flat = manifest("\"len\": 12").replace(
+            r#"{ "name": "texPlaneA0", "source""#,
+            r#"{ "name": "texPlaneA0", "kind": "sampler2DArray", "source""#,
+        );
+        let err = Bundle::load(flat.as_bytes(), vec![0u8; 12]).unwrap_err();
+        assert!(err.message().contains("Sampler2DArray but target 'plane0.a' has 1 layer(s)"), "{err}");
+    }
+
+    #[test]
+    fn three_layers_are_refused() {
+        let json = manifest("\"len\": 12").replace(
+            r#""scale": 1.0, "attachments": 1 }"#,
+            r#""scale": 1.0, "attachments": 1, "layers": 3 }"#,
+        );
+        let err = Bundle::load(json.as_bytes(), vec![0u8; 12]).unwrap_err();
+        assert!(err.message().contains("declares 3 layer(s)"), "{err}");
     }
 }

@@ -10,15 +10,17 @@ use crate::{Error, Result};
 
 pub struct RenderTarget {
     pub id: String,
-    pub framebuffer: glow::Framebuffer,
+    /// One per layer, each attaching that layer of every attachment.
+    pub framebuffers: Vec<glow::Framebuffer>,
     pub textures: Vec<glow::Texture>,
     pub scale: f32,
     pub width: i32,
     pub height: i32,
+    pub layers: usize,
     format: PixelFormat,
 }
 
-/// `(internal format, format)` for `tex_image_2d`; the type is always HALF_FLOAT.
+/// `(internal format, format)` for `tex_image_2d` and `tex_image_3d`; the type is always HALF_FLOAT.
 fn gl_format(format: PixelFormat) -> (i32, u32) {
     match format {
         PixelFormat::Rgba16f => (glow::RGBA16F as i32, glow::RGBA),
@@ -51,6 +53,16 @@ pub fn scaled(span: i32, scale: f32) -> i32 {
 }
 
 impl RenderTarget {
+    /// `TEXTURE_2D_ARRAY` for a layered target, which is also how compose binds it.
+    pub fn bind_target(&self) -> u32 {
+        texture_target(self.layers)
+    }
+
+    /// The framebuffer drawing into `layer`, clamped so a 2D target ignores it.
+    pub fn framebuffer(&self, layer: usize) -> glow::Framebuffer {
+        self.framebuffers[layer.min(self.framebuffers.len() - 1)]
+    }
+
     /// # Safety
     /// Requires a current GL context matching `gl`.
     pub unsafe fn alloc(
@@ -59,75 +71,116 @@ impl RenderTarget {
         span_w: i32,
         span_h: i32,
     ) -> Result<RenderTarget> {
-            let width = scaled(span_w, spec.scale);
-        let height = scaled(span_h, spec.scale);
+        let mut target = RenderTarget {
+            id: spec.id.clone(),
+            framebuffers: Vec::with_capacity(spec.layers),
+            textures: Vec::with_capacity(spec.attachments),
+            scale: spec.scale,
+            width: scaled(span_w, spec.scale),
+            height: scaled(span_h, spec.scale),
+            layers: spec.layers.max(1),
+            format: spec.format,
+        };
+        if let Err(e) = target.build(gl, spec.filter, spec.attachments) {
+            target.delete(gl);
+            return Err(e);
+        }
+        Ok(target)
+    }
 
-        let framebuffer = gl.create_framebuffer().map_err(|e| {
-            Error::from(format!("target '{}' framebuffer: {e}", spec.id))
-        })?;
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
-
-        let (internal, layout) = gl_format(spec.format);
-        let mut textures = Vec::with_capacity(spec.attachments);
-        let mut draw_buffers = Vec::with_capacity(spec.attachments);
-        for i in 0..spec.attachments {
+    unsafe fn build(&mut self, gl: &glow::Context, filter: Filter, attachments: usize) -> Result<()> {
+        let bind = self.bind_target();
+        for i in 0..attachments {
             let texture = gl
                 .create_texture()
-                .map_err(|e| Error::from(format!("target '{}' texture {i}: {e}", spec.id)))?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
+                .map_err(|e| Error::from(format!("target '{}' texture {i}: {e}", self.id)))?;
+            self.textures.push(texture);
+            gl.bind_texture(bind, Some(texture));
+            self.store(gl, texture);
+            set_sampling(gl, bind, filter, Wrap::Clamp);
+        }
+        for layer in 0..self.layers {
+            let framebuffer = gl.create_framebuffer().map_err(|e| {
+                Error::from(format!("target '{}' framebuffer {layer}: {e}", self.id))
+            })?;
+            self.framebuffers.push(framebuffer);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            let mut draw_buffers = Vec::with_capacity(self.textures.len());
+            for (i, texture) in self.textures.iter().enumerate() {
+                let attachment = glow::COLOR_ATTACHMENT0 + i as u32;
+                if self.layers > 1 {
+                    gl.framebuffer_texture_layer(glow::FRAMEBUFFER, attachment, Some(*texture), 0, layer as i32);
+                } else {
+                    gl.framebuffer_texture_2d(glow::FRAMEBUFFER, attachment, glow::TEXTURE_2D, Some(*texture), 0);
+                }
+                draw_buffers.push(attachment);
+            }
+            gl.draw_buffers(&draw_buffers);
+        }
+        self.complete(gl)?;
+        self.clear(gl);
+        Ok(())
+    }
+
+    /// (Re)specifies one texture's storage at the current size.
+    unsafe fn store(&self, gl: &glow::Context, texture: glow::Texture) {
+        let (internal, layout) = gl_format(self.format);
+        gl.bind_texture(self.bind_target(), Some(texture));
+        if self.layers > 1 {
+            gl.tex_image_3d(
+                glow::TEXTURE_2D_ARRAY,
                 0,
                 internal,
-                width,
-                height,
+                self.width,
+                self.height,
+                self.layers as i32,
                 0,
                 layout,
                 glow::HALF_FLOAT,
                 glow::PixelUnpackData::Slice(None),
             );
-            set_sampling(gl, spec.filter, Wrap::Clamp);
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0 + i as u32,
+        } else {
+            gl.tex_image_2d(
                 glow::TEXTURE_2D,
-                Some(texture),
                 0,
+                internal,
+                self.width,
+                self.height,
+                0,
+                layout,
+                glow::HALF_FLOAT,
+                glow::PixelUnpackData::Slice(None),
             );
-            textures.push(texture);
-            draw_buffers.push(glow::COLOR_ATTACHMENT0 + i as u32);
         }
-        gl.draw_buffers(&draw_buffers);
+    }
 
-        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+    unsafe fn complete(&self, gl: &glow::Context) -> Result<()> {
+        for (layer, framebuffer) in self.framebuffers.iter().enumerate() {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*framebuffer));
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                return Err(format!(
+                    "target '{}' layer {layer} is incomplete at {}x{} (status 0x{status:X})",
+                    self.id, self.width, self.height
+                )
+                .into());
+            }
+        }
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-        if status != glow::FRAMEBUFFER_COMPLETE {
-            let target = RenderTarget {
-                id: spec.id.clone(),
-                framebuffer,
-                textures,
-                scale: spec.scale,
-                width,
-                height,
-                format: spec.format,
-            };
-            target.delete(gl);
-            return Err(format!(
-                "target '{}' is incomplete at {width}x{height} (status 0x{status:X})",
-                spec.id
-            )
-            .into());
-        }
+        Ok(())
+    }
 
-        Ok(RenderTarget {
-            id: spec.id.clone(),
-            framebuffer,
-            textures,
-            scale: spec.scale,
-            width,
-            height,
-            format: spec.format,
-        })
+    /// Zeroes every layer. GL leaves fresh storage undefined, and compose mixes
+    /// the idle back layer at weight 0, which still turns a NaN texel into NaN.
+    unsafe fn clear(&self, gl: &glow::Context) {
+        gl.disable(glow::SCISSOR_TEST);
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        for framebuffer in &self.framebuffers {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*framebuffer));
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
     }
 
     /// Reallocates every attachment for a new span. On failure the target's
@@ -144,40 +197,17 @@ impl RenderTarget {
         // Anything already queued would otherwise be blamed on this reallocation.
         let _ = check_errors(gl, "before target reallocation");
 
-        let (internal, layout) = gl_format(self.format);
+        self.width = width;
+        self.height = height;
         for texture in &self.textures {
-            gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                internal,
-                width,
-                height,
-                0,
-                layout,
-                glow::HALF_FLOAT,
-                glow::PixelUnpackData::Slice(None),
-            );
+            self.store(gl, *texture);
         }
-
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
-        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        self.complete(gl)?;
+        self.clear(gl);
         check_errors(
             gl,
             &format!("target '{}' reallocated to {width}x{height}", self.id),
-        )?;
-        if status != glow::FRAMEBUFFER_COMPLETE {
-            return Err(format!(
-                "target '{}' is incomplete at {width}x{height} (status 0x{status:X})",
-                self.id
-            )
-            .into());
-        }
-
-        self.width = width;
-        self.height = height;
-        Ok(())
+        )
     }
 
     /// # Safety
@@ -186,7 +216,17 @@ impl RenderTarget {
         for texture in &self.textures {
             gl.delete_texture(*texture);
         }
-        gl.delete_framebuffer(self.framebuffer);
+        for framebuffer in &self.framebuffers {
+            gl.delete_framebuffer(*framebuffer);
+        }
+    }
+}
+
+fn texture_target(layers: usize) -> u32 {
+    if layers > 1 {
+        glow::TEXTURE_2D_ARRAY
+    } else {
+        glow::TEXTURE_2D
     }
 }
 
@@ -214,14 +254,14 @@ pub unsafe fn upload_texture(
         glow::HALF_FLOAT,
         glow::PixelUnpackData::Slice(Some(data)),
     );
-    set_sampling(gl, spec.filter, spec.wrap);
+    set_sampling(gl, glow::TEXTURE_2D, spec.filter, spec.wrap);
     if spec.mips {
         gl.generate_mipmap(glow::TEXTURE_2D);
     }
     Ok(texture)
 }
 
-unsafe fn set_sampling(gl: &glow::Context, filter: Filter, wrap: Wrap) {
+unsafe fn set_sampling(gl: &glow::Context, target: u32, filter: Filter, wrap: Wrap) {
     let filter = match filter {
         Filter::Linear => glow::LINEAR,
         Filter::Nearest => glow::NEAREST,
@@ -230,8 +270,8 @@ unsafe fn set_sampling(gl: &glow::Context, filter: Filter, wrap: Wrap) {
         Wrap::Clamp => glow::CLAMP_TO_EDGE,
         Wrap::Repeat => glow::REPEAT,
     } as i32;
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, wrap);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, wrap);
+    gl.tex_parameter_i32(target, glow::TEXTURE_MIN_FILTER, filter);
+    gl.tex_parameter_i32(target, glow::TEXTURE_MAG_FILTER, filter);
+    gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_S, wrap);
+    gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_T, wrap);
 }
