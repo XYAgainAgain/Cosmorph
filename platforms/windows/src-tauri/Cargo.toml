@@ -18,8 +18,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Disk-usage profile carried over from RainyDesk, where a default dev profile
-# grew the target dir into the multi-GB range.
+# A default dev profile grows the target dir into the multi-GB range.
 [profile.dev]
 debug = "line-tables-only"
 incremental = false

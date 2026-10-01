@@ -73,10 +73,15 @@ function hiiFlower(U, host, knotN, u) {
   return U.uGxFlowerTint.mul(ha);
 }
 
+/* Pixel density the grain was authored at: 1440 device pixels to the screen's height */
+const GRAN_REF_PX = 1440;
+
 /* Unfiltered lattice speckle in the static disk frame: one hash per cell, no
    interpolation, so it reads as unresolved stars rather than as noise. */
 function granulation(U, pn) {
-  const cell = floor(pn.mul(U.uGxGranFreq)).toVar();
+  /* Higher-resolution screens refine the lattice, or each cell resolves into a hard block */
+  const freq = U.uGxGranFreq.mul(U.uPxPerUnit.div(GRAN_REF_PX).max(1.0)).toVar();
+  const cell = floor(pn.mul(freq)).toVar();
   const h = hash1(vec3(cell, 19.0).add(U.uGxOff).add(CELL_BIAS)).toVar();
   const th = U.uGxGranTh.toVar();
   return {

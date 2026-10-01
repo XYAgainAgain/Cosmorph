@@ -16,10 +16,9 @@ tauri = { version = "2", features = [] }
 # Version must track tauri's own gtk stack; a mismatch makes gtk_window() types foreign.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
-x11rb = "0.13"
+x11rb = "0.14"
 
-# Disk-usage profile carried over from RainyDesk, where a default dev profile
-# grew the target dir into the multi-GB range.
+# A default dev profile grows the target dir into the multi-GB range.
 [profile.dev]
 debug = "line-tables-only"
 incremental = false
